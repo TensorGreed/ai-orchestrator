@@ -16,8 +16,9 @@
  * read before paging, so totals never count rows from other projects.
  *
  * Someone who can read a workflow only through a share with them (not as a
- * member of its project, not through a project share, not an admin) sees only
- * their own runs of it: the runs they started and the runs whose sessions are
+ * member of its project, not through a share to a project they are a member
+ * of, not an admin) sees only their own runs of it, in every isolation mode
+ * (the global role `role` isolation lends a non-member does not count): the runs they started and the runs whose sessions are
  * theirs (`session_owner`). Who started a run is its starter's user id (v80;
  * migration 80 set it on the runs recorded before), never an email
  * (`runOwnedBy`). Anyone else's run answers 404, as a missing one.
@@ -73,6 +74,11 @@ export interface RunAccessDeps {
   listProjectIds: () => Promise<string[]>;
   canAccessWorkflow: (user: SafeUser, workflow: { id: string; projectId?: string }, permission: RunPermission) => Promise<boolean>;
   canInProject: (user: SafeUser, projectId: string, permission: RunPermission) => Promise<boolean>;
+  /**
+   * The same from a membership only (global admins too), never from the global role `role` isolation lends a
+   * non-member: whether someone with a person share has more than the share. Absent: `canInProject`.
+   */
+  canInProjectAsMember?: (user: SafeUser, projectId: string, permission: RunPermission) => Promise<boolean>;
   /** Workflow ids shared (read or execute) to a project. */
   listWorkflowIdsSharedToProject: (projectId: string) => Promise<string[]>;
   /** Does a project with this id exist? The default project always does. */
@@ -179,31 +185,46 @@ export function createRunAccess(deps: RunAccessDeps): RunAccess {
   // One membership lookup per project instead of one (or two) per workflow:
   // a workflow is readable when its project is, or when it is shared to a
   // project the user can read. Same rule as `canAccessWorkflow`, batched.
-  // `ownOnly` holds the readable workflows the user reads only through a share with them.
+  // `ownOnly` holds the readable workflows the user reads only through a share with them: a workflow shared with the
+  // person is theirs to see in full only through a membership (its project's, or one of a project it is shared to),
+  // never through the global role `role` isolation lends a non-member, so a person share means the same in both modes.
   const classifyWorkflows = async (user: SafeUser): Promise<{ full: string[]; ownOnly: string[] }> => {
-    const verdicts = new Map<string, boolean>();
-    const canRead = async (projectId: string) => {
-      let verdict = verdicts.get(projectId);
-      if (verdict === undefined) {
-        verdict = await deps.canInProject(user, projectId, "workflow:read");
-        verdicts.set(projectId, verdict);
-      }
-      return verdict;
+    const cached = (check: (user: SafeUser, projectId: string, permission: RunPermission) => Promise<boolean>) => {
+      const verdicts = new Map<string, boolean>();
+      return async (projectId: string) => {
+        let verdict = verdicts.get(projectId);
+        if (verdict === undefined) {
+          verdict = await check(user, projectId, "workflow:read");
+          verdicts.set(projectId, verdict);
+        }
+        return verdict;
+      };
     };
-    const shared = new Set<string>();
-    for (const projectId of await deps.listProjectIds()) {
-      if (!await canRead(projectId)) continue;
-      for (const workflowId of await deps.listWorkflowIdsSharedToProject(projectId)) shared.add(workflowId);
-    }
+    const canRead = cached(deps.canInProject);
+    const canReadAsMember = deps.canInProjectAsMember ? cached(deps.canInProjectAsMember) : canRead;
     // v78 — shared with the person: readable, unless an API key limits the request to other projects.
     const sharedToUser = new Set(deps.listWorkflowIdsSharedToUser ? await deps.listWorkflowIdsSharedToUser(user.id) : []);
+    const shared = new Set<string>();
+    const sharedToMemberProject = new Set<string>();
+    for (const projectId of await deps.listProjectIds()) {
+      if (!await canRead(projectId)) continue;
+      const workflowIds = await deps.listWorkflowIdsSharedToProject(projectId);
+      for (const workflowId of workflowIds) shared.add(workflowId);
+      if (workflowIds.some((workflowId) => sharedToUser.has(workflowId)) && await canReadAsMember(projectId)) {
+        for (const workflowId of workflowIds) sharedToMemberProject.add(workflowId);
+      }
+    }
     const scopeAllows = (projectId: string) => !user.projectScope || user.projectScope.includes(projectId);
     const full: string[] = [];
     const ownOnly: string[] = [];
     for (const workflow of await deps.listWorkflows()) {
       const projectId = workflow.projectId ?? DEFAULT_PROJECT_ID;
-      if (shared.has(workflow.id) || await canRead(projectId)) full.push(workflow.id);
-      else if (sharedToUser.has(workflow.id) && scopeAllows(projectId)) ownOnly.push(workflow.id);
+      if (sharedToUser.has(workflow.id) && scopeAllows(projectId)) {
+        if (sharedToMemberProject.has(workflow.id) || await canReadAsMember(projectId)) full.push(workflow.id);
+        else ownOnly.push(workflow.id);
+      } else if (shared.has(workflow.id) || await canRead(projectId)) {
+        full.push(workflow.id);
+      }
     }
     return { full, ownOnly };
   };

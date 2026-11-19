@@ -66,11 +66,11 @@ function builtInTemplateId(fileName: string): string {
 
 /**
  * Templates that should appear first in the gallery and carry a "Featured"
- * badge. Used to promote hero use cases (the VS Code coding-agent flow is the
- * canonical L2M+IDE story) above the long tail of demo flows.
+ * badge. The first card a new user sees must run without setup: the MCP agent
+ * quickstart runs on the built-in Echo model and the in-process sample MCP server.
  */
 export const FEATURED_TEMPLATE_IDS = new Set<string>([
-  builtInTemplateId("vscode-l2m-coding-agent-flow.json")
+  builtInTemplateId("mcp-agent-quickstart-flow.json")
 ]);
 
 export async function seedWorkflowsIfEmpty(store: Store, workspaceRoot: string): Promise<void> {

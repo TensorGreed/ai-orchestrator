@@ -17,6 +17,8 @@ description: "Install and run L2M locally: prerequisites (Node.js 24+, pnpm 10+)
 pnpm install
 ```
 
+pnpm may warn that it ignored build scripts (for example `onnxruntime-node`, `esbuild`, `keytar`, `@vscode/vsce-sign`): that is safe to ignore. They belong to optional parts (the names service, the VS Code extension's packaging) and are not needed to run L2M.
+
 ## Configure env
 
 ```bash
@@ -40,7 +42,15 @@ pnpm dev
 - API: `http://localhost:4000`
 - Web UI: `http://localhost:5173`
 
-Sign in, then pick a starter from **Home**: each one runs on built-in sample data with no model or key. See [Starter templates](./starter-templates.md).
+## Sign in and run your first workflow
+
+1. Open `http://localhost:5173`. Sign in with the admin account `.env` sets up on first start: **Email** is `BOOTSTRAP_ADMIN_EMAIL` and **Password** is `BOOTSTRAP_ADMIN_PASSWORD` (`admin@example.com` and `ChangeThisPassword123!` in `.env.example`; change them before anyone else can reach the studio). Click **Sign in**.
+2. The **Welcome to L2M** window opens. Click **Run a starter**.
+3. **Templates** opens on the **Starters**: small workflows that run on built-in sample data, with no model, key or server. On **CSV to JSON: parse, sort and total**, click **Use Template**. The new workflow opens in the editor.
+4. Click **Run workflow** (the play button at the top right). The run takes a moment; the status next to the workflow name then reads **last run** with the number of nodes that ran, all **ok**.
+5. Double-click a node, such as **Units per region**, to see what went in and what came out.
+
+Closed the welcome window? **Home** lists the same **Starters** first: click **Use** on one. To build your own, click **Describe it…** on **Home** (it needs a model key, added under **Secrets**) or **New workflow**. See [Starter templates](./starter-templates.md).
 
 ## Run the released images
 

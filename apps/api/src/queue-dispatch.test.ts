@@ -350,6 +350,20 @@ run("queue dispatch across replicas on one Postgres database", () => {
     expect((await api.app.inject({ method: "GET", url: "/api/cluster", headers: { cookie: admin } })).json()).toMatchObject({ executionDispatch: "queue" });
   }, 120_000);
 
+  it("a webhook answered On Received replies 202 at once and its run goes to a worker", async () => {
+    const { worker, api, builder } = await cluster({ background: true });
+    await save(
+      api,
+      builder,
+      chain("wf-ack", [node("hook", "webhook_input", { path: "ack-hook", method: "POST", authMode: "none", responseMode: "onReceived" }), node("out", "output", { responseTemplate: "acked" })])
+    );
+    const response = await api.app.inject({ method: "POST", url: "/webhook/ack-hook", payload: { user_prompt: "hello" } });
+    expect(response.statusCode, response.body).toBe(202);
+    const { executionId } = response.json<{ executionId: string }>();
+    await until(async () => (await api.store.getExecutionHistory(executionId))?.status === "success", "the acknowledged run to finish");
+    expect(worker.ran).toContain(executionId);
+  }, 60_000);
+
   it("a failing node's node_complete has the inline event's shape when relayed: error, category, remediation, retryable", async () => {
     const { worker, api, inline, builder } = await cluster();
     // Nothing listens on port 1: the call fails at once with a classified network error.

@@ -118,6 +118,41 @@ describe("ExecutionHistoryPanel", () => {
     });
   });
 
+  describe("error workflow runs", () => {
+    const expanded = (extra: Partial<ExecutionHistoryDetail>, onOpenExecution = vi.fn()) =>
+      makeProps({
+        executionHistoryTotal: 1,
+        executionHistoryItems: [makeSummary({ status: "error" })],
+        expandedExecutionIds: ["ex-1"],
+        executionDetailById: { "ex-1": { ...makeSummary({ status: "error" }), input: {}, output: null, nodeResults: [], ...extra } },
+        onOpenExecution
+      });
+
+    it("a failed run names the run its error workflow made, and opens it", async () => {
+      const user = userEvent.setup();
+      const onOpenExecution = vi.fn();
+      const link = { executionId: "3f2a9c1e-0000-5000-8000-000000000000", workflowId: "wf-handler", workflowName: "Handler", status: "success" };
+      render(<ExecutionHistoryPanel {...expanded({ errorWorkflowRun: link }, onOpenExecution)} />);
+      expect(screen.getByTestId("execution-run-link")).toHaveTextContent("Error workflow ran → run 3f2a9c1e Handler · success");
+      await user.click(screen.getByRole("button", { name: "run 3f2a9c1e" }));
+      expect(onOpenExecution).toHaveBeenCalledWith(link.executionId, "wf-handler");
+    });
+
+    it("an error workflow's run names the failed run it handled", () => {
+      render(
+        <ExecutionHistoryPanel
+          {...expanded({ triggerType: "error", errorWorkflowSource: { executionId: "abcdef12-3456", workflowId: "wf-1", workflowName: "Workflow 1", status: "error" } })}
+        />
+      );
+      expect(screen.getByTestId("execution-run-link")).toHaveTextContent("Error workflow for → run abcdef12 Workflow 1 · error");
+    });
+
+    it("says nothing for a run with neither link", () => {
+      render(<ExecutionHistoryPanel {...expanded({})} />);
+      expect(screen.queryByTestId("execution-run-link")).toBeNull();
+    });
+  });
+
   it("shows empty state when no executions are present", () => {
     render(<ExecutionHistoryPanel {...makeProps()} />);
     expect(screen.getByText("No executions yet. Run a workflow from the editor to populate history.")).toBeInTheDocument();

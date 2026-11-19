@@ -155,6 +155,12 @@ describe("status", () => {
     expect((await run({ type: "status", expect: "error" }, ctx({ candidate: facts({ status: "error" }) }))).pass).toBe(true);
     expect((await run({ type: "status" }, ctx({ candidate: null }))).pass).toBe(false);
   });
+
+  it("an expected partial passes on a success whose failures were handled (runs that ended partial before)", async () => {
+    const handled = facts({ status: "success", nodes: [{ nodeId: "call", nodeType: "http_request", status: "error", durationMs: 3, errorCategory: "http_status" }] });
+    expect(await run({ type: "status", expect: "partial" }, ctx({ candidate: handled }))).toMatchObject({ pass: true, reason: "finished with success (its failures were handled)" });
+    expect((await run({ type: "status", expect: "partial" }, ctx({ candidate: facts({ status: "success" }) }))).pass).toBe(false);
+  });
 });
 
 describe("no_new_guard_blocks", () => {

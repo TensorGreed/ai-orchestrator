@@ -222,6 +222,10 @@ Every node has the same error settings, under **More** in its inspector.
   **Branches route in the loop** on; in a Loop without it, a failure there fails the Loop (use the Loop's Error
   output). A replayed run (the release gate) gives a recorded failure's Error
   output only `error`, without `status` or the original `errorCategory`.
+- A failure that was handled (sent to a connected Error output, caught by a Try/Catch, or passed on by **Continue
+  Anyway**) does not fail the run: the node shows **handled** in amber, the run summary counts it as ok
+  ("4 of 4 ok · 1 handled") and the run ends `success`. Its result keeps `status: "error"` with `handled: true`.
+  A failure with nothing to handle it still fails the run.
 
 ### HTTP Request status codes
 

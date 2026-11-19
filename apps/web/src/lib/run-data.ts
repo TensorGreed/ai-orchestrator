@@ -1,6 +1,14 @@
 import type { NodeExecutionResult, WorkflowExecutionResult } from "@ai-orchestrator/shared";
 
 /**
+ * The status a node's result is shown with: "handled" for a failure the run handled (routed to the node's Error
+ * output, caught by a Try/Catch or continued past), shown amber, not red; otherwise the result's own status.
+ */
+export function displayNodeStatus(result: { status: string; handled?: boolean }): string {
+  return result.status === "error" && result.handled === true ? "handled" : result.status;
+}
+
+/**
  * Run data shown in the editor, derived only from the execution record (what run history stores).
  * Nothing here fetches or reconstructs values: masked or placeholder values stay as they were stored.
  */
@@ -261,7 +269,7 @@ export function canvasRunPreview(
   if (attachment) {
     return { usedBy: `used by ${labelFor(attachment.usedByNodeId)} as its ${portName(attachment.handle)}` };
   }
-  const parts: string[] = [result.status];
+  const parts: string[] = [displayNodeStatus(result)];
   const passes = options.passes && options.passes.length > 1 ? options.passes : undefined;
   if (passes) {
     // A Loop body node runs once per item: count every pass and all their items, not only the last pass.

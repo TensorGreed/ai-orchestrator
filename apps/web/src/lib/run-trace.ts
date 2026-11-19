@@ -1,4 +1,5 @@
 import { NODE_ACTIVITY_LIMIT } from "@ai-orchestrator/shared";
+import { displayNodeStatus } from "./run-data";
 import type { NodeActivityEvent, NodeExecutionResult, WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import type {
   StreamLlmDeltaEvent,
@@ -34,14 +35,26 @@ export function buildExecutionErrorResult(workflowId: string, message: string): 
   };
 }
 
+/**
+ * A run the editor is following as it happens carries `live` (its status is "partial" until the final result replaces
+ * it). A finished run never has it, so a finished "partial" run is not shown as in progress.
+ */
+export type LiveExecutionResult = WorkflowExecutionResult & { live?: true };
+
+/** Whether this result is a run still being followed (not a finished one). */
+export function isLiveExecutionResult(result: WorkflowExecutionResult | null | undefined): boolean {
+  return (result as LiveExecutionResult | null | undefined)?.live === true;
+}
+
 export function createPartialExecutionResult(workflowId: string, at: string): WorkflowExecutionResult {
   return {
     workflowId,
     status: "partial",
     startedAt: at,
     completedAt: at,
-    nodeResults: []
-  };
+    nodeResults: [],
+    live: true
+  } as LiveExecutionResult;
 }
 
 export function upsertNodeResult(nodeResults: NodeResults, next: NodeResults[number]): NodeResults {
@@ -79,8 +92,9 @@ export function applyNodeStartToExecutionResult(
     ...current,
     status: "partial",
     completedAt: event.startedAt,
-    nodeResults: upsertNodeResult(current.nodeResults, nextNodeResult)
-  };
+    nodeResults: upsertNodeResult(current.nodeResults, nextNodeResult),
+    live: true
+  } as LiveExecutionResult;
 }
 
 export function applyNodeCompleteToExecutionResult(
@@ -100,6 +114,7 @@ export function applyNodeCompleteToExecutionResult(
     errorCategory: event.errorCategory,
     errorRemediation: event.errorRemediation,
     retryable: event.retryable,
+    ...(event.handled === true ? { handled: true } : {}),
     activity: existing?.activity,
     liveText: undefined
   };
@@ -108,8 +123,9 @@ export function applyNodeCompleteToExecutionResult(
     ...current,
     status: "partial",
     completedAt: event.completedAt,
-    nodeResults: upsertNodeResult(current.nodeResults, nextNodeResult)
-  };
+    nodeResults: upsertNodeResult(current.nodeResults, nextNodeResult),
+    live: true
+  } as LiveExecutionResult;
 }
 
 /**
@@ -429,7 +445,7 @@ export function createTraceStreamHandlers<S extends string = string>(options: Tr
         const base = reset || !current ? createPartialExecutionResult(workflowId, event.completedAt) : current;
         return applyNodeCompleteToExecutionResult(base, event);
       });
-      const status = normalizeStatus(event.status);
+      const status = normalizeStatus(displayNodeStatus(event));
       if (status) setStatus(event.nodeId, status);
     },
     onNodeProgress: (event) => {

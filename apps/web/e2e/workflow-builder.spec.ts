@@ -23,7 +23,7 @@ const ollamaAttempts: string[] = [];
 let workflowIdsBefore = new Set<string>();
 let mockServer: http.Server;
 let mockBaseUrl = "";
-const modelRequests: Array<{ messages: Array<{ role: string }> }> = [];
+const modelRequests: Array<{ messages: Array<{ role: string; content?: unknown }> }> = [];
 
 const draft = {
   name: "Order intake",
@@ -50,7 +50,7 @@ const draft = {
 };
 
 /** The model's turns, by how many tool results the request already holds: catalog, details, a broken draft, a fixed one. */
-const turns = [
+let turns: Array<{ name: string; arguments: Record<string, unknown> }> = [
   { name: "list_node_types", arguments: { query: "webhook set http" } },
   { name: "get_node_types", arguments: { types: ["webhook_input", "set_node", "http_request"] } },
   { name: "submit_workflow", arguments: { ...draft, edges: [{ source: "incoming_order", target: "nowhere" }] } },
@@ -94,7 +94,7 @@ test.beforeAll(async ({ browser }) => {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
-      const parsed = JSON.parse(body || "{}") as { messages?: Array<{ role: string }> };
+      const parsed = JSON.parse(body || "{}") as { messages?: Array<{ role: string; content?: unknown }> };
       modelRequests.push({ messages: parsed.messages ?? [] });
       const toolResults = (parsed.messages ?? []).filter((message) => message.role === "tool").length;
       const turn = turns[toolResults];
@@ -189,4 +189,54 @@ test("an empty canvas offers it too, and inserting makes another new draft", asy
   await expect(page.locator(".react-flow__node")).toHaveCount(3);
   const after = await workflowIds();
   expect(after.size).toBe(idsBefore.size + 1);
+});
+
+/** The validation's Describe-it build (B3): the model's first draft answers the webhook with {{response}}. */
+const classify = (body: string) => ({
+  name: "Classify customer messages",
+  description: "Classifies a customer message and replies with the category and a summary",
+  nodes: [
+    { id: "incoming", type: "webhook_input", label: "Incoming message", config: { path: "classify", method: "POST" } },
+    { id: "build_prompt", type: "prompt_template", label: "Build prompt", config: { template: "Classify as billing, shipping or other: {{webhook.message}}" } },
+    { id: "classify", type: "llm_call", label: "Classify", config: {} },
+    { id: "reply", type: "webhook_response", label: "Reply", config: { statusCode: 200, bodyTemplate: body } }
+  ],
+  edges: [
+    { source: "incoming", target: "build_prompt" },
+    { source: "build_prompt", target: "classify" },
+    { source: "classify", target: "reply" }
+  ]
+});
+
+test("a draft that reads a field its step does not output goes back to the model and comes back fixed", async () => {
+  turns = [
+    { name: "submit_workflow", arguments: classify("{{response}}") },
+    { name: "submit_workflow", arguments: classify("{{answer}}") }
+  ];
+  modelRequests.length = 0;
+  await sidebarItem("Home").click();
+  await page.getByRole("button", { name: "Describe it…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Describe a workflow" });
+  await expect(dialog.getByTestId("builder-model")).toContainText("mock-builder");
+  await dialog
+    .getByLabel("What should the workflow do?")
+    .fill(
+      "When a webhook receives a JSON body with a customer message in the field 'message', use an LLM to classify it as billing, shipping or other, and reply to the webhook caller with JSON {\"category\": ..., \"summary\": one sentence}."
+    );
+  await dialog.getByRole("button", { name: "Build" }).click();
+  await expect(dialog.getByRole("region", { name: "Preview" })).toBeVisible({ timeout: 30_000 });
+  expect(modelRequests).toHaveLength(2);
+  const feedback = JSON.stringify(modelRequests[1]!.messages.filter((message) => message.role === "tool").at(-1)?.content);
+  expect(feedback).toContain("{{response}}");
+  expect(feedback).toContain("outputs answer");
+  await page.screenshot({ path: path.join(SHOT_DIR, "after-06-classify-repaired.png") });
+
+  const idsBefore = await workflowIds();
+  await dialog.getByRole("button", { name: "Create draft" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.locator(".react-flow__node").filter({ hasText: "Reply" })).toBeVisible();
+  const workflowId = [...(await workflowIds())].find((id) => !idsBefore.has(id));
+  expect(workflowId).toBeTruthy();
+  const saved = (await (await page.request.get(`/api/workflows/${workflowId}`)).json()) as { nodes: Array<{ id: string; config: Record<string, unknown> }> };
+  expect(saved.nodes.find((node) => node.id === "reply")?.config.bodyTemplate).toBe("{{answer}}");
 });

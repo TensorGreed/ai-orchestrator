@@ -1,5 +1,6 @@
 import type { NodeDefinition } from "./types";
 import { withCredentialSpecs } from "./node-credentials";
+import { withOutputSpecs } from "./node-outputs";
 import { CONTENT_SAFETY_CATEGORY_VALUES, OUTPUT_GUARDRAIL_CHECK_VALUES } from "./guard";
 import { AGENT_DEFAULT_MAX_ITERATIONS } from "./agent-tools";
 
@@ -45,7 +46,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
         replayToleranceSeconds: { type: "number" },
         idempotencyEnabled: { type: "boolean" },
         idempotencyHeaderName: { type: "string" },
-        responseMode: { type: "string", enum: ["onReceived", "lastNode", "responseNode"] },
+        // Unset or "auto": the reply of the last Webhook Response that ran, else the last node's output.
+        responseMode: { type: "string", enum: ["auto", "onReceived", "lastNode", "responseNode"] },
         responseCode: { type: "number" },
         responseHeaders: { type: "object" },
         responseBody: { type: "string" },
@@ -67,7 +69,6 @@ const baseNodeDefinitions: NodeDefinition[] = [
       replayToleranceSeconds: 300,
       idempotencyEnabled: false,
       idempotencyHeaderName: "idempotency-key",
-      responseMode: "lastNode",
       responseCode: 200
     }
   },
@@ -2785,7 +2786,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
         properties: { question: { type: "string" } },
         required: ["question"]
       },
-      authMode: "public"
+      // A new node's REST route asks for a bearer token (pick its secret); nodes saved without authMode stay public.
+      authMode: "bearer"
     }
   },
   {
@@ -3454,7 +3456,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
   }
 ];
 
-export const nodeDefinitions: NodeDefinition[] = withCredentialSpecs(baseNodeDefinitions);
+export const nodeDefinitions: NodeDefinition[] = withOutputSpecs(withCredentialSpecs(baseNodeDefinitions));
 
 export function getNodeDefinition(type: string): NodeDefinition | undefined {
   return nodeDefinitions.find((node) => node.type === type);

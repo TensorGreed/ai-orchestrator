@@ -131,7 +131,7 @@ describe("Human Approval in a Loop body that routes branches", () => {
       expect(waiting[0]!.loopPass).toEqual({ loopNodeId: "loop", pass: index + 1, of: 3 });
     }
 
-    expect(result.status).toBe("partial");
+    expect(result.status).toBe("success");
     // Nothing ran twice: one prep per item, pay for the approved ones, the Error output for the rejected one.
     expect(results(result, "prep").map((entry) => (entry.output as Record<string, unknown>).amount)).toEqual([1, 2, 3]);
     expect(results(result, "pay").filter((entry) => entry.status === "success").map((entry) => (entry.output as Record<string, unknown>).paid)).toEqual([1, 3]);
@@ -165,7 +165,7 @@ describe("Human Approval in a Loop body that routes branches", () => {
 
   it("treats a timeout as a rejection, as at the top level", async () => {
     const { result } = await runWithDecisions(payFlow({ routeBranches: true }, "[1]"), ["timeout"]);
-    expect(result.status).toBe("partial");
+    expect(result.status).toBe("success");
     expect(statuses(result, "ask")).toEqual(["error"]);
     expect((results(result, "ask")[0]!.output as Record<string, unknown>).timedOut).toBe(true);
     expect(results(result, "refused").filter((entry) => entry.status === "success")).toHaveLength(1);
@@ -221,7 +221,7 @@ describe("Human Approval in a Loop body that routes branches", () => {
     );
     const { result, paused } = await runWithDecisions(workflow, ["approve", "reject", "approve"]);
     expect(paused.map((state) => resolvePendingApproval(state).details?.message)).toEqual(["Pay 1?", "Pay 2?", "Pay 3?"]);
-    expect(result.status).toBe("partial");
+    expect(result.status).toBe("success");
     expect(results(result, "cell").filter((entry) => entry.status === "success").map((entry) => (entry.output as Record<string, unknown>).cell)).toEqual([1, 3]);
     expect(results(result, "no").filter((entry) => entry.status === "success").map((entry) => (entry.output as Record<string, unknown>).no)).toEqual([2]);
 
@@ -298,7 +298,7 @@ describe("a rejection in a Loop body is never passed by", () => {
     expect(result.status).toBe("waiting_approval");
     expect(paused.at(-1)!.dataLabels?.endorsements ?? []).toEqual([]);
     result = await resumeWorkflowExecution({ executionId: "exec-endorse", state: paused.at(-1)!, decision: "approve", actedBy: "lead@example.com" }, deps(paused));
-    expect(result.status).toBe("partial");
+    expect(result.status).toBe("success");
     // Each approved pass recorded who approved it.
     expect(results(result, "ask").map((entry) => entry.endorsement?.approvedBy ?? null)).toEqual(["lead@example.com", null, "lead@example.com"]);
   });
@@ -349,7 +349,7 @@ describe("replay of a run that asked inside a Loop", () => {
     const paused: WorkflowExecutionState[] = [];
     const replayed = await executeWorkflow({ workflow, executionId: "exec-replay" }, { ...deps(paused), replayNodeHook: buildReplayPlan(workflow, recorded).hook });
     expect(paused).toHaveLength(0);
-    expect(replayed.status).toBe("partial");
+    expect(replayed.status).toBe("success");
     expect(statuses(replayed, "ask")).toEqual(["success", "error", "success"]);
     expect(results(replayed, "pay").filter((entry) => entry.status === "success").map((entry) => (entry.output as Record<string, unknown>).paid)).toEqual([1, 3]);
     expect(results(replayed, "refused").filter((entry) => entry.status === "success").map((entry) => (entry.output as Record<string, unknown>).refused)).toEqual([2]);

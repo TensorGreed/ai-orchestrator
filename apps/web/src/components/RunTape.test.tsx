@@ -81,4 +81,25 @@ describe("RunTape", () => {
     expect(row.getAttribute("title")).toContain("pass 2 of 3");
     expect(buildTapeLanes(runResult({ status: "success" }), meta).lanes[0]!.pass).toBeUndefined();
   });
+
+  it("counts the nodes that ran, not a Loop body's lanes per pass", () => {
+    const at = "2026-01-01T00:00:00.000Z";
+    const result: WorkflowExecutionResult = {
+      workflowId: "wf",
+      status: "success",
+      startedAt: at,
+      completedAt: at,
+      // The validation's 6-node workflow: Schedule, HTTP, Filter, Loop, Set (two passes), Merge.
+      nodeResults: ["schedule", "http", "filter", "set", "set", "loop", "merge"].map((nodeId) => ({ nodeId, status: "success" as const, startedAt: at, completedAt: at, durationMs: 1 }))
+    };
+    render(<RunTape executionResult={result} nodeMetaById={meta} />);
+    expect(document.querySelector(".run-tape-head > span")).toHaveTextContent("· 6 nodes ·");
+    expect(within(screen.getByRole("table", { name: "Run tape" })).getAllByRole("row")).toHaveLength(7);
+  });
+
+  it("shows a handled failure as handled, not failed", () => {
+    const lanes = buildTapeLanes(runResult({ status: "error", error: "HTTP 503", handled: true }), meta).lanes;
+    expect(lanes[0]!.status).toBe("handled");
+    expect(buildTapeLanes(runResult({ status: "error", error: "HTTP 503" }), meta).lanes[0]!.status).toBe("error");
+  });
 });

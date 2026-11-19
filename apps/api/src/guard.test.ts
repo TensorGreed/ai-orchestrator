@@ -789,3 +789,60 @@ describe("model boundary (Phase 12 coverage)", () => {
     expect(events.some((event) => event.placement === "retrieval" && event.effectiveAction === "block" && event.shadow === false)).toBe(true);
   });
 });
+
+describe("the built-in Redact personal data rule set", () => {
+  it("is seeded read-only next to the default, and a Content Rules node that picks it redacts names, emails and phones", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    const listed = (await call(context, "GET", "/api/guard/profiles", builder.cookie)).json<{ profiles: Array<{ id: string; name: string; builtIn: boolean }> }>().profiles;
+    expect(listed.find((profile) => profile.id === "redact-personal-data")).toMatchObject({ name: "Redact personal data", builtIn: true });
+    expect(listed.find((profile) => profile.id === "default")).toMatchObject({ builtIn: true });
+
+    // Read-only and reserved, as the default is.
+    expect((await call(context, "DELETE", "/api/guard/profiles/redact-personal-data", admin.cookie)).statusCode).toBe(409);
+    expect((await call(context, "POST", "/api/guard/profiles", admin.cookie, { document: strictProfile("redact-personal-data") })).statusCode).toBe(409);
+
+    // The validation's run, with one pick instead of a duplicated rule set.
+    await context.store.upsertWorkflow(guardWorkflow("wf-redact", { profileId: "redact-personal-data" }));
+    const run = (await call(context, "POST", "/api/workflows/wf-redact/execute", builder.cookie, { user_prompt: `My name is Dr. Ana Diaz and my email is ${EMAIL}, phone +1 415 555 0134` })).json<RunResult>();
+    expect(run.status, JSON.stringify(run).slice(0, 400)).toBe("success");
+    const prompt = String(run.nodeResults.find((entry) => entry.nodeId === "guard")!.output!.user_prompt);
+    expect(prompt).toContain("[REDACTED:person_name]");
+    expect(prompt).toContain("[REDACTED:email]");
+    expect(prompt).toContain("[REDACTED:phone]");
+    expect(prompt).not.toContain("Diaz");
+    expect(prompt).not.toContain(EMAIL);
+
+    // Seeding again (a restart, or a second instance) adds nothing.
+    await new GuardService(context.store, context.secretService, { autoApply: false }).ensureBuiltIns();
+    const versions = (await call(context, "GET", "/api/guard/profiles/redact-personal-data/versions", builder.cookie)).json<{ versions: unknown[] }>().versions;
+    expect(versions).toHaveLength(1);
+  });
+
+  it("leaves a stored rule set that already has its id alone", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-guard-preset-"));
+    const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
+    try {
+      await store.insertGuardProfile({
+        id: "redact-personal-data",
+        name: "Ours",
+        description: null,
+        builtIn: false,
+        document: strictProfile("redact-personal-data", "Ours"),
+        hash: "ours",
+        note: null,
+        createdBy: null
+      });
+      const logged: string[] = [];
+      const secrets = new SecretService(store, crypto.randomBytes(32).toString("base64"));
+      await new GuardService(store, secrets, { autoApply: false, logger: (message) => logged.push(message) }).ensureBuiltIns();
+      expect(await store.getGuardProfile("redact-personal-data")).toMatchObject({ name: "Ours", builtIn: false });
+      expect(await store.getGuardProfile("default")).toMatchObject({ builtIn: true });
+      expect(logged.join("\n")).toMatch(/already has the built-in id 'redact-personal-data'/);
+    } finally {
+      await store.close();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});

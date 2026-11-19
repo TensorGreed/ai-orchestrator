@@ -59,6 +59,7 @@ export enum ErrorCategory {
  *   - nodeType    for NODE_CONFIG to mention the affected node kind
  *   - secretRef   for PROVIDER_AUTH to hint at the named secret
  *   - timeoutMs   for WORKFLOW_TIMEOUT to repeat the configured value
+ *   - handled     for HTTP_STATUS: the failure was handled, so the hint does not say to connect the Error output
  */
 export function remediationForCategory(
   category: ErrorCategory,
@@ -103,10 +104,16 @@ export function remediationForCategory(
       if (status === 401 || status === 403) {
         return "The server refused the request's credentials. Check the node's Authorization secret and headers.";
       }
+      // `handled`: the failure already went to the node's Error output (or was caught or continued past).
+      const handled = meta.handled === true;
       if (status === 429 || (status !== undefined && status >= 500)) {
-        return "The server is busy or failing. The node retries the statuses on its retry list; raise Retries on Failure, or connect the node's Error output to handle it.";
+        return handled
+          ? "The server is busy or failing. The node retries the statuses on its retry list; raise Retries on Failure to try longer."
+          : "The server is busy or failing. The node retries the statuses on its retry list; raise Retries on Failure, or connect the node's Error output to handle it.";
       }
-      return "The server answered with an error status. Check the URL, method, headers and body; connect the node's Error output to handle it, or turn off \"Fail on HTTP error status\" to read the response yourself.";
+      return handled
+        ? "The server answered with an error status. Check the URL, method, headers and body, or turn off \"Fail on HTTP error status\" to read the response yourself."
+        : "The server answered with an error status. Check the URL, method, headers and body; connect the node's Error output to handle it, or turn off \"Fail on HTTP error status\" to read the response yourself.";
     }
     case ErrorCategory.WORKFLOW_TIMEOUT: {
       const timeout = typeof meta.timeoutMs === "number" ? meta.timeoutMs : undefined;
@@ -130,7 +137,8 @@ export function remediationForCategory(
       return "An admin limited which models this deployment or project may call, and this model is not on the list. Pick an allowed model on the node, or ask an admin to add it under Security → Models.";
     case ErrorCategory.UNKNOWN:
     default:
-      return "Open the execution log for the full error and stack trace. If the message looks like a bug, please file an issue at github.com/TensorGreed/ai-orchestrator/issues with the workflow JSON and the failing node ID.";
+      // Most unknown errors are an ordinary setting to fix (a missing sub-workflow, a wrong id): no bug report.
+      return "The error above usually names what to change: open the node and fix that field or value. Runs keeps the full error of every step.";
   }
 }
 

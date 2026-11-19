@@ -621,7 +621,10 @@ export async function duplicateWorkflow(
  */
 export async function fetchWorkflowBuilderStatus(projectId?: string) {
   const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
-  return apiRequest<{ enabled: boolean; defaultModel?: { providerId: string; model: string } }>(`/api/workflow-builder${query}`);
+  // `secretRef` names the saved credential the default model uses (its id only, never the key).
+  return apiRequest<{ enabled: boolean; defaultModel?: { providerId: string; model: string; secretRef?: { secretId: string } } }>(
+    `/api/workflow-builder${query}`
+  );
 }
 
 /** Describe-it builder: a description in, a workflow draft preview out (nothing is saved). */
@@ -751,6 +754,8 @@ export interface StreamNodeCompleteEvent {
   errorCategory?: string;
   errorRemediation?: string;
   retryable?: boolean;
+  /** The failure was handled (routed to the Error output, caught or continued past). */
+  handled?: boolean;
 }
 
 export interface StreamLlmDeltaEvent {
@@ -1441,6 +1446,18 @@ export interface ExecutionHistoryDetail extends ExecutionHistorySummary {
   traceId?: string | null;
   /** A link to the run's trace in the operator's backend (L2M_OTEL_TRACE_URL_TEMPLATE); absent unless set. */
   traceUrl?: string;
+  /** A failed run: the run its error workflow made, when there is one you may see. */
+  errorWorkflowRun?: ExecutionRunLink;
+  /** An error workflow's run (trigger type `error`): the failed run it handled, when you may see it. */
+  errorWorkflowSource?: ExecutionRunLink;
+}
+
+/** Another run named from a run's record. */
+export interface ExecutionRunLink {
+  executionId: string;
+  workflowId: string;
+  workflowName: string;
+  status: string;
 }
 
 export async function fetchExecutions(input?: {
@@ -2898,7 +2915,9 @@ export async function deleteKnowledgeBaseApi(id: string) {
 export async function uploadKnowledgeBaseDocument(id: string, payload: {
   filename?: string;
   kind?: DocumentKind;
-  content: string;
+  /** Text; or `contentBase64`, the file's bytes (a PDF), whose bytes decide what it is. */
+  content?: string;
+  contentBase64?: string;
   sourceId?: string;
   chunking?: ChunkOptions;
   csv?: { textColumn?: string; metadataColumns?: string[] };
@@ -2909,6 +2928,11 @@ export async function uploadKnowledgeBaseDocument(id: string, payload: {
     documentsLoaded: number;
     chunksInserted: number;
     dimensions: number;
+    kind?: DocumentKind | "pdf";
+    /** A PDF's page count. */
+    pageCount?: number;
+    /** What was left out (scanned pages, pages past the limits). */
+    notice?: string;
   }>(`/api/knowledge-bases/${encodeURIComponent(id)}/upload`, {
     method: "POST",
     body: JSON.stringify(payload)
@@ -2935,6 +2959,8 @@ export async function deleteKnowledgeBaseSource(id: string, sourceId: string) {
 export async function searchKnowledgeBase(id: string, query: string, topK = 5) {
   return apiRequest<{
     query: string;
+    /** How the search ranked: hybrid (keyword and vector) for the built-in Token embedder, vector otherwise. */
+    mode?: "vector" | "hybrid";
     results: Array<{
       id: string;
       text: string;
@@ -2944,6 +2970,9 @@ export async function searchKnowledgeBase(id: string, query: string, topK = 5) {
         chunkIndex?: number;
         sourceId?: string | null;
         similarityScore?: number;
+        /** A PDF chunk's page (1-based). */
+        page?: number;
+        retrieval?: { mode?: string; rrfScore?: number };
       };
     }>;
   }>(`/api/knowledge-bases/${encodeURIComponent(id)}/search`, {
@@ -2966,6 +2995,8 @@ export interface TemplateDependency {
   kind: TemplateDependencyKind;
   label: string;
   envVar?: string;
+  /** A model or embedder that runs only with that provider's API key. */
+  needsKey?: boolean;
 }
 
 export interface TemplateListItem {
@@ -3004,10 +3035,12 @@ export async function fetchTemplate(id: string) {
   return apiRequest<TemplateListItem & { workflowJson: string }>(`/api/templates/${id}`);
 }
 
-export async function useTemplate(templateId: string) {
+export async function useTemplate(templateId: string, options: { projectId?: string } = {}) {
   // `companions`: the workflows the template brought along (a sub-workflow it calls), created next to it.
+  // The new workflow goes into `projectId` (the project open in the studio); without one, the default project.
   return apiRequest<{ workflowId: string; name: string; companions?: Array<{ workflowId: string; name: string }> }>(`/api/templates/${templateId}/use`, {
-    method: "POST"
+    method: "POST",
+    ...(options.projectId ? { body: JSON.stringify({ projectId: options.projectId }) } : {})
   });
 }
 

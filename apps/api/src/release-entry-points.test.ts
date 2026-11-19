@@ -294,7 +294,7 @@ function routeBlock(source: string, routePath: string): string {
 describe("every run names its release channel", () => {
   // Phase 13.1 — runs started through the dispatcher (inline or on a queue worker) name their channel in the spec's
   // `run`; the two places that run a spec (executeRunSpec, and a worker's dispatched job) forward that `run` as it is.
-  const markers = ["runWorkflowExecution({", "runDispatcher.run(", "runDispatcher.fire(", "= await acceptSlackEvent("];
+  const markers = ["runWorkflowExecution({", "runDispatcher.run(", "runDispatcher.fire(", "runDispatcher.start(", "= await acceptSlackEvent("];
   const allCalls = sourceFiles().flatMap((file) => markers.flatMap((marker) => callArguments(read(file), marker).map((text) => ({ file, text }))));
   const forwardsSpec = (text: string) => /^runWorkflowExecution\(\{\s*\.\.\.run,/.test(text);
   const calls = allCalls.filter((entry) => !forwardsSpec(entry.text));
@@ -311,7 +311,8 @@ describe("every run names its release channel", () => {
     // Eval run, executions replay (for those who may edit), replay sandbox.
     expect(channels.filter((value) => value === '"draft"').length).toBe(3);
     const computed = [...new Set(channels.filter((value) => value !== '"draft"' && value !== '"production"'))].sort();
-    expect(computed).toEqual(['executeChannel.channel', 'isTestRoute ? "draft" : "production"', 'mayEdit ? "draft" : "production"', 'retryChannel', 'state.releaseChannel === "production" ? "production" : "draft"'].sort());
+    // `channel`: an error workflow's run takes the failed run's channel.
+    expect(computed).toEqual(['channel', 'executeChannel.channel', 'isTestRoute ? "draft" : "production"', 'mayEdit ? "draft" : "production"', 'retryChannel', 'state.releaseChannel === "production" ? "production" : "draft"'].sort());
   });
 });
 

@@ -616,7 +616,10 @@ describe("switchedModelProvider", () => {
   });
 
   it("clears Echo's placeholder model when leaving it, and keeps the rest for other switches", () => {
-    expect(switchedModelProvider({ providerId: "echo", model: "echo" }, "openai")).toEqual({ providerId: "openai", model: "" });
+    // Leaving Echo: the new provider's default model in place of Echo's placeholder ("echo", or "demo" in templates).
+    expect(switchedModelProvider({ providerId: "echo", model: "echo" }, "openai")).toEqual({ providerId: "openai", model: "gpt-4o-mini" });
+    expect(switchedModelProvider({ providerId: "echo", model: "demo" }, "anthropic")).toMatchObject({ providerId: "anthropic", model: "claude-sonnet-5-5" });
+    expect(switchedModelProvider({ providerId: "echo", model: "demo" }, "openai_compatible")).toEqual({ providerId: "openai_compatible", model: "" });
     expect(switchedModelProvider({ providerId: "openai", model: "gpt-4o", baseUrl: "https://x/v1" }, "anthropic")).toEqual({
       providerId: "anthropic",
       model: "gpt-4o",
@@ -729,5 +732,55 @@ describe("NodeInspector run data", () => {
     unmount();
     render(<NodeInspector {...makeProps({ executionResult: runResult, showRuntimeInspection: true, nodeLabels })} />);
     expect(screen.getByRole("dialog", { name: "Inspect User Prompt" })).toHaveClass("insp-split");
+  });
+});
+
+describe("a model node's label and the other agents' models", () => {
+  const modelNode = (label: string, provider: Record<string, unknown>): Node<EditorNodeData> =>
+    ({ id: "sup_model", type: "workflowNode", position: { x: 0, y: 0 }, data: { label, nodeType: "llm_call", config: { provider } } }) as Node<EditorNodeData>;
+
+  it("a label that names the provider follows a provider change; a name the person gave is kept (B14)", async () => {
+    const onSave = vi.fn();
+    const { unmount } = render(<NodeInspector {...makeProps({ node: modelNode("Chat Model (echo)", { providerId: "echo", model: "demo" }), onSave })} />);
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "anthropic");
+    expect(screen.getByLabelText("Node name")).toHaveValue("Chat Model (anthropic)");
+    unmount();
+    render(<NodeInspector {...makeProps({ node: modelNode("Classifier", { providerId: "echo", model: "demo" }), onSave })} />);
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "anthropic");
+    expect(screen.getByLabelText("Node name")).toHaveValue("Classifier");
+  });
+
+  it("offers one click to put the model on every agent's chat model, and saves with them", async () => {
+    const onSave = vi.fn();
+    const peers = [
+      { id: "res_model", label: "Researcher Chat (echo)", provider: { providerId: "echo", model: "demo" } },
+      { id: "cmp_model", label: "Computer Chat (echo)", provider: { providerId: "echo", model: "demo" } }
+    ];
+    render(<NodeInspector {...makeProps({ node: modelNode("Supervisor Chat Model (echo)", { providerId: "echo", model: "demo" }), onSave, agentModelPeers: peers })} />);
+    // Same model everywhere: nothing to offer.
+    expect(screen.queryByTestId("use-model-for-all-agents")).toBeNull();
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "anthropic");
+    const offer = await screen.findByTestId("use-model-for-all-agents");
+    expect(offer).toHaveTextContent("2 other agents use another model.");
+    await userEvent.click(screen.getByRole("button", { name: "Use for all agents in this workflow" }));
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(onSave.mock.calls[0]![0]).toMatchObject({
+      label: "Supervisor Chat Model (anthropic)",
+      config: { provider: { providerId: "anthropic" } },
+      applyModelTo: ["res_model", "cmp_model"]
+    });
+  });
+
+  it("makes no offer on a model node that is not an agent's, or in a read-only view", async () => {
+    render(
+      <NodeInspector
+        {...makeProps({
+          node: modelNode("Chat", { providerId: "anthropic", model: "claude-x" }),
+          agentModelPeers: [{ id: "x", label: "X", provider: { providerId: "echo", model: "demo" } }],
+          readOnlyReason: "You can only view this workflow."
+        })}
+      />
+    );
+    expect(screen.queryByTestId("use-model-for-all-agents")).toBeNull();
   });
 });

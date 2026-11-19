@@ -461,14 +461,17 @@ export class RunDispatcher {
   /**
    * `fire` in two steps, for a caller that answers someone before an inline run ends (a Slack event): resolves once
    * the run is admitted and either queued (or found already queued) or started in this process. A refusal (a full
-   * pool, a failed enqueue) is thrown before it resolves; an inline run's outcome is `done`.
+   * pool, a failed enqueue) is thrown before it resolves; an inline run's outcome is `done`. `admitted`: the caller
+   * checked the budgets already (a webhook answered at once), so `admit` is not asked again. `recordQueued`: a queued
+   * run is recorded as running before it is enqueued (and as failed when the enqueue fails), so the id is in Runs at
+   * once, as `run` does.
    */
   async start(
     spec: DispatchedRunSpec,
-    options: { pool: string; queueItemId?: string; enforceBackpressure?: boolean }
+    options: { pool: string; queueItemId?: string; enforceBackpressure?: boolean; admitted?: boolean; recordQueued?: boolean }
   ): Promise<{ queued: true; deduplicated: boolean } | { queued: false; refused?: BudgetExceededError; done: Promise<FireOutcome> }> {
     try {
-      await this.deps.admit?.(spec);
+      if (!options.admitted) await this.deps.admit?.(spec);
     } catch (error) {
       // 12.6 — nobody waits on a fired run: a budget refusal is recorded as a failed run with the reason. `refused`
       // tells a polling trigger not to count what it fired as delivered.
@@ -482,10 +485,17 @@ export class RunDispatcher {
     }
     // A fire on behalf of an outside caller (a Slack event) is refused when the pool is full, like a run() is.
     if (options.enforceBackpressure) await this.deps.checkBackpressure(options.pool);
-    const added = await this.deps.enqueue(spec, {
-      pool: options.pool,
-      ...(options.queueItemId ? { queueItemId: options.queueItemId, dedupeWindowMs: FIRE_DEDUPE_WINDOW_MS } : {})
-    });
+    if (options.recordQueued) await this.deps.recordQueued(spec);
+    let added: boolean;
+    try {
+      added = await this.deps.enqueue(spec, {
+        pool: options.pool,
+        ...(options.queueItemId ? { queueItemId: options.queueItemId, dedupeWindowMs: FIRE_DEDUPE_WINDOW_MS } : {})
+      });
+    } catch (error) {
+      if (options.recordQueued) await this.deps.recordNotQueued(spec, `The run could not be queued: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
     if (!added && options.queueItemId) {
       this.deps.onDeduplicated?.(spec, options.queueItemId);
       return { queued: true, deduplicated: true };

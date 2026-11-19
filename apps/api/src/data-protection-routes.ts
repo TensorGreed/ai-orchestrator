@@ -215,7 +215,8 @@ export function registerDataProtectionRoutes(deps: DataProtectionRoutesDeps): vo
     }
     const listed = await store.listExecutionHistory({ workflowId: parsed.data.workflowId, page: 1, pageSize: SUBJECT_REF_PREVIEW_RUNS });
     const runs = [];
-    for (const item of listed.items) {
+    // Only runs the person may see: someone with the workflow only through a person share previews their own runs.
+    for (const item of await runAccess.filterRuns(user, listed.items)) {
       const run = await store.getExecutionHistory(item.id);
       if (!run) continue;
       runs.push({

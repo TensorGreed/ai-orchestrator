@@ -14,11 +14,15 @@ import {
   type WorkflowBuilderModel,
   type WorkflowBuilderResult
 } from "@ai-orchestrator/shared";
+import { browserTimeZone } from "../lib/new-node-config";
 import { buildWorkflowFromDescription, fetchSecrets, fetchWorkflowBuilderStatus, type SecretListItem } from "../lib/api";
 
 const MODEL_STORAGE_KEY = "l2m:builder-model";
 const storageKey = (userId?: string) => (userId ? `${MODEL_STORAGE_KEY}:${userId}` : MODEL_STORAGE_KEY);
 const BASE_URL_PROVIDERS = new Set(["openai_compatible", "azure_openai", "ollama"]);
+
+/** Providers whose key the server's environment can hold (the others need none or take a saved credential). */
+const KEYED_BUILDER_PROVIDERS: ReadonlySet<string> = new Set(["openai", "anthropic", "gemini", "azure_openai"]);
 
 /**
  * The model this person chose under "More" in this browser, if any (a provider, model, base URL and secret id; never
@@ -146,7 +150,7 @@ export function WorkflowBuilderDialog({
   const [prompt, setPrompt] = useState("");
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   const [override, setOverride] = useState<WorkflowBuilderModel | null>(() => readStoredBuilderModel(userId));
-  const [serverDefault, setServerDefault] = useState<{ providerId: string; model: string } | null>(null);
+  const [serverDefault, setServerDefault] = useState<DefaultModelProvider | null>(null);
   const [loadedSecrets, setLoadedSecrets] = useState<SecretListItem[] | null>(null);
   const buildAbort = useRef<AbortController | null>(null);
   const [saving, setSaving] = useState(false);
@@ -193,10 +197,12 @@ export function WorkflowBuilderDialog({
   }, [projectId]);
 
   const secrets = loadedSecrets ?? studioSecrets;
-  const defaultModel: DefaultModelProvider =
-    serverDefault && (serverDefault.providerId !== studioDefault.providerId || serverDefault.model !== studioDefault.model)
-      ? serverDefault
-      : studioDefault;
+  // The server's answer is the model and the credential a build uses: once it is in, it wins over the studio's guess.
+  const defaultModel: DefaultModelProvider = serverDefault ?? studioDefault;
+  // With no credential picked, a hosted model's key comes from the server's environment.
+  const noCredentialLabel =
+    !override && KEYED_BUILDER_PROVIDERS.has(defaultModel.providerId) && !defaultModel.secretRef ? "The server's key" : "None (or the server's key)";
+  const chosenSecretId = (override ?? defaultModel).secretRef?.secretId ?? "";
   const model: { providerId: string; model: string } = override ?? defaultModel;
   const building = phase.kind === "building";
 
@@ -235,12 +241,14 @@ export function WorkflowBuilderDialog({
     const controller = new AbortController();
     buildAbort.current = controller;
     const sent = overrideToSend();
+    const timeZone = browserTimeZone();
     try {
       const result = await buildWorkflowFromDescription(
         {
           prompt: text,
           ...(projectId ? { projectId } : {}),
-          ...(sent ? { model: sent } : {})
+          ...(sent ? { model: sent } : {}),
+          ...(timeZone ? { timeZone } : {})
         },
         controller.signal
       );
@@ -452,11 +460,13 @@ export function WorkflowBuilderDialog({
                     </label>
                     <select
                       id={secretId}
-                      value={(override ?? defaultModel).secretRef?.secretId ?? ""}
+                      value={chosenSecretId}
                       disabled={building}
                       onChange={(event) => updateOverride({ secretRef: event.target.value ? { secretId: event.target.value } : undefined })}
                     >
-                      <option value="">None (or the server's key)</option>
+                      <option value="">{noCredentialLabel}</option>
+                      {/* The server's pick may be a credential this list does not show (another project's): name it anyway. */}
+                      {chosenSecretId && !secrets.some((secret) => secret.id === chosenSecretId) ? <option value={chosenSecretId}>Saved credential</option> : null}
                       {secrets.map((secret) => (
                         <option key={secret.id} value={secret.id}>
                           {secret.name} ({secret.provider})

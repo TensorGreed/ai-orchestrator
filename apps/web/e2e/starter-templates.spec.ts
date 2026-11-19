@@ -206,4 +206,10 @@ test("the webhook starter's production URL answers not found until its trigger i
   const on = await page.request.post(url, { data: { first_name: "Ada", last_name: "Lovelace", email: "ADA@example.com", plan: "enterprise" } });
   expect(on.status()).toBe(200);
   expect(await on.text()).toContain("Ada Lovelace");
+  // The validation's repro: the caller gets the Webhook Response's body, though the Run result node runs after it.
+  const repro = await page.request.post(url, { data: { first_name: "Grace", last_name: "Hopper", email: "G@x.com", orders: 12 } });
+  expect(repro.status()).toBe(200);
+  expect(await repro.json()).toEqual({ customer: "Grace Hopper", email: "g@x.com", vip: true });
+  const testRoute = await page.request.post(`/webhook-test/${String(hookConfig.path)}`, { data: { first_name: "Grace", last_name: "Hopper", email: "G@x.com", orders: 12 } });
+  expect(await testRoute.json()).toEqual({ customer: "Grace Hopper", email: "g@x.com", vip: true });
 });

@@ -108,6 +108,57 @@ describe("saving a draft", () => {
     expect(body.issues.find((issue) => issue.code === "missing_output_node")?.severity).toBe("warning");
   });
 
+  it("notes a public webhook, form or MCP tool after a save, and nothing once it asks for a token or is off", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context);
+    const open = hookFlow({
+      nodes: [
+        ...hookFlow().nodes,
+        { id: "form", type: "form_trigger", name: "Form", position, config: { path: "draft-form", fields: [{ name: "q", type: "text" }] } },
+        { id: "tool", type: "mcp_server_trigger", name: "Tool", position, config: { path: "draft-tool", toolName: "lookup", authMode: "public" } }
+      ]
+    });
+    expect((await context.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie }, payload: open })).statusCode).toBe(200);
+    const validate = async () =>
+      (await context.app.inject({ method: "POST", url: "/api/workflows/wf-hook-draft/validate", headers: { cookie }, payload: {} })).json() as {
+        valid: boolean;
+        issues: Array<{ code: string; nodeId?: string; severity?: string; message: string }>;
+      };
+    const body = await validate();
+    expect(body.valid).toBe(true);
+    const notes = body.issues.filter((issue) => issue.code === "public_entry");
+    expect(notes.map((issue) => issue.nodeId).sort()).toEqual(["form", "hook", "tool"]);
+    for (const note of notes) expect(note.severity).toBe("warning");
+    expect(notes.find((issue) => issue.nodeId === "tool")?.message).toMatch(/^Public MCP tool/);
+
+    const secret = await context.secretService.createSecret({ name: "tool token", provider: "mcp_server", value: "tok-123456789" });
+    const closed = structuredClone(open);
+    closed.nodes = closed.nodes.map((node) =>
+      node.id === "tool"
+        ? { ...node, config: { ...node.config, authMode: "bearer", secretRef: { secretId: secret.secretId } } }
+        : node.id === "form"
+          ? { ...node, config: { ...node.config, active: false } }
+          : node.id === "hook"
+            ? { ...node, config: { ...node.config, authMode: "bearer_token", authHeaderName: "authorization", secretRef: { secretId: secret.secretId } } }
+            : node
+    );
+    expect((await context.app.inject({ method: "PUT", url: "/api/workflows/wf-hook-draft", headers: { cookie }, payload: closed })).statusCode).toBe(200);
+    expect((await validate()).issues.filter((issue) => issue.code === "public_entry")).toEqual([]);
+  });
+
+  it("an MCP trigger that asks for a bearer token before its secret is picked refuses calls with 401", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context);
+    const flow = hookFlow({
+      nodes: [{ id: "tool", type: "mcp_server_trigger", name: "Tool", position, config: { path: "draft-bearer-tool", toolName: "lookup", authMode: "bearer" } }],
+      edges: []
+    });
+    expect((await context.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie }, payload: flow })).statusCode).toBe(200);
+    const call = await context.app.inject({ method: "POST", url: "/api/mcp-server/draft-bearer-tool/invoke", headers: { authorization: "Bearer anything" }, payload: { arguments: {} } });
+    expect(call.statusCode).toBe(401);
+    expect(call.json()).toMatchObject({ code: "token_not_set" });
+  });
+
   it("saves unfinished node settings, which validate still lists and a run still refuses", async () => {
     const context = await createTestContext();
     const cookie = await login(context);
@@ -556,5 +607,31 @@ describe("a workflow stored with an invalid errorConfig", () => {
     const fixed = stored();
     fixed.nodes[1]!.errorConfig = { continueOnFail: true };
     expect((await context.app.inject({ method: "PUT", url: "/api/workflows/wf-hook-draft", headers: { cookie }, payload: fixed })).statusCode).toBe(200);
+  });
+});
+
+describe("export", () => {
+  it("numbers the file with the newest saved version, as the version history and the Publish dialog do", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context);
+    const workflow = {
+      id: "wf-export-version",
+      name: "Export version",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [{ id: "out", type: "output", name: "Out", position: { x: 0, y: 0 }, config: {} }],
+      edges: []
+    };
+    const created = await context.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie }, payload: workflow });
+    expect(created.statusCode, created.body).toBeLessThan(300);
+    const updated = await context.app.inject({ method: "PUT", url: "/api/workflows/wf-export-version", headers: { cookie }, payload: { ...workflow, name: "Export version 2" } });
+    expect(updated.statusCode, updated.body).toBe(200);
+    const versions = (await context.app.inject({ method: "GET", url: "/api/workflows/wf-export-version/versions", headers: { cookie } })).json<{ versions: Array<{ version: number }> }>().versions;
+    const newest = Math.max(...versions.map((entry) => entry.version));
+    expect(newest).toBeGreaterThan(1);
+    const exported = await context.app.inject({ method: "GET", url: "/api/workflows/wf-export-version/export", headers: { cookie } });
+    const file = JSON.parse(exported.json<{ json: string }>().json) as { workflowVersion: number; workflow: { workflowVersion: number } };
+    expect(file.workflowVersion).toBe(newest);
+    expect(file.workflow.workflowVersion).toBe(newest);
   });
 });

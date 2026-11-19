@@ -21,6 +21,8 @@ import {
   WORKFLOW_SCHEMA_VERSION,
   isReservedNodeId,
   legacyBehaviours,
+  newNodeBaseConfig,
+  publicEntryMessage,
   nodeDefinitions,
   upgradeToNewBehaviour,
   type LLMProviderConfig,
@@ -33,6 +35,7 @@ import {
   type WorkflowEdge,
   type WorkflowNode
 } from "@ai-orchestrator/shared";
+import { unknownTemplatePaths } from "./template-paths";
 import { saveBlockingIssues, unfinishedDraftIssues, validateWorkflowGraph } from "./validation";
 
 /** Outputs of the nodes that route to more than one place (the `sourceHandle` of an edge leaving them). */
@@ -192,6 +195,7 @@ export function builderNodeCatalog(query?: string): Array<Record<string, unknown
       const outputs = definition.type === "switch_node" ? ["<each case label>", "default"] : BUILDER_BRANCH_OUTPUTS[definition.type];
       const ports = BUILDER_ATTACHMENT_PORTS[definition.type];
       const attach = attachedAs(definition.type);
+      const outputFields = definition.outputs?.fields.map((entry) => entry.name) ?? [];
       return {
         type: definition.type,
         label: definition.label,
@@ -199,6 +203,7 @@ export function builderNodeCatalog(query?: string): Array<Record<string, unknown
         description: shorten(definition.description, 160),
         ...(definition.category === "Input" ? { trigger: true } : {}),
         ...(outputs ? { outputs } : {}),
+        ...(outputFields.length > 0 ? { outputFields } : {}),
         ...(ports ? { attachmentPorts: ports.map((port) => port.handle) } : {}),
         ...(attach ? { attaches: ATTACHMENT_ONLY_TYPES.has(definition.type) ? `only as ${attach}` : `also as ${attach}` } : {})
       };
@@ -240,6 +245,8 @@ export function builderNodeDetails(types: readonly string[]): { nodeTypes: Array
       description: definition.description,
       configSchema: withoutCredentials(definition.configSchema, []),
       exampleConfig: example,
+      ...(definition.outputs?.fields.length ? { outputFields: definition.outputs.fields.map((entry) => ({ name: entry.name, description: entry.description })) } : {}),
+      ...(definition.outputs?.note ? { outputNote: definition.outputs.note } : {}),
       ...(definition.type === "switch_node"
         ? { outputs: "one output per case, named by the case's label (or `case_<index>`), plus `default`" }
         : BUILDER_BRANCH_OUTPUTS[definition.type]
@@ -271,6 +278,8 @@ export interface BuilderDraftOptions {
   projectId?: string;
   /** The model the draft's model nodes start on (the same as a new LLM Call node in the editor). */
   nodeModel?: LLMProviderConfig;
+  /** The person's time zone: a Schedule Trigger the model gave none starts in it. */
+  timeZone?: string;
 }
 
 export interface BuilderDraftCheck {
@@ -280,6 +289,11 @@ export interface BuilderDraftCheck {
   issues: WorkflowBuilderIssue[];
   /** Unfinished settings: the draft still saves, and the editor lists them. */
   unfinished: WorkflowBuilderIssue[];
+  /**
+   * The `{{ }}` paths that read a field no earlier step outputs (also in `issues`). Sent back for repair; on the last
+   * submission a draft whose only problems are these is accepted with them listed as unfinished.
+   */
+  pathIssues?: WorkflowBuilderIssue[];
   notes: string[];
 }
 
@@ -347,8 +361,11 @@ export function checkBuilderDraft(raw: unknown, options: BuilderDraftOptions): B
 
   const nodes: WorkflowNode[] = [];
   const ids = new Set<string>();
+  /** The settings the model wrote on each node (the rest are the node's example values). */
+  const givenKeys = new Map<string, Set<string>>();
   const removedCredentials: string[] = [];
   const removedAdminKeys: string[] = [];
+  const scheduleIds: string[] = [];
   const removedAddresses: string[] = [];
   let modelChanged = false;
   rawNodes!.forEach((entry, index) => {
@@ -380,12 +397,20 @@ export function checkBuilderDraft(raw: unknown, options: BuilderDraftOptions): B
       issues.push({ message: `node '${id}': config must be an object`, nodeId: id });
       return;
     }
-    const sample = structuredClone(definition.sampleConfig ?? {}) as Record<string, unknown>;
+    // The base is what a node added in the editor starts with: example values blanked, a schedule switched off.
+    const sample = newNodeBaseConfig(definition.type, definition.sampleConfig as Record<string, unknown> | undefined);
     const given = withoutCredentials(entry.config ?? {}, removedCredentials, [id]) as Record<string, unknown>;
+    givenKeys.set(id, new Set(Object.keys(given)));
     let config: Record<string, unknown> = { ...(withoutCredentials(sample, []) as Record<string, unknown>), ...given };
     for (const key of ADMIN_ONLY_KEYS) {
       if (key in given) removedAdminKeys.push(`${id}.${key}`);
       delete config[key];
+    }
+    if (definition.type === "schedule_trigger") {
+      // A described schedule starts off, as one added in the editor does: nothing fires before the person turns it on.
+      config.active = false;
+      scheduleIds.push(id);
+      if (!(typeof given.timezone === "string" && given.timezone.trim()) && options.timeZone) config.timezone = options.timeZone;
     }
     if (PROVIDER_CONFIG_NODE_TYPES.has(definition.type)) {
       const asked = isRecord(given.provider) ? given.provider : undefined;
@@ -500,12 +525,24 @@ export function checkBuilderDraft(raw: unknown, options: BuilderDraftOptions): B
   const validation = validateWorkflowGraph(workflow);
   for (const issue of saveBlockingIssues(validation)) issues.push({ message: issue.message, ...(issue.nodeId ? { nodeId: issue.nodeId } : {}) });
   const unfinished = unfinishedDraftIssues(validation).map((issue) => ({ message: issue.message, ...(issue.nodeId ? { nodeId: issue.nodeId } : {}) }));
+  // A setting the model left out holds the node's example value: say so, so the fix is to set it.
+  const pathIssues = unknownTemplatePaths(workflow).map((issue) => {
+    const fromExample = !givenKeys.get(issue.nodeId)?.has(issue.setting.split(".")[0]!);
+    return { message: fromExample ? `${issue.message} (${issue.setting} is the node's example value, as the draft left it out: set it.)` : issue.message, nodeId: issue.nodeId };
+  });
+  issues.push(...pathIssues);
 
   if (removedCredentials.length > 0) notes.push(`Left out credential values the model wrote (${removedCredentials.join(", ")}): pick saved credentials on those nodes.`);
   if (removedAdminKeys.length > 0) notes.push(`Left out settings only an admin sets (${removedAdminKeys.join(", ")}).`);
   if (removedAddresses.length > 0) notes.push(`Left the model server address at its placeholder on ${removedAddresses.join(", ")}: set your server on those nodes.`);
+  // A trigger the draft leaves open to anyone is said in the preview, before it is inserted (the save says it again).
+  for (const node of nodes) {
+    const open = publicEntryMessage(node);
+    if (open) notes.push(`${node.name} (${node.id}): ${open}`);
+  }
+  if (scheduleIds.length > 0) notes.push(`The schedule starts off (${scheduleIds.join(", ")}): open it and choose Turn on when the workflow is ready.`);
   if (modelChanged) notes.push("Model nodes use the model the builder used; change it on each node if you want another one.");
-  return { workflow, issues, unfinished, notes };
+  return { workflow, issues, unfinished, pathIssues, notes };
 }
 
 /** Nodes whose credential is an option most workflows leave unset (a bearer token on a request, trigger auth...). */
@@ -657,6 +694,7 @@ export function workflowBuilderSystemPrompt(maxAttempts: number): string {
     "- Edges run source -> target. A node with several outputs (if_node, switch_node, filter_node, try_catch, approval_gate...) needs sourceHandle on every edge leaving it, set to one of its outputs. Other nodes have one output: leave sourceHandle out.",
     "- Agents (agent_orchestrator, supervisor_node) get their model, memory and tools through ports, not steps: an edge FROM the agent TO the attached node with sourceHandle chat_model, memory, tool or worker. Every agent needs exactly one chat_model (use llm_call). An attached node has no other edges.",
     "- Templates in text settings read data: {{field}} reads a field of the node connected straight in, {{results.<nodeId>.<field>}} reads any earlier node, {{webhook.<field>}} the webhook payload, {{user_prompt}} the run's prompt, {{item}} the current item inside a loop_node body.",
+    "- Use only the fields a node outputs (outputFields in the catalog): an LLM Call's answer is {{answer}}. A path to a field that is not there is sent back as a problem.",
     "- Never write credentials, API keys, passwords, tokens or secret ids into a config: leave them out, the person picks saved credentials afterwards. Model nodes get their model set for you.",
     "- Prefer few nodes and the simplest node that does the job. An Output node is optional.",
     "",
@@ -681,6 +719,8 @@ export interface WorkflowBuilderRunOptions {
   resolveSecret: AgentRuntimeContext["resolveSecret"];
   workflowId: string;
   projectId?: string;
+  /** The person's time zone, for a Schedule Trigger the model gave none. */
+  timeZone?: string;
   maxAttempts?: number;
   /** The most model turns (default 10). */
   maxIterations?: number;
@@ -723,9 +763,15 @@ export async function runWorkflowBuilder(options: WorkflowBuilderRunOptions): Pr
       }
       if (name === SUBMIT_TOOL) {
         attempts += 1;
-        const check = checkBuilderDraft(args, { workflowId: options.workflowId, projectId: options.projectId, nodeModel });
+        const check = checkBuilderDraft(args, { workflowId: options.workflowId, projectId: options.projectId, nodeModel, ...(options.timeZone ? { timeZone: options.timeZone } : {}) });
         if (check.workflow && check.issues.length === 0) {
           accepted = { workflow: check.workflow, check };
+          throw new BuilderStop("accepted");
+        }
+        // Out of submissions with only template paths left: the draft is usable, and the preview lists the paths to fix.
+        const pathIssues = check.pathIssues ?? [];
+        if (check.workflow && attempts >= maxAttempts && pathIssues.length > 0 && pathIssues.length === check.issues.length) {
+          accepted = { workflow: check.workflow, check: { ...check, unfinished: [...check.unfinished, ...pathIssues] } };
           throw new BuilderStop("accepted");
         }
         lastIssues = check.issues;

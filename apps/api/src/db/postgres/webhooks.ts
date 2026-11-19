@@ -81,6 +81,19 @@ export async function saveWebhookIdempotencyPending(ctx: PgContext, input: {
   );
 }
 
+export async function releaseWebhookIdempotencyPending(ctx: PgContext, input: {
+  endpointKey: string;
+  idempotencyKey: string;
+  requestHash: string;
+}): Promise<boolean> {
+  const result = await ctx.pool.query(
+    `DELETE FROM webhook_idempotency
+       WHERE endpoint_key = $1 AND idempotency_key = $2 AND request_hash = $3 AND status = 'pending'`,
+    [input.endpointKey, input.idempotencyKey, input.requestHash]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
 export async function saveWebhookIdempotencyResult(ctx: PgContext, input: {
   endpointKey: string;
   idempotencyKey: string;

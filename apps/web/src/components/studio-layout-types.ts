@@ -111,18 +111,31 @@ export function deriveRunStatus(busy: boolean, result: WorkflowExecutionResult |
   if (!result) {
     return { state: "idle", label: "no runs yet" };
   }
-  const skipped = result.nodeResults.filter((node) => node.status === "skipped").length;
-  const total = result.nodeResults.length - skipped;
-  const ok = result.nodeResults.filter((node) => node.status === "success").length;
+  // One entry per node: a Loop body node has a result per pass and counts once (the validation saw "7 ok" for 6 nodes).
+  // A node failed when a pass failed unhandled, was handled when a pass's failure was handled, and so on.
+  const byNode = new Map<string, string>();
+  const rank: Record<string, number> = { error: 5, handled: 4, running: 3, success: 2, skipped: 1 };
+  for (const node of result.nodeResults) {
+    const shown = node.status === "error" && node.handled === true ? "handled" : node.status;
+    const before = byNode.get(node.nodeId);
+    if (before === undefined || (rank[shown] ?? 0) > (rank[before] ?? 0)) byNode.set(node.nodeId, shown);
+  }
+  const nodeStatuses = [...byNode.values()];
+  const skipped = nodeStatuses.filter((status) => status === "skipped").length;
+  const total = nodeStatuses.length - skipped;
+  // A failure the run handled (routed to its Error output, caught, continued past) counts as ok, and is named.
+  const handled = nodeStatuses.filter((status) => status === "handled").length;
+  const ok = nodeStatuses.filter((status) => status === "success").length + handled;
   const started = Date.parse(result.startedAt);
   const completed = Date.parse(result.completedAt);
   const duration = Number.isFinite(started) && Number.isFinite(completed) ? formatDuration(completed - started) : null;
-  const errors = result.nodeResults.filter((node) => node.status === "error").length;
+  const errors = nodeStatuses.filter((status) => status === "error").length;
+  const handledNote = handled > 0 ? ` · ${handled} handled` : "";
   const summary =
     total > 0
-      ? ok === total
+      ? ok === total && handled === 0
         ? `${ok} ok`
-        : `${ok} of ${total} ok${errors > 0 ? ` · ${errors} failed` : ""}`
+        : `${ok} of ${total} ok${errors > 0 ? ` · ${errors} failed` : ""}${handledNote}`
       : result.status;
   const label = duration ? `last run ${duration} · ${summary}` : `last run · ${summary}`;
   const failed = result.status === "error" || Boolean(result.error);

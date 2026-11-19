@@ -351,6 +351,10 @@
   background: var(--err);
   box-shadow: 0 0 0 3px var(--err-soft);
 }
+.wf-status-handled {
+  border-color: var(--warn);
+  background: var(--warn);
+}
 .wf-status-skipped {
   border-color: var(--skipped);
   background: transparent;
@@ -418,6 +422,12 @@
 
 .wf-node-card.status-error {
   border-color: var(--err);
+}
+
+.wf-node-card.status-handled,
+.wf-node-hub.status-handled,
+.wf-node-satellite.status-handled {
+  border-color: var(--warn);
 }
 
 .wf-node-card.status-success {
@@ -953,6 +963,33 @@
   display: grid;
   place-items: center;
   z-index: 3;
+}
+
+.wf-node-off-badge {
+  position: absolute;
+  top: 6px;
+  right: 26px;
+  z-index: 3;
+  padding: 1px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  background: var(--bg);
+  color: var(--fg-muted);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+}
+
+button.wf-node-off-badge {
+  cursor: pointer;
+}
+
+button.wf-node-off-badge:hover,
+button.wf-node-off-badge:focus-visible {
+  border-color: var(--accent);
+  color: var(--fg);
 }
 
 .wf-node-pinned-badge {
@@ -1956,6 +1993,9 @@
 .node-status-value.node-status-error {
   color: var(--err);
 }
+.node-status-value.node-status-handled {
+  color: var(--warn);
+}
 .node-status-value.node-status-running,
 .node-status-value.node-status-pending {
   color: var(--running);
@@ -2139,6 +2179,9 @@
 
 .run-tape-bar-error {
   background: var(--err);
+}
+.run-tape-bar-handled {
+  background: var(--warn);
 }
 .run-tape-bar-running,
 .run-tape-bar-pending {

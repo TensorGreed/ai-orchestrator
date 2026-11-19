@@ -28,6 +28,10 @@ export const PROTECTION_ATTACHMENT_HANDLE = "protection";
 export const GUARD_EFFECTIVE_PROFILE_REF = "effective";
 /** Id of the built-in, read-only default profile. */
 export const GUARD_BUILTIN_PROFILE_ID = "default";
+/** Id of the built-in, read-only "Redact personal data" rule set (the default plus names and addresses, redacted). */
+export const GUARD_REDACT_PERSONAL_DATA_PROFILE_ID = "redact-personal-data";
+/** Ids of every built-in rule set: read-only, seeded at start, never deleted, never taken by a stored rule set. */
+export const GUARD_BUILTIN_PROFILE_IDS: readonly string[] = [GUARD_BUILTIN_PROFILE_ID, GUARD_REDACT_PERSONAL_DATA_PROFILE_ID];
 
 export const GUARD_CHANNEL_VALUES = ["prompt", "model_output", "tool_arguments", "tool_result", "final_output"] as const;
 export type GuardChannelValue = (typeof GUARD_CHANNEL_VALUES)[number];

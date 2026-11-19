@@ -25,16 +25,20 @@ export function markWelcomeDismissed(): void {
 interface WelcomeModalProps {
   open: boolean;
   docsUrl: string;
+  /** Opens the starter templates (each runs without setup). */
   onTryTemplate: () => void;
+  /** Opens the agent templates; offered when "Describe it" is not. */
   onBuildAgent: () => void;
+  /** Opens "Describe it" (absent when the person cannot build or it is turned off). */
+  onDescribe?: () => void;
   onDismiss: () => void;
 }
 
 /**
  * One-time welcome overlay shown to brand-new users on first login. Three CTAs
  * that map to the three highest-leverage first-run paths:
- *   1. Try a template — opens the Template Gallery.
- *   2. Build an MCP agent — opens the gallery filtered to the Agents category.
+ *   1. Run a starter — opens the Starters in the Template Gallery (they run without setup).
+ *   2. Describe it — opens the workflow builder; without it, Build an MCP agent (the Agents category).
  *   3. Open the docs — opens the docs site in a new tab (no navigation away).
  *
  * Dismissal persists in localStorage under `l2m:welcome-dismissed`. Users who
@@ -45,6 +49,7 @@ export function WelcomeModal({
   docsUrl,
   onTryTemplate,
   onBuildAgent,
+  onDescribe,
   onDismiss
 }: WelcomeModalProps) {
   // Close on Escape for keyboard accessibility.
@@ -108,26 +113,42 @@ export function WelcomeModal({
             data-testid="welcome-try-template"
           >
             <span className="welcome-action-eyebrow">Get started</span>
-            <span className="welcome-action-title">Try a template</span>
+            <span className="welcome-action-title">Run a starter</span>
             <span className="welcome-action-body">
-              Browse the Template Gallery. The Basic LLM Flow runs out of the box —
-              no API keys needed.
+              Pick one of the Starters and click Use Template, then Run. Each runs
+              on built-in sample data: no model, key or server needed.
             </span>
           </button>
 
-          <button
-            type="button"
-            className="welcome-action"
-            onClick={onBuildAgent}
-            data-testid="welcome-build-agent"
-          >
-            <span className="welcome-action-eyebrow">Build something real</span>
-            <span className="welcome-action-title">Build an MCP agent</span>
-            <span className="welcome-action-body">
-              Open the Agents category. Compose Supervisor → Worker hierarchies that
-              call any community MCP server as a tool.
-            </span>
-          </button>
+          {onDescribe ? (
+            <button
+              type="button"
+              className="welcome-action"
+              onClick={onDescribe}
+              data-testid="welcome-describe"
+            >
+              <span className="welcome-action-eyebrow">Build your own</span>
+              <span className="welcome-action-title">Describe it</span>
+              <span className="welcome-action-body">
+                Say what the workflow should do and review a draft before it is
+                saved. It needs a model: add its key under Secrets first.
+              </span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="welcome-action"
+              onClick={onBuildAgent}
+              data-testid="welcome-build-agent"
+            >
+              <span className="welcome-action-eyebrow">Build something real</span>
+              <span className="welcome-action-title">Build an MCP agent</span>
+              <span className="welcome-action-body">
+                Open the Agents category. Compose Supervisor → Worker hierarchies that
+                call any community MCP server as a tool.
+              </span>
+            </button>
+          )}
 
           <a
             className="welcome-action"

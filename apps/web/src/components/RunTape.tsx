@@ -3,6 +3,7 @@ import type { NodeProgressSnapshot, WorkflowExecutionResult } from "@ai-orchestr
 import { formatLatency, LiveElapsed } from "./WorkflowCanvasNode";
 import { guardMarkerFor, type GuardMarker } from "../lib/guard-trace";
 import { currentActivity, describeActivity, type LiveNodeResult } from "../lib/run-trace";
+import { displayNodeStatus } from "../lib/run-data";
 
 export interface RunTapeProps {
   executionResult: WorkflowExecutionResult | null;
@@ -93,7 +94,7 @@ export function buildTapeLanes(executionResult: WorkflowExecutionResult | null, 
       nodeId: result.nodeId,
       label: meta?.label ?? result.nodeId,
       type: typeof record.nodeType === "string" ? record.nodeType : meta?.type ?? "",
-      status: result.status,
+      status: displayNodeStatus(result),
       startMs,
       durationMs: duration,
       llmMs,
@@ -132,6 +133,8 @@ export function RunTape({ executionResult, nodeMetaById, onSelectNode }: RunTape
   const firstLane = lanes.reduce((first, lane) => (lane.startMs < first.startMs ? lane : first), lanes[0]!);
   const runStart = { startedAt: executionResult.startedAt, liveStartedAtMs: firstLane.liveStartedAtMs };
   const llmTotal = lanes.reduce((acc, lane) => acc + (lane.llmMs ?? 0), 0);
+  // A Loop body's node has a lane per pass: the head counts the nodes that ran, not the lanes.
+  const nodeCount = new Set(lanes.map((lane) => lane.nodeId)).size;
 
   return (
     <div className="run-tape" role="table" aria-label="Run tape">
@@ -146,7 +149,7 @@ export function RunTape({ executionResult, nodeMetaById, onSelectNode }: RunTape
               last run <b>{formatLatency(totalMs)}</b>
             </>
           )}{" "}
-          · {lanes.length} node{lanes.length === 1 ? "" : "s"} · status{" "}
+          · {nodeCount} node{nodeCount === 1 ? "" : "s"} · status{" "}
           <b className={`run-tape-status run-tape-status-${isRunning ? "running" : executionResult.status}`}>{isRunning ? "running" : executionResult.status}</b>
         </span>
         <span className="run-tape-key">

@@ -273,8 +273,11 @@ step-up. Project editors cannot share workflows; a project admin can.
 Someone who has a workflow only through a share with them sees only their own runs of it: the runs they started and
 the runs that used their session memory (a retry of their run by someone else, for example). Other people's runs, with
 their inputs, outputs and node data, stay hidden. This applies when the share is all they have: not a member of the
-workflow's project with a role that reads it, not through a share to a project they can read, and not an admin. A
+workflow's project with a role that reads it, not a member of a project the workflow is shared to, and not an admin. A
 project member keeps the full view, and so does anyone who also has the workflow through their project.
+It holds in both isolation modes: under `role` isolation the global role a person gets in a project they are not a
+member of does not count, so a person share keeps them to their own runs there too. Workflows not shared with them
+keep the view their role gives.
 
 - **Whose run it is.** A run records the user id of the person who started it: from the app, with their API key, or
   by a signed-in form submission or chat (a signed-in form also keeps the submitter's session memory to them, as a

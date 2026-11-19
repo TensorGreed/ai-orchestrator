@@ -86,7 +86,8 @@ import {
   type WorkflowExecutionState,
   type WorkflowNode,
   WorkflowError,
-  WORKFLOW_TOOL_ADAPTER_ID
+  WORKFLOW_TOOL_ADAPTER_ID,
+  defaultRagSearchMode
 } from "@ai-orchestrator/shared";
 import { diffWorkflows } from "@ai-orchestrator/shared";
 import { BUDGET_SCOPE_TYPES, isBudgetScopeType, readTraceCarrier, repairWorkflowErrorConfigs, type BudgetScopeType } from "@ai-orchestrator/shared";
@@ -119,9 +120,11 @@ import {
   GoogleVertexEmbeddingAdapter,
   HuggingFaceEmbeddingAdapter,
   chunkDocuments,
+  pdfExtractionLimits,
   convertExternalWorkflow,
   ExternalWorkflowImportError,
   outputLabelsOf,
+  checkRunResponse,
   checkTriggerInput,
   describeRunResult,
   workflowDeclaresSensitiveSource,
@@ -130,7 +133,8 @@ import {
   type KnowledgeBaseStore,
   type ReplayNodeHook
 } from "@ai-orchestrator/workflow-engine";
-import { loadDocuments, inferDocumentKind, type DocumentKind } from "./services/document-loader-service";
+import { type DocumentKind } from "./services/document-loader-service";
+import { KnowledgeUploadError, loadKnowledgeUpload, type LoadedUpload } from "./services/knowledge-upload.js";
 import { type McpServerRecord } from "./db/database";
 import { PostgresStore } from "./db/postgres-store.js";
 import {
@@ -294,7 +298,7 @@ import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { registerUserInviteRoutes } from "./user-invite-routes.js";
 import { WORKFLOW_BUILDER_TRIGGER_TYPE, WORKFLOW_BUILDER_USAGE_LABEL, WORKFLOW_BUILDER_USAGE_WORKFLOW_ID, registerWorkflowBuilderRoutes } from "./workflow-builder-routes.js";
 import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
-import { LIVE_ENTRY_OFF_CODE, isLiveEntryOff, liveEntryOffMessage } from "@ai-orchestrator/shared";
+import { LIVE_ENTRY_OFF_CODE, isLiveEntryOff, liveEntryOffMessage, publicEntryWarnings } from "@ai-orchestrator/shared";
 import { envModelProviders } from "@ai-orchestrator/shared";
 import {
   CONTENT_FILTER_CODE,
@@ -365,6 +369,7 @@ import { DeliveryDedupe } from "./services/delivery-dedupe.js";
 import { acceptSlackEvent } from "./services/slack-intake.js";
 import { LocalRunEvents, openRunRelay, resultFromPersistedRun, RunEventPublisher, type PersistedRun, type RunEventName } from "./services/run-event-relay.js";
 import { runStarterId, type RedactedNodeEvent, type RunWorkflowExecutionInput, type WorkflowExecutionEventHooks } from "./run-types.js";
+import { ERROR_WORKFLOW_TRIGGER_TYPE, claimErrorWorkflowRun, errorWorkflowRunId, releaseErrorWorkflowRun, type ErrorWorkflowInput } from "./error-workflow-run.js";
 import type { WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import { createRunAccess, type RunAccessDenial } from "./run-access.js";
 import { ProjectNotEmptyError, ReleaseGateEnforcedError, StoreReferenceMissingError } from "./db/store-errors.js";
@@ -2280,6 +2285,8 @@ export async function createApp(
   // Phase 13.1 — where runs execute (EXECUTION_DISPATCH): inline (default) here, or queue (cluster mode only) on the
   // queue's workers with this instance relaying events and results (services/run-dispatch.ts).
   const executionDispatch = resolveExecutionDispatch(config, { clusterMode });
+  /** Webhook runs answered On Received that run in this process and have not ended (capped like waiting runs). */
+  let onReceivedInFlight = 0;
   /** Events of the runs executing in this process, for a reattach on this instance (nothing is built while nobody listens). */
   const localRunEvents = new LocalRunEvents();
   /**
@@ -2730,7 +2737,11 @@ export async function createApp(
     const executionTimeoutMs = normalizeExecutionTimeoutMs(input.executionTimeoutMs, undefined, config.WORKFLOW_EXECUTION_TIMEOUT_MS);
     // 12.6 — a recorded run's recorder wraps the base registry; the run's own allowlist view goes in front of it.
     const runModelRegistry = input.providerRegistry ?? runPlan?.providerRegistry ?? baseProviderRegistry;
-    const runModelScope: ModelRun = input.executionId ? { executionId: input.executionId } : {};
+    const runModelScope: ModelRun = {
+      ...(input.executionId ? { executionId: input.executionId } : {}),
+      // An error workflow's model calls name the failed run they handle.
+      ...(input.errorSourceExecutionId ? { sourceExecutionId: input.errorSourceExecutionId } : {})
+    };
     // A replay answering from a model tape makes no request for a recorded answer (what the allowlist says about
     // those is reported afterwards); its lenient live calls go through the enforcing registry the tape was given.
     const tapeReplay = Boolean(input.replay && input.providerRegistry);
@@ -2775,6 +2786,7 @@ export async function createApp(
           executionTimeoutMs,
           triggerType: input.triggerType,
           ...(input.inputTriggerType ? { inputTriggerType: input.inputTriggerType } : {}),
+          ...(input.outputTriggerType ? { outputTriggerType: input.outputTriggerType } : {}),
           triggeredBy: input.triggeredBy,
           toolPolicySubject: input.policySubject ?? await resolveToolPolicySubject(input.workflow.id, input.policyActor),
           resumeState: input.resumeState,
@@ -2952,8 +2964,15 @@ export async function createApp(
             }
           },
           // Phase 15.1 — a replay never fires the error workflow or its notifications.
-          triggerErrorWorkflow: input.replay ? undefined : async (payload) => {
-            // Fire-and-forget: execute the error workflow + send notifications
+          // An error workflow's own failure starts no other error workflow.
+          triggerErrorWorkflow: input.replay || input.triggerType === ERROR_WORKFLOW_TRIGGER_TYPE ? undefined : async (payload) => {
+            // Fire-and-forget: execute the error workflow + send notifications.
+            // At most once per failed run: the same run executed again (a lost lease, a re-run job) starts no second
+            // error workflow run and sends no second failure notification.
+            if (payload.executionId && !(await claimErrorWorkflowRun(store, payload.executionId))) {
+              app.log.info({ executionId: payload.executionId, errorWorkflowId: payload.errorWorkflowId }, "Error workflow already ran for this run");
+              return;
+            }
             notificationService.notify({
               type: "execution.failure",
               workflowId: payload.sourceWorkflowId,
@@ -2979,71 +2998,58 @@ export async function createApp(
             const errorWf = errorTarget.workflow;
             // Like a sub-workflow: the run's user carries over only within the same project.
             const sameProject = (errorWf.projectId ?? DEFAULT_PROJECT_ID) === (failingWorkflow.projectId ?? DEFAULT_PROJECT_ID);
-            // A run kept to one person's sessions keeps its error workflow to them too.
-            const errorScoped = runScope.dependenciesFor(errorWf, {
-              actor: sameProject ? input.policyActor : null,
-              channel,
-              ...(input.sessionOwner ? { sessionOwner: input.sessionOwner } : {})
-            });
-            const errorModelRun: ModelRun = { runKey: `error:${payload.executionId}:${errorWf.id}`, sourceExecutionId: payload.executionId };
+            const errorInput: ErrorWorkflowInput = {
+              error: payload.error,
+              ...(payload.errorStack !== undefined ? { errorStack: payload.errorStack } : {}),
+              sourceWorkflowId: payload.sourceWorkflowId,
+              sourceWorkflowName: payload.sourceWorkflowName,
+              ...(payload.executionId ? { executionId: payload.executionId } : {}),
+              timestamp: payload.timestamp
+            };
+            // Recorded like any other run (Runs, budgets, the queue), under an id the failed run's record can name.
+            // It belongs to whoever owns the failed run: their own-runs view and their sessions.
+            const errorExecutionId = payload.executionId ? errorWorkflowRunId(payload.executionId) : crypto.randomUUID();
+            // A dispatch refused before the run started (a budget, a queue that failed to take it) gives the claim back, so the
+            // failed run executed again tries again.
+            const releaseClaim = async (reason: string) => {
+              if (!payload.executionId) return;
+              const released = await releaseErrorWorkflowRun(store, payload.executionId);
+              app.log.warn({ executionId: payload.executionId, errorWorkflowId: payload.errorWorkflowId, reason, released }, "Error workflow run was refused");
+            };
+            let started: Awaited<ReturnType<typeof runDispatcher.start>>;
             try {
-              const errorToolPolicySubject = await resolveToolPolicySubject(errorWf.id);
-              const runErrorWorkflow = () => executeWorkflow(
+              started = await runDispatcher.start(
                 {
-                  workflow: errorWf,
-                  input: {
-                    error: payload.error,
-                    errorStack: payload.errorStack,
-                    sourceWorkflowId: payload.sourceWorkflowId,
-                    sourceWorkflowName: payload.sourceWorkflowName,
-                    executionId: payload.executionId,
-                    timestamp: payload.timestamp
-                  },
-                  triggerType: "error",
-                  toolPolicySubject: errorToolPolicySubject,
-                  executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS,
-                  // v74 — the failed run was sensitive work: its error is that run's content.
-                  ...(payload.sensitive === true ? { sensitiveInput: true } : {})
-                },
-                {
-                  connectorRegistry,
-                  mcpRegistry,
-                  agentRuntime,
-                  ...errorScoped,
-                  // 12.6 — the error handler's model calls are checked for its own project, audited once per failed run.
-                  providerRegistry: modelScopedRun(errorWf, baseProviderRegistry, errorModelRun),
-                  checkEmbeddingModel: modelScopedEmbeddings(errorWf, errorModelRun),
-                  // Always the gated registry (instrumented when telemetry is on), so content rule embeddings are checked and pinned.
-                  embeddingProviderRegistry: runEmbeddingRegistry,
-                  scopeSubWorkflow: modelScopedSubWorkflows(errorScoped.scopeSubWorkflow, baseProviderRegistry, errorModelRun),
-                  // The error handler is guarded under its own bindings, like any other run.
-                  guard: guardService.runtimeFor({
-                    workflowId: errorWf.id,
-                    projectId: errorWf.projectId ?? "default",
+                  v: DISPATCH_SPEC_VERSION,
+                  run: {
+                    workflow: errorWf,
+                    directInput: { ...errorInput },
+                    executionId: errorExecutionId,
+                    triggerType: ERROR_WORKFLOW_TRIGGER_TYPE,
+                    ...(input.triggeredBy !== undefined ? { triggeredBy: input.triggeredBy } : {}),
+                    triggeredByUserId: runStarterId(input),
+                    ...(sameProject && input.policyActor ? { policyActor: input.policyActor } : {}),
+                    ...(input.sessionOwner ? { sessionOwner: input.sessionOwner } : {}),
+                    ...(payload.executionId ? { errorSourceExecutionId: payload.executionId } : {}),
+                    // As the failed run ran: a production failure runs the error workflow's published version.
+                    channel: channel,
+                    executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS,
+                    // v74 — the failed run was sensitive work: its error is that run's content.
                     ...(payload.sensitive === true ? { sensitiveInput: true } : {})
-                  }),
-                  loadMcpToolPolicy,
-                  codeSandbox: codeSandboxPlan,
-                  outboundGuard,
-                  outboundDnsResolver: nodeDnsResolver,
-                  ...(verifySensitiveValues ? { verifySensitiveValues } : {}),
-                  ...(runInstrumentation.enabled ? { instrument: runInstrumentation } : {}),
-                  ...(metricsService.isEnabled() ? { onNodeComplete: (event: { status: string; durationMs: number; output?: unknown }) => recordNodeMetric(input, event) } : {})
-                }
+                  },
+                  progress: { requestInput: errorInput },
+                  history: { requestInput: errorInput }
+                },
+                { pool: dispatchPoolOf(errorWf), queueItemId: errorExecutionId }
               );
-              // The error workflow's run is its own span, a child of the failed run's.
-              if (runInstrumentation.enabled) {
-                await runInstrumentation.run(
-                  { workflowId: errorWf.id, ...(errorWf.name ? { workflowName: errorWf.name } : {}), projectId: errorWf.projectId ?? DEFAULT_PROJECT_ID, triggerType: "error" },
-                  async (span) => {
-                    const errorResult = await runErrorWorkflow();
-                    describeRunResult(span, errorResult);
-                    return errorResult;
-                  }
-                );
-              } else {
-                await runErrorWorkflow();
-              }
+            } catch (err) {
+              await releaseClaim(String(secretService.redact(err instanceof Error ? err.message : String(err))));
+              return;
+            }
+            if (started.queued) return;
+            if (started.refused) await releaseClaim(started.refused.message);
+            try {
+              await started.done;
             } catch (err) {
               app.log.warn({ err: err instanceof Error ? err.message : String(err), errorWorkflowId: payload.errorWorkflowId }, "Error workflow execution failed");
             }
@@ -4794,6 +4800,7 @@ export async function createApp(
     listProjectIds: async () => (await store.listProjects()).map((project) => project.id),
     canAccessWorkflow: async (user, workflow, permission) => await rbacService.canAccessWorkflow(user, workflow, permission),
     canInProject: async (user, projectId, permission) => await rbacService.can(user, projectId, permission),
+    canInProjectAsMember: async (user, projectId, permission) => await rbacService.canAsMember(user, projectId, permission),
     listWorkflowIdsSharedToProject: async (projectId) => (await store.listWorkflowsSharedToProject(projectId)).map((share) => share.workflowId),
     projectExists: async (projectId) => Boolean(await store.getProject(projectId)),
     listWorkflowIdsSharedToUser: async (userId) => (await store.listWorkflowsSharedToUser(userId)).map((share) => share.workflowId),
@@ -6041,6 +6048,11 @@ export async function createApp(
         // resumed run's triggered_by, also of the paused row when it paused again), else as the paused row records it.
         const [firstRequest] = await store.listApprovalRequestsForExecution(job.executionId);
         const startedBy = firstRequest?.requestedBy ?? pending.triggeredBy ?? resumeHistory?.triggeredBy ?? undefined;
+        // An error workflow's run that paused stays one when it resumes: listed under the trigger `error`, linked to the
+        // failed run (its stored input names it), and its own failure starts no other error workflow.
+        const resumedErrorRun = asRecord(state.globals).trigger_type === ERROR_WORKFLOW_TRIGGER_TYPE;
+        const resumeTriggerType = resumedErrorRun ? ERROR_WORKFLOW_TRIGGER_TYPE : "approval_resume";
+        const errorRunInput = resumedErrorRun ? asRecord(resumeHistory?.input) : {};
         const gatewayGuard =
           parseGatewayGuardStack(state.gatewayGuard) ?? parseGatewayGuardStack(asRecord(resumeHistory?.customData)[GATEWAY_GUARD_CUSTOM_DATA_KEY]);
         // 12.6 — and its usage stays the gateway client's and counts toward the toolset's project (not the approver's).
@@ -6076,7 +6088,7 @@ export async function createApp(
           policyActor: actor,
           workflow: resumeWorkflow,
           executionId: job.executionId,
-          triggerType: "approval_resume",
+          triggerType: resumeTriggerType,
           // "Started by" stays who started the run; the approver is recorded on the decision (approval_requests).
           triggeredBy: startedBy,
           // The resumed run is its own span, linked (not parented) to the node that paused, hours or days earlier.
@@ -6095,11 +6107,12 @@ export async function createApp(
           executionId: job.executionId,
           workflow: state.workflow,
           result,
-          triggerType: "approval_resume",
+          triggerType: resumeTriggerType,
           triggeredBy: startedBy,
           ...(resumeCustomData ? { customData: { ...(result.customData ?? {}), ...resumeCustomData } } : {}),
           ...(gatewayUsage ? { gatewayUsage } : {}),
           requestInput: {
+            ...errorRunInput,
             decision: decided,
             approvalId: job.executionId,
             requestId: job.requestId,
@@ -8221,16 +8234,23 @@ export async function createApp(
    *   {
    *     filename: "support-faq.md",       // optional; drives kind inference
    *     kind: "markdown",                 // optional explicit override
-   *     content: "...",                   // raw text
+   *     content: "...",                   // raw text, or:
+   *     contentBase64: "...",             // the file's bytes (a PDF); the bytes decide what it is
    *     sourceId: "support-faq-v1",       // groups chunks; defaults to filename
    *     chunking: { strategy: "recursive", chunkSize: 800, chunkOverlap: 80 }
    *     csv: { textColumn: "body", metadataColumns: ["topic"] }   // optional
    *   }
+   * A PDF's text is read page by page in the sandboxed PDF reader; each chunk's metadata has its `page`. Scanned PDFs
+   * (no text layer), office files and other binary files are refused (knowledge-upload.ts).
    * Returns:
-   *   { sourceId, documentsLoaded, chunksInserted, dimensions }
+   *   { sourceId, documentsLoaded, chunksInserted, dimensions, kind, pageCount?, notice? }
    */
+  // A file sent as base64 is a third larger than its bytes, so the route takes up to that much more than the file
+  // limit (CONTENT_SCAN_MAX_BYTES), and never less than the API's own body limit.
+  const knowledgeUploadBodyLimit = Math.max(config.API_BODY_LIMIT_BYTES, Math.ceil((pdfExtractionLimits().maxBytes * 4) / 3) + 64 * 1024);
   app.post<{ Params: { id: string }; Body: unknown }>(
     "/api/knowledge-bases/:id/upload",
+    { bodyLimit: knowledgeUploadBodyLimit },
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
@@ -8239,32 +8259,43 @@ export async function createApp(
       const kb = access.kb;
       const body = request.body as Partial<{
         filename: string;
-        kind: DocumentKind;
+        kind: DocumentKind | "pdf";
         content: string;
+        contentBase64: string;
         sourceId: string;
         chunking: ChunkOptions;
         csv: { textColumn?: string; metadataColumns?: string[] };
         metadata: Record<string, unknown>;
       }> | undefined;
-      if (!body || typeof body.content !== "string" || !body.content.length) {
+      if (!body || ((typeof body.content !== "string" || !body.content.length) && (typeof body.contentBase64 !== "string" || !body.contentBase64.length))) {
         reply.code(400);
-        return { error: "content (string) is required" };
+        return { error: "content (string) or contentBase64 is required" };
       }
-      const kind: DocumentKind = body.kind ?? (body.filename ? inferDocumentKind(body.filename) : "text");
       const sourceId = body.sourceId ?? body.filename ?? `src_${crypto.randomUUID().slice(0, 8)}`;
 
       // 1. Load
-      let loaded;
+      let upload: LoadedUpload;
+      // A client that goes away stops the PDF read, so it does not hold a reader slot.
+      const uploadAbort = new AbortController();
+      const onClientGone = () => {
+        if (!reply.raw.writableFinished) uploadAbort.abort();
+      };
+      reply.raw.on("close", onClientGone);
+      if (reply.raw.destroyed && !reply.raw.writableFinished) uploadAbort.abort();
       try {
-        loaded = loadDocuments(kind, body.content, {
-          sourceId,
-          metadata: body.metadata ?? {},
-          csv: body.csv
-        });
+        const pdfLimits = pdfExtractionLimits();
+        upload = await loadKnowledgeUpload(body, sourceId, { maxBytes: pdfLimits.maxBytes, maxChars: pdfLimits.maxChars }, uploadAbort.signal);
       } catch (err) {
-        reply.code(400);
-        return { error: `Loader failed: ${err instanceof Error ? err.message : String(err)}` };
+        if (err instanceof KnowledgeUploadError) {
+          reply.code(err.statusCode);
+          return { error: err.message, code: err.code };
+        }
+        throw err;
+      } finally {
+        reply.raw.off("close", onClientGone);
       }
+      const kind = upload.kind;
+      const loaded = upload.documents;
       if (loaded.length === 0) {
         reply.code(400);
         return { error: "Loader produced zero documents — content may be empty after parsing" };
@@ -8331,7 +8362,10 @@ export async function createApp(
           sourceId,
           documentsLoaded: loaded.length,
           chunksInserted: result.inserted,
-          dimensions: result.dimensions
+          dimensions: result.dimensions,
+          kind,
+          ...(upload.pageCount !== undefined ? { pageCount: upload.pageCount } : {}),
+          ...(upload.notice ? { notice: upload.notice } : {})
         };
       } catch (err) {
         reply.code(400);
@@ -8424,8 +8458,11 @@ export async function createApp(
         request.params.id
       );
       const topK = body.topK && body.topK > 0 ? Math.floor(body.topK) : 5;
-      const results = await adapter.similaritySearch(body.query, topK, embedder);
-      return { query: body.query, results };
+      // The same ranking a RAG Retrieve node on this knowledge base uses when it sets no search mode: hybrid (keyword
+      // and vector, fused) with the built-in Token embedder, vector otherwise.
+      const mode = defaultRagSearchMode(kb.embedderId);
+      const results = mode === "hybrid" ? await adapter.hybridSearch(body.query, topK, embedder) : await adapter.similaritySearch(body.query, topK, embedder);
+      return { query: body.query, mode, results };
     }
   );
 
@@ -11899,7 +11936,10 @@ export async function createApp(
 
     const access = await runAccess.workflow(user, request.params.id, "workflow:read");
     if (!access.ok) return denyRunAccess(reply, access);
-    const workflow = access.workflow;
+    // Numbered as the version history numbers the saved workflow (what the Publish dialog shows), not by the
+    // workflow's own field, which only counts its creation.
+    const savedVersion = await store.maxWorkflowVersionNumber(access.workflow.id);
+    const workflow = savedVersion > 0 ? { ...access.workflow, workflowVersion: savedVersion } : access.workflow;
 
     return {
       json: exportWorkflowToJson(workflow)
@@ -11919,7 +11959,9 @@ export async function createApp(
     const validation = validateWorkflowGraph(workflow);
     // 12.6 — a model the allowlist refuses is a warning: the workflow saves and validates, its runs fail at that node.
     const modelWarnings = await modelAllowlistService.warningsFor(workflow);
-    const result = modelWarnings.length > 0 ? { ...validation, issues: [...validation.issues, ...modelWarnings] } : validation;
+    // A live webhook, form or MCP tool anyone can call is a warning: it saves and runs, and the editor notes it after a save.
+    const extraWarnings = [...modelWarnings, ...publicEntryWarnings(workflow)];
+    const result = extraWarnings.length > 0 ? { ...validation, issues: [...validation.issues, ...extraWarnings] } : validation;
     // Production's version has unfinished settings: its webhooks, schedules and app triggers do not run it.
     const liveTriggersPaused = (await releaseService.unfinishedProductionWorkflow(workflow.id)) !== null;
     return { ...result, liveTriggersPaused };
@@ -13581,6 +13623,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       if (isLiveEntryOff(found.node)) return mcpServerOff(reply);
       const cfg = asRecord(found.node.config);
       if (cfg.authMode === "bearer") {
+        // A new trigger asks for a token before its secret is picked: every call is refused, as an unauthorised one.
+        if (typeof asRecord(cfg.secretRef).secretId !== "string" || !String(asRecord(cfg.secretRef).secretId).trim()) {
+          reply.code(401);
+          return { error: "This tool asks for a bearer token, but no token secret is picked on its trigger yet", code: "token_not_set" };
+        }
         const secret = await secretService.resolveSecret(toSecretReference(cfg.secretRef));
         if (!secret) {
           reply.code(500);
@@ -14323,6 +14370,110 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
               };
             }
           }
+        }
+
+        // Response Mode "On Received": the caller gets 202 with the run's id at once and the run goes on in the
+        // background (inline, or on the queue). Nothing of the run is in the reply, so the run carries no response
+        // boundary; the reply itself still goes through the response rules, and a withheld reply starts no run.
+        if (match.endpoint.config.responseMode === "onReceived") {
+          // The key reserved above is given back whenever nothing was started, so a retry is not refused as in progress.
+          const releaseKey = async () => {
+            if (!security.idempotencyEnabled || !idempotencyKey) return;
+            await store.releaseWebhookIdempotencyPending({ endpointKey, idempotencyKey, requestHash: computeSha256Hex(rawBody) }).catch((error: unknown) => {
+              app.log.warn({ err: secretService.redact(error instanceof Error ? error.message : String(error)) }, "Could not free a webhook idempotency key");
+              return false;
+            });
+          };
+          const acknowledgement = { executionId, status: "accepted" as const };
+          let ackBody: unknown = acknowledgement;
+          let started: Awaited<ReturnType<typeof runDispatcher.start>>;
+          try {
+            if (!budgetAdmitted) {
+              await admitRunBudget({ workflow: match.workflow, triggerType, triggeredBy: "webhook" });
+              budgetAdmitted = true;
+            }
+            // Runs nobody waits on are capped per instance like runs callers wait on (DISPATCH_MAX_WAITING).
+            if (onReceivedInFlight >= executionDispatch.maxWaiting) throw new DispatchBusyError(executionDispatch.maxWaiting);
+            const now = new Date().toISOString();
+            const ackChecked = await checkRunResponse({
+              result: { workflowId: match.workflow.id, executionId, status: "success", startedAt: now, completedAt: now, nodeResults: [], output: acknowledgement },
+              boundary: { surface: "webhook" },
+              guard: guardService.runtimeFor({ executionId, workflowId: match.workflow.id, projectId: match.workflow.projectId ?? DEFAULT_PROJECT_ID }),
+              resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
+              executionId,
+              workflowId: match.workflow.id,
+              nodeId: match.endpoint.nodeId,
+              logger: (message, metadata) => app.log.warn({ workflowId: match.workflow.id, metadata }, message)
+            });
+            if (responseWasWithheld(ackChecked)) {
+              await releaseKey();
+              reply.code(RESPONSE_WITHHELD_STATUS);
+              return contentFilterEnvelope(undefined);
+            }
+            ackBody = ackChecked.output ?? acknowledgement;
+            started = await runDispatcher.start(
+              {
+                v: DISPATCH_SPEC_VERSION,
+                run: {
+                  workflow: match.workflow,
+                  webhookPayload: {
+                    ...parsedInput.body,
+                    ...(parsedInput.systemPrompt ? { system_prompt: parsedInput.systemPrompt } : {}),
+                    ...(parsedInput.userPrompt ? { user_prompt: parsedInput.userPrompt } : {}),
+                    session_id: parsedInput.sessionId,
+                    variables: parsedInput.variables
+                  },
+                  variables: parsedInput.variables,
+                  systemPrompt: parsedInput.systemPrompt,
+                  userPrompt: parsedInput.userPrompt,
+                  sessionId: parsedInput.sessionId,
+                  // Nobody holds a connection for this run: a time limit from the body counts only from a verified caller.
+                  executionTimeoutMs: authResult.verified ? parsedInput.executionTimeoutMs : undefined,
+                  executionId,
+                  triggerType,
+                  triggeredBy: "webhook",
+                  channel: isTestRoute ? "draft" : "production",
+                  ...(webhookInputLabels ? { inputLabels: webhookInputLabels, recordInputLabels: true } : {})
+                },
+                progress: { requestInput: parsedInput.body },
+                history: { requestInput: parsedInput.body }
+              },
+              // Recorded as running when queued, so the id answered is in Runs at once.
+              { pool: dispatchPoolOf(match.workflow), enforceBackpressure: true, admitted: true, recordQueued: true }
+            );
+          } catch (error) {
+            // Refused before it started (a budget, a full pool, a failed enqueue, a reply check that threw).
+            await releaseKey();
+            throw error;
+          }
+          if (!started.queued) {
+            onReceivedInFlight += 1;
+            started.done
+              .catch((error: unknown) => {
+                app.log.warn(
+                  { executionId, workflowId: match.workflow.id, err: secretService.redact(error instanceof Error ? error.message : String(error)) },
+                  "A webhook run answered on receipt failed"
+                );
+              })
+              .finally(() => {
+                onReceivedInFlight -= 1;
+              });
+          }
+          if (security.idempotencyEnabled && idempotencyKey) {
+            // The run has started: a failed write only means a retry with this key is refused as in progress.
+            await store
+              .saveWebhookIdempotencyResult({
+                endpointKey,
+                idempotencyKey,
+                status: "success",
+                result: { __webhookHttpResponse: { statusCode: 202, headers: {}, body: ackBody } }
+              })
+              .catch((error: unknown) => {
+                app.log.warn({ executionId, err: secretService.redact(error instanceof Error ? error.message : String(error)) }, "Could not save a webhook idempotency result");
+              });
+          }
+          reply.code(202);
+          return ackBody;
         }
 
         const result = await runDispatcher.run(
@@ -16110,6 +16261,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         ...(replay.recording.sourceTriggerType && replay.recording.capabilities.origin !== "imported"
           ? { inputTriggerType: replay.recording.sourceTriggerType }
           : {}),
+        // The output rule follows the recorded trigger, an imported file's too, so the replay's output compares like
+        // for like with the recorded one (a webhook run's output is its reply).
+        ...(replay.recording.sourceTriggerType ? { outputTriggerType: replay.recording.sourceTriggerType } : {}),
         // Phase 16 (Q7) — the recording's input origin (replays, gate cases and simulations alike), not the starter's.
         // A golden run imported from a file always counts as outside content as well (its trigger is the file's claim).
         inputLabels: recordedInputLabels({

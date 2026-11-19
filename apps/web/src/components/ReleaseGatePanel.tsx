@@ -5,6 +5,7 @@
  * the draft again).
  */
 
+import { workflowPickerLabel } from "../lib/workflow-names";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { RELEASE_APPROVER_ROLE_CHOICES, releaseGateRestrictsToAdmins, type WorkflowListItem, type WorkflowRelease } from "@ai-orchestrator/shared";
 import {
@@ -61,9 +62,9 @@ export function ReleaseGatePanel({ workflows, activeProjectId, canEdit, isAdmin,
           Workflow
         </label>
         <select id="release-gate-workflow" className="cfg-input" value={workflowId} onChange={(event) => setWorkflowId(event.target.value)}>
-          {workflows.map((workflow) => (
+          {workflows.map((workflow, _index, list) => (
             <option key={workflow.id} value={workflow.id}>
-              {workflow.name}
+              {workflowPickerLabel(list, workflow)}
             </option>
           ))}
         </select>

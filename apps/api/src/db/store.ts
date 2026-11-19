@@ -2129,6 +2129,11 @@ export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentR
     status: "success" | "error" | "partial" | "waiting_approval" | "canceled";
     result: unknown;
   }): Promise<void>;
+  /**
+   * Deletes a key's row while it is still pending and holds `requestHash` (a claim given back after the work it guarded
+   * was refused). Returns whether a row was deleted; a row with a result or another hash is kept.
+   */
+  releaseWebhookIdempotencyPending(input: { endpointKey: string; idempotencyKey: string; requestHash: string }): Promise<boolean>;
 
   // ---- Execution history and paused executions
 

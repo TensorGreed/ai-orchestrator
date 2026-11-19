@@ -59,4 +59,8 @@ export * from "./workflow-diff";
 export * from "./integration-catalog";
 export * from "./legacy-behaviour";
 export * from "./node-ids";
+export * from "./node-outputs";
 export * from "./workflow-builder";
+export * from "./public-entry";
+export * from "./new-node-defaults";
+export * from "./rag-search";

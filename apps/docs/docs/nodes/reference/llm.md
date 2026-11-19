@@ -37,6 +37,16 @@ Calls a corporate AI gateway using OpenAI-compatible, OpenAI, or Anthropic proto
 | `promptKey` | `string` | no | — |
 | `systemPromptKey` | `string` | no | — |
 
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `answer` | The model's answer as text. Read it with <span v-pre>`{{answer}}`</span>. |
+| `toolCalls` | Tools the model asked to call, when it asked for any. |
+| `raw` | The provider's raw response. |
+
+`text` holds the same value as `answer` and is kept for workflows that read it; use `answer`.
+
 **Example config**
 
 ```json
@@ -67,6 +77,17 @@ Transform data using natural language instructions. The LLM generates and applie
 | `inputKey` | `string` | no | — |
 | `outputFormat` | `string` | no | `text` \| `json` \| `code` |
 
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `answer` | The model's answer as text. Read it with <span v-pre>`{{answer}}`</span>. |
+| `transformed` | The transformed input (parsed JSON when the output format is json). |
+| `toolCalls` | Tools the model asked to call, when it asked for any. |
+| `raw` | The provider's raw response. |
+
+`text` holds the same value as `answer` and is kept for workflows that read it; use `answer`.
+
 **Example config**
 
 ```json
@@ -94,6 +115,16 @@ Calls Anthropic Claude models with an API key or ANTHROPIC_API_KEY.
 | `maxTokens` | `number` | no | — |
 | `promptKey` | `string` | no | — |
 | `systemPromptKey` | `string` | no | — |
+
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `answer` | The model's answer as text. Read it with <span v-pre>`{{answer}}`</span>. |
+| `toolCalls` | Tools the model asked to call, when it asked for any. |
+| `raw` | The provider's raw response. |
+
+`text` holds the same value as `answer` and is kept for workflows that read it; use `answer`.
 
 **Example config**
 
@@ -125,6 +156,16 @@ Calls Azure OpenAI chat/completions using deployment + API version.
 | `promptKey` | `string` | no | — |
 | `systemPromptKey` | `string` | no | — |
 
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `answer` | The model's answer as text. Read it with <span v-pre>`{{answer}}`</span>. |
+| `toolCalls` | Tools the model asked to call, when it asked for any. |
+| `raw` | The provider's raw response. |
+
+`text` holds the same value as `answer` and is kept for workflows that read it; use `answer`.
+
 **Example config**
 
 ```json
@@ -153,6 +194,16 @@ Simple prompt-to-response chain with configurable system and user prompt templat
 | `systemPromptKey` | `string` | no | — |
 | `outputFormat` | `string` | no | `text` \| `json` |
 
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `answer` | The model's answer as text. Read it with <span v-pre>`{{answer}}`</span>. |
+| `toolCalls` | Tools the model asked to call, when it asked for any. |
+| `raw` | The provider's raw response. |
+
+`text` holds the same value as `answer` and is kept for workflows that read it; use `answer`.
+
 **Example config**
 
 ```json
@@ -180,6 +231,16 @@ Calls Google Gemini chat completions using an API key.
 | `promptKey` | `string` | no | — |
 | `systemPromptKey` | `string` | no | — |
 
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `answer` | The model's answer as text. Read it with <span v-pre>`{{answer}}`</span>. |
+| `toolCalls` | Tools the model asked to call, when it asked for any. |
+| `raw` | The provider's raw response. |
+
+`text` holds the same value as `answer` and is kept for workflows that read it; use `answer`.
+
 **Example config**
 
 ```json
@@ -205,6 +266,17 @@ Extracts structured information from text based on a configurable schema.
 | `textKey` | `string` | no | — |
 | `extractionSchema` | `string` | no | — |
 
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `answer` | The model's answer as text. Read it with <span v-pre>`{{answer}}`</span>. |
+| `extracted` | The extracted data (parsed JSON when the model answered JSON). |
+| `toolCalls` | Tools the model asked to call, when it asked for any. |
+| `raw` | The provider's raw response. |
+
+`text` holds the same value as `answer` and is kept for workflows that read it; use `answer`.
+
 **Example config**
 
 ```json
@@ -228,6 +300,16 @@ Executes a model completion call.
 | `promptKey` | `string` | no | — |
 | `systemPromptKey` | `string` | no | — |
 | `serverPrompt` | `object` | no | — |
+
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `answer` | The model's answer as text. Read it with <span v-pre>`{{answer}}`</span>. |
+| `toolCalls` | Tools the model asked to call, when it asked for any. |
+| `raw` | The provider's raw response. |
+
+`text` holds the same value as `answer` and is kept for workflows that read it; use `answer`.
 
 **Example config**
 
@@ -258,6 +340,16 @@ Calls a local Ollama model through its OpenAI-compatible API.
 | `maxTokens` | `number` | no | — |
 | `promptKey` | `string` | no | — |
 | `systemPromptKey` | `string` | no | — |
+
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `answer` | The model's answer as text. Read it with <span v-pre>`{{answer}}`</span>. |
+| `toolCalls` | Tools the model asked to call, when it asked for any. |
+| `raw` | The provider's raw response. |
+
+`text` holds the same value as `answer` and is kept for workflows that read it; use `answer`.
 
 **Example config**
 
@@ -290,6 +382,16 @@ Calls OpenAI chat models with an API key or OPENAI_API_KEY.
 | `promptKey` | `string` | no | — |
 | `systemPromptKey` | `string` | no | — |
 
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `answer` | The model's answer as text. Read it with <span v-pre>`{{answer}}`</span>. |
+| `toolCalls` | Tools the model asked to call, when it asked for any. |
+| `raw` | The provider's raw response. |
+
+`text` holds the same value as `answer` and is kept for workflows that read it; use `answer`.
+
 **Example config**
 
 ```json
@@ -320,6 +422,16 @@ Calls any OpenAI-compatible chat API such as OpenRouter, Groq, vLLM, or LM Studi
 | `promptKey` | `string` | no | — |
 | `systemPromptKey` | `string` | no | — |
 
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `answer` | The model's answer as text. Read it with <span v-pre>`{{answer}}`</span>. |
+| `toolCalls` | Tools the model asked to call, when it asked for any. |
+| `raw` | The provider's raw response. |
+
+`text` holds the same value as `answer` and is kept for workflows that read it; use `answer`.
+
 **Example config**
 
 ```json
@@ -347,6 +459,16 @@ Answers questions using provided context documents. Returns answer with source c
 | `questionKey` | `string` | no | — |
 | `maxContextLength` | `number` | no | — |
 
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `answer` | The model's answer as text. Read it with <span v-pre>`{{answer}}`</span>. |
+| `toolCalls` | Tools the model asked to call, when it asked for any. |
+| `raw` | The provider's raw response. |
+
+`text` holds the same value as `answer` and is kept for workflows that read it; use `answer`.
+
 **Example config**
 
 ```json
@@ -369,6 +491,17 @@ Analyzes sentiment of input text. Returns sentiment label, confidence score, and
 |---|---|---|---|
 | `textKey` | `string` | no | — |
 
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `answer` | The model's answer as text. Read it with <span v-pre>`{{answer}}`</span>. |
+| `sentiment` | The sentiment (parsed JSON when the model answered JSON). |
+| `toolCalls` | Tools the model asked to call, when it asked for any. |
+| `raw` | The provider's raw response. |
+
+`text` holds the same value as `answer` and is kept for workflows that read it; use `answer`.
+
 **Example config**
 
 ```json
@@ -390,6 +523,16 @@ Summarizes input text with configurable length and style.
 | `textKey` | `string` | no | — |
 | `maxLength` | `number` | no | — |
 | `style` | `string` | no | `brief` \| `detailed` \| `bullet_points` \| `executive` |
+
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `answer` | The model's answer as text. Read it with <span v-pre>`{{answer}}`</span>. |
+| `toolCalls` | Tools the model asked to call, when it asked for any. |
+| `raw` | The provider's raw response. |
+
+`text` holds the same value as `answer` and is kept for workflows that read it; use `answer`.
 
 **Example config**
 
@@ -414,6 +557,17 @@ Classifies input text into one of the configured categories.
 | `textKey` | `string` | no | — |
 | `categories` | `string` | no | — |
 | `multiLabel` | `boolean` | no | — |
+
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `answer` | The model's answer as text. Read it with <span v-pre>`{{answer}}`</span>. |
+| `classification` | The classification (parsed JSON when the model answered JSON). |
+| `toolCalls` | Tools the model asked to call, when it asked for any. |
+| `raw` | The provider's raw response. |
+
+`text` holds the same value as `answer` and is kept for workflows that read it; use `answer`.
 
 **Example config**
 

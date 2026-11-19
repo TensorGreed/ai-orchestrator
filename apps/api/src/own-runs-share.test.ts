@@ -8,7 +8,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import type { Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
@@ -29,6 +29,9 @@ interface TestContext {
 
 const contexts: TestContext[] = [];
 
+/** The PROJECT_ISOLATION the next contexts use: own runs only holds in both modes. */
+let isolation: "strict" | "role" = "strict";
+
 async function createTestContext(options: { queue?: boolean } = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-own-runs-"));
   const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
@@ -40,7 +43,7 @@ async function createTestContext(options: { queue?: boolean } = {}): Promise<Tes
     COOKIE_SECURE: "false",
     RATE_LIMIT_ENABLED: "false",
     MCP_PROBE_INTERVAL_MS: "0",
-    PROJECT_ISOLATION: "strict",
+    PROJECT_ISOLATION: isolation,
     GIT_SYNC_WORKDIR: path.join(tempDir, "git")
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
@@ -165,7 +168,14 @@ const listRuns = async (context: TestContext, person: Person, query = "") => {
 const inboxIds = async (context: TestContext, person: Person, query = "") =>
   (await call(context, "GET", `/api/approvals${query}`, person.cookie)).json<{ items: Array<{ executionId: string }> }>().items.map((item) => item.executionId).sort();
 
-describe("a person who has a workflow only through a share with them sees only their own runs", () => {
+describe.each(["strict", "role"] as const)("a person who has a workflow only through a share with them sees only their own runs (PROJECT_ISOLATION=%s)", (mode) => {
+  beforeAll(() => {
+    isolation = mode;
+  });
+  afterAll(() => {
+    isolation = "strict";
+  });
+
   it("run lists and the run picker hold only their own runs, counted before paging; project members and admins see all", async () => {
     const { context, admin, owner, member, olivia, gus, run } = await seed();
     const ownerRun = await run(owner);
@@ -182,6 +192,25 @@ describe("a person who has a workflow only through a share with them sees only t
     expect(await listRuns(context, olivia, "?workflowId=wf-team&pageSize=1")).toMatchObject({ total: 2 });
     expect(await listRuns(context, gus, "?workflowId=wf-team")).toEqual({ ids: [gusRun], total: 1 });
     for (const person of [owner, member, admin]) expect(await listRuns(context, person)).toEqual({ ids: all, total: 5 });
+  });
+
+  it("the data-subject reference preview reads only their own runs (a builder with a share edits, but sees only theirs)", async () => {
+    const { context, owner, gus, run } = await seed();
+    await run(owner);
+    const send = () => call(context, "POST", "/api/data-protection/subject-refs/preview", gus.cookie, { workflowId: "wf-team", subjectRefs: ["{{input.note}}"] });
+    // Strict isolation lends no write through a share; role isolation lends the builder's role, but not other runs.
+    if (mode === "strict") {
+      expect((await send()).statusCode).toBe(403);
+      return;
+    }
+    const preview = async () => {
+      const response = await send();
+      expect(response.statusCode, response.body).toBe(200);
+      return response.json<{ runs: number }>().runs;
+    };
+    expect(await preview()).toBe(0);
+    await run(gus);
+    expect(await preview()).toBe(1);
   });
 
   it("someone else's run answers 404 on its detail, events, manifest, bundle and rule events; their own opens", async () => {
@@ -214,8 +243,14 @@ describe("a person who has a workflow only through a share with them sees only t
     expect(canceled.statusCode, canceled.body).toBe(404);
     // The editor's "run with this run's data" (pinned outputs, the run's input) is for those who may edit the
     // workflow; a share never gives that, so a share-only builder is refused before any run is read, whoever's it is.
+    // With role isolation Gus's builder role edits the workflow anyway: his own run's data is his to reuse, the owner's
+    // run still answers as missing.
     for (const source of [ownerRun, gusRun]) {
       const copied = await call(context, "POST", "/api/workflows/wf-team/execute", gus.cookie, { sourceExecutionId: source });
+      if (mode === "role") {
+        expect(copied.statusCode, copied.body).toBe(source === ownerRun ? 404 : 200);
+        continue;
+      }
       expect(copied.statusCode, copied.body).toBe(403);
       expect(copied.json<{ refusedOptions: string[] }>().refusedOptions).toEqual(["sourceExecutionId"]);
     }
@@ -389,6 +424,18 @@ describe("a person who has a workflow only through a share with them sees only t
     expect(shared.statusCode, shared.body).toBeLessThan(300);
     expect((await call(context, "GET", `/api/executions/${ownerRun}`, gus.cookie)).statusCode).toBe(200);
     expect((await call(context, "GET", "/api/workflows/wf-team/access", gus.cookie)).json<{ ownRunsOnly: boolean }>().ownRunsOnly).toBe(false);
+  });
+
+  it.runIf(mode === "role")("with role isolation, a workflow not shared with the person keeps today's view: their global role reads every run", async () => {
+    const { context, owner, olivia, run } = await seed();
+    await context.store.upsertWorkflow({ ...echoWorkflow("wf-open"), name: "Open" });
+    const ownerRun = await run(owner, "wf-open");
+    // Not shared with Olivia: her operator role reads the project, and every run of it.
+    expect((await call(context, "GET", `/api/executions/${ownerRun}`, olivia.cookie)).statusCode).toBe(200);
+    expect(await listRuns(context, olivia, "?workflowId=wf-open")).toEqual({ ids: [ownerRun], total: 1 });
+    expect((await call(context, "GET", "/api/workflows/wf-open/access", olivia.cookie)).json<{ ownRunsOnly: boolean }>().ownRunsOnly).toBe(false);
+    // Shared with her: her own runs only, though her role would read the project.
+    expect((await call(context, "GET", "/api/workflows/wf-team/access", olivia.cookie)).json<{ ownRunsOnly: boolean }>().ownRunsOnly).toBe(true);
   });
 });
 

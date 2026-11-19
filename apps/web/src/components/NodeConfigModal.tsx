@@ -1,4 +1,4 @@
-import { LIVE_ENTRY_NODE_TYPES, describeHttpSecretAuth, readHttpSecretAuth } from "@ai-orchestrator/shared";
+import { LIVE_ENTRY_NODE_TYPES, describeHttpSecretAuth, readHttpSecretAuth, resolveRagSearchMode } from "@ai-orchestrator/shared";
 import { McpToolArgsForm, McpUseFormButton, OpenApiOperationForm, usesMcpArgsForm, usesOpenApiOperation } from "./IntegrationForms";
 import { buildSchemaForm } from "../lib/mcp-schema-form";
 import { createContext, useCallback, useContext, useEffect, useId, useImperativeHandle, useMemo, useRef, useState, type Ref } from "react";
@@ -21,6 +21,7 @@ import {
   BUILT_IN_TOOLS_ADAPTER_ID,
   DEFAULT_HTTP_RETRY_ON_STATUS,
   DEFAULT_RETRY_MAX_DELAY_MS,
+  HOSTED_MODEL_DEFAULTS,
   MODEL_PROVIDER_CHOICES,
   PROVIDER_CONFIG_NODE_TYPES,
   SET_VALUE_TYPES,
@@ -40,7 +41,9 @@ import {
 } from "@ai-orchestrator/shared";
 import { buildToolPolicyTraceView, readToolPolicyTrace } from "../lib/tool-policy-trace";
 import { isNumberOrTemplateSchema, numberOrTemplateText, parseNumberOrTemplate } from "../lib/number-or-template";
-import type { LiveNodeResult } from "../lib/run-trace";
+import { relabelForModel } from "../lib/model-labels";
+import { modelChoiceKey, type AgentModelPeer } from "../lib/agent-models";
+import { isLiveExecutionResult, type LiveNodeResult } from "../lib/run-trace";
 import { LiveElapsed } from "./WorkflowCanvasNode";
 import { latestResolvedFields, NodeActivityList, ResolvedFieldsTable } from "./NodeActivityList";
 import { isInternalKey, NodeRunInput, NodeRunOutput, RunDataView, RunStatusLine, RunStepBar, type RunNodeResult } from "./NodeRunData";
@@ -165,6 +168,10 @@ export interface NodeInspectorProps {
   executionResult: WorkflowExecutionResult | null;
   /** Labels of the workflow's nodes by id, to name upstream nodes and the agent an attachment served. */
   nodeLabels?: ReadonlyMap<string, string>;
+  /** Types of the workflow's nodes by id: autocomplete leaves out the older output names (aliases) of a type. */
+  nodeTypes?: ReadonlyMap<string, string>;
+  /** On an agent's chat model: the other agents' chat models (for "Use for all agents in this workflow"). */
+  agentModelPeers?: AgentModelPeer[];
   /** Opens another node in the inspector (previous/next step of the run), through the host's unsaved-edits check. */
   onNavigateNode?: (nodeId: string) => void;
   workflowContext?: {
@@ -189,6 +196,8 @@ export interface NodeInspectorProps {
     color?: EditorNodeData["color"];
     /** The node's other fields (errorConfig, ...) when the inspector changed them; absent: kept as they are. */
     nodeExtras?: Record<string, unknown>;
+    /** Other agents' chat models to put this node's model on as well ("Use for all agents in this workflow"). */
+    applyModelTo?: string[];
   }) => void;
   onExecuteStep: () => void;
   onPinNodeOutput?: (nodeId: string) => Promise<void> | void;
@@ -375,7 +384,8 @@ export function withOpenDefaults(
 
 /**
  * A node's `config.provider` after the Provider picker changes to `next`. Echo needs no endpoint or key, so those go
- * and the model becomes "echo"; leaving Echo clears that placeholder model. Other switches keep the rest as it was.
+ * and the model becomes "echo"; leaving Echo replaces its placeholder model ("echo", "demo"...) with the new provider's
+ * default model (OpenAI, Anthropic, Gemini), or clears it. Other switches keep the rest as it was.
  */
 export function switchedModelProvider(current: Record<string, unknown>, next: string): Record<string, unknown> | undefined {
   // "Not set": a chain node then uses the model of an upstream model node.
@@ -388,7 +398,7 @@ export function switchedModelProvider(current: Record<string, unknown>, next: st
     return { ...rest, providerId: "echo", model: "echo" };
   }
   const switched: Record<string, unknown> = { ...current, providerId: next };
-  if (current.providerId === "echo" && current.model === "echo") switched.model = "";
+  if (current.providerId === "echo") switched.model = HOSTED_MODEL_DEFAULTS.find((entry) => entry.providerId === next)?.model ?? "";
   return switched;
 }
 
@@ -1240,11 +1250,14 @@ function ExpressionField({
   rows = 3,
   mode = "expression",
   previewContext,
-  help
+  help,
+  placeholder
 }: {
   label: string;
   value: string;
   onChange: (next: string) => void;
+  /** Grey example text while the field is empty. */
+  placeholder?: string;
   rows?: number;
   /** `condition`: the preview shows true or false, judged as an IF node judges the text. */
   mode?: "expression" | "template" | "condition";
@@ -1387,6 +1400,7 @@ function ExpressionField({
           });
         }}
         rows={rows}
+        placeholder={placeholder}
       />
       {autocomplete.list}
       {formatError && <div className="cfg-field-error">{formatError}</div>}
@@ -1458,6 +1472,8 @@ export function NodeInspector({
   inputOptions,
   executionResult,
   nodeLabels,
+  nodeTypes,
+  agentModelPeers,
   onNavigateNode,
   workflowContext,
   pinnedData,
@@ -2063,7 +2079,7 @@ export function NodeInspector({
       if (result.output !== undefined) outputs.set(result.nodeId, result.output);
     }
     const stepIds = nodeLabels ? [...nodeLabels.keys()] : [...outputs.keys()];
-    const step = (id: string) => ({ id, label: nodeLabels?.get(id) ?? id, output: outputs.get(id) });
+    const step = (id: string) => ({ id, label: nodeLabels?.get(id) ?? id, type: nodeTypes?.get(id), output: outputs.get(id) });
     return {
       suggestions: buildTemplateSuggestions({
         nodeId: node.id,
@@ -2080,7 +2096,7 @@ export function NodeInspector({
       strictTemplates: workflowContext?.strictTemplates === true,
       readOnly: Boolean(readOnlyReason)
     };
-  }, [currentNodeResult?.input, executionResult, inputOptions, node.id, nodeLabels, pinnedData, readOnlyReason, workflowContext?.strictTemplates, workflowContext?.vars]);
+  }, [currentNodeResult?.input, executionResult, inputOptions, node.id, nodeLabels, nodeTypes, pinnedData, readOnlyReason, workflowContext?.strictTemplates, workflowContext?.vars]);
   const currentNodePinned = hasOwnRecordKey(asRecord(pinnedData), node.id);
   const currentPinnedOutput = currentNodePinned ? asRecord(pinnedData)[node.id] : undefined;
 
@@ -2125,6 +2141,40 @@ export function NodeInspector({
           : "parameters"
     );
   }, [node.id]);
+
+  /**
+   * On an agent's chat model whose model differs from another agent's: one click saves this node and puts the same
+   * model on every agent's chat model in the workflow.
+   */
+  const renderUseForAllAgents = () => {
+    const peers = agentModelPeers ?? [];
+    if (peers.length === 0 || readOnlyReason) return null;
+    if (!toStringValue(provider.providerId).trim() || !toStringValue(provider.model).trim()) return null;
+    const chosen = modelChoiceKey(provider);
+    const differing = peers.filter((peer) => modelChoiceKey(peer.provider) !== chosen);
+    if (differing.length === 0) return null;
+    return (
+      <div className="cfg-tip cfg-inline-actions" data-testid="use-model-for-all-agents">
+        <span>
+          {differing.length === 1 ? "1 other agent uses" : `${differing.length} other agents use`} another model.
+        </span>
+        <button
+          type="button"
+          className="insp-btn"
+          onClick={() => handleSave({ applyModelTo: peers.map((peer) => peer.id) })}
+        >
+          Use for all agents in this workflow
+        </button>
+      </div>
+    );
+  };
+
+  /** A label that names the node's provider or model ("Chat Model (echo)") follows a change of either. */
+  const followModelInLabel = (next: Record<string, unknown> | undefined) => {
+    const before = { providerId: toStringValue(provider.providerId), model: toStringValue(provider.model) };
+    const after = { providerId: toStringValue(next?.providerId), model: toStringValue(next?.model) };
+    setLabel((current) => relabelForModel(current, before, after));
+  };
 
   const setProvider = (patch: Record<string, unknown>) => {
     setConfig((current) => ({
@@ -3037,15 +3087,16 @@ export function NodeInspector({
         <SelectField
           label="Provider"
           value={providerId}
-          onChange={(next) =>
+          onChange={(next) => {
+            followModelInLabel(switchedModelProvider(provider, next));
             setConfig((current) => {
               const switched = switchedModelProvider(asRecord(current.provider), next);
               if (switched) return { ...current, provider: switched };
               const rest = { ...current };
               delete rest.provider;
               return rest;
-            })
-          }
+            });
+          }}
           options={[
             // A chain node may always go back to the upstream model; LLM Call needs its own provider.
             ...(node.data.nodeType !== "llm_call"
@@ -3067,7 +3118,10 @@ export function NodeInspector({
           renderModelChoiceField({
             value: toStringValue(provider.model),
             placeholder: "gpt-4.1-mini / llama3.1",
-            onChange: (next) => setProvider({ model: next })
+            onChange: (next) => {
+              followModelInLabel({ ...provider, model: next });
+              setProvider({ model: next });
+            }
           })
         ) : (
           <>
@@ -3112,6 +3166,7 @@ export function NodeInspector({
           {providerTestMessage && <span className="muted">{providerTestMessage}</span>}
         </div>
         {providerTestError && <div className="error-banner">{providerTestError}</div>}
+        {renderUseForAllAgents()}
         <ModelAllowlistWarning message={modelAllowlistWarning} />
         <AdvancedFields
           setCount={
@@ -5007,7 +5062,7 @@ export function NodeInspector({
             [config.inputTrust, undefined, sampleConfig.inputTrust],
             [config.allowedIps, undefined, sampleConfig.allowedIps],
             [config.idempotencyEnabled, false, sampleConfig.idempotencyEnabled],
-            [config.responseMode, "lastNode", sampleConfig.responseMode],
+            [config.responseMode, "auto", sampleConfig.responseMode],
             [config.responseCode, 200, sampleConfig.responseCode],
             [config.responseBody, "", sampleConfig.responseBody]
           ])}
@@ -5063,12 +5118,20 @@ export function NodeInspector({
 
         <SelectField
           label="Response Mode"
-          value={toStringValue(config.responseMode, "lastNode")}
-          onChange={(next) => setConfig((current) => ({ ...current, responseMode: next }))}
+          value={toStringValue(config.responseMode, "auto")}
+          onChange={(next) =>
+            setConfig((current) => {
+              // Automatic is the default: left unset, as on a new node.
+              if (next !== "auto") return { ...current, responseMode: next };
+              const { responseMode: _unset, ...rest } = current;
+              return rest;
+            })
+          }
           options={[
-            { value: "onReceived", label: "On Received (immediate 200)" },
+            { value: "auto", label: "Automatic (the Webhook Response if one ran, else the last node)" },
             { value: "lastNode", label: "Last Node Output" },
-            { value: "responseNode", label: "Wait for Response Node" }
+            { value: "responseNode", label: "Wait for Response Node" },
+            { value: "onReceived", label: "On Received (answer 202 at once, run in the background)" }
           ]}
         />
         <NumberField
@@ -6626,10 +6689,15 @@ export function NodeInspector({
           <>
             <TextField
               label="Input Key"
-              value={toStringValue(config.inputKey, "items")}
+              value={toStringValue(config.inputKey)}
               onChange={(next) => setConfig((current) => ({ ...current, inputKey: next }))}
               placeholder="items"
             />
+            {!toStringValue(config.inputKey).trim() && (
+              <div className="cfg-help" data-testid="loop-input-key-hint">
+                The list to repeat over: a field of this node&apos;s input, such as <code>items</code> or <code>body.orders</code>.
+              </div>
+            )}
             {/* New Loops collect and route; the switches are offered only on a Loop saved without them. */}
             {switchesAtOpen.includes("loop_collect") && (
               <ToggleField
@@ -6979,8 +7047,9 @@ export function NodeInspector({
             />
             <ExpressionField
               label="URL Template"
-              value={toStringValue(config.urlTemplate, "https://api.example.com/resource/{{id}}")}
+              value={toStringValue(config.urlTemplate)}
               onChange={(next) => setConfig((current) => ({ ...current, urlTemplate: next }))}
+              placeholder="https://api.example.com/v1/orders/{{item.id}}"
               rows={2}
               mode="template"
               previewContext={expressionPreviewContext}
@@ -7059,6 +7128,7 @@ export function NodeInspector({
                       label="Value Template"
                       mode="template"
                       previewContext={expressionPreviewContext}
+                      placeholder="{{item.id}} or plain text"
                       value={toStringValue(assignment.valueTemplate)}
                       onChange={(next) =>
                         setConfig((current) => {
@@ -7239,7 +7309,9 @@ export function NodeInspector({
           const embedderId = toStringValue(config.embedderId, RAG_DEFAULT_EMBEDDER);
           const vectorStoreId = toStringValue(config.vectorStoreId, RAG_DEFAULT_VECTOR_STORE);
           const usesKnowledgeBase = vectorStoreId === "knowledge-base";
-          const searchMode = toStringValue(config.searchMode, "vector");
+          // Unset: hybrid with the Token embedder, vector with every other one (the engine's default).
+          const searchMode = resolveRagSearchMode({ searchMode: config.searchMode, embedderId });
+          const searchModeIsDefault = typeof config.searchMode !== "string";
           const knowledgeBaseId = toStringValue(asRecord(config.vectorStoreConfig).knowledgeBaseId) || toStringValue(config.knowledgeBaseId);
           const selectedKnowledgeBase = knowledgeBaseOptions.find((kb) => kb.id === knowledgeBaseId);
           const preferredProvider =
@@ -7337,7 +7409,8 @@ export function NodeInspector({
                 <SelectField
                   label="Search Mode"
                   value={searchMode}
-                  onChange={(next) => setConfig((current) => ({ ...current, searchMode: next === "vector" ? undefined : next }))}
+                  // The default for the embedder stays unset, so it follows the embedder; any other choice is kept.
+                  onChange={(next) => setConfig((current) => ({ ...current, searchMode: next }))}
                   options={[
                     { value: "vector", label: "Vector (meaning)" },
                     { value: "bm25", label: "Keyword (BM25)" },
@@ -7345,6 +7418,11 @@ export function NodeInspector({
                   ]}
                   help="Keyword and hybrid search need a knowledge base. Hybrid returns the vector results unchanged when the keyword search finds nothing."
                 />
+                {searchModeIsDefault && searchMode === "hybrid" ? (
+                  <div className="cfg-help" data-testid="rag-search-mode-default">
+                    Hybrid by default: the built-in Token embedder needs no key, but its vectors alone rank poorly, so keyword search runs next to it.
+                  </div>
+                ) : null}
               </>
             ) : null}
             <SelectField
@@ -9942,6 +10020,12 @@ export function NodeInspector({
                 { value: "bearer", label: "Bearer token" }
               ]}
             />
+            {toStringValue(config.authMode, "public") === "bearer" && !toStringValue(asRecord(config.secretRef).secretId) && (
+              <div className="cfg-tip" data-testid="mcp-trigger-needs-secret">
+                Pick the secret that holds the token. Until then its REST route refuses every call. MCP clients reach the tool
+                through a toolset with their own client token either way.
+              </div>
+            )}
             {toStringValue(config.authMode, "public") === "bearer" &&
               renderCredentialSecretField({
                 fieldKey: "mcp_server_bearer",
@@ -10358,13 +10442,14 @@ export function NodeInspector({
     return errorConfigRepair.errorConfig ? { ...rest, errorConfig: errorConfigRepair.errorConfig } : rest;
   };
 
-  const handleSave = () =>
+  const handleSave = (extra: { applyModelTo?: string[] } = {}) =>
     onSave({
       label,
       config: getConfigForSave(),
       disabled: nodeDisabled || undefined,
       color: nodeColor,
-      ...(removeInvalidErrorConfig ? { nodeExtras: extrasWithoutInvalidErrorConfig() } : {})
+      ...(removeInvalidErrorConfig ? { nodeExtras: extrasWithoutInvalidErrorConfig() } : {}),
+      ...(extra.applyModelTo?.length ? { applyModelTo: extra.applyModelTo } : {})
     });
 
   const resolvePendingClose = (choice: "save" | "discard" | "keep") => {
@@ -10783,7 +10868,7 @@ export function NodeInspector({
     storeInspectorLayout(next);
   };
   const runLabel = executionResult && showRuntimeInspection
-    ? `Run ${executionResult.status === "partial" ? "in progress" : executionResult.status}${
+    ? `Run ${isLiveExecutionResult(executionResult) ? "in progress" : executionResult.status}${
         executionResult.startedAt ? `, started ${new Date(executionResult.startedAt).toLocaleTimeString()}` : ""
       }`
     : undefined;
@@ -11047,7 +11132,7 @@ export function NodeInspector({
         <button
           type="button"
           className="insp-btn primary"
-          onClick={readOnlyReason ? undefined : handleSave}
+          onClick={readOnlyReason ? undefined : () => handleSave()}
           aria-disabled={readOnlyReason ? true : undefined}
           title={readOnlyReason ?? undefined}
           data-dirty={isDirty && !readOnlyReason ? "true" : undefined}

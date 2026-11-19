@@ -106,6 +106,14 @@ Rule sets live on the **Security** page, under **Rule sets & bindings**. Admins 
 - **Export and import.** Export downloads a version as JSON (headers `x-guard-profile-version` and `x-guard-profile-hash`); import accepts the same JSON as a new rule set or as a new version of an existing one. The built-in rule set's documents, versions and exports carry its display name, Default rule set; its hash header still names the stored version runs pin.
 - **Validation.** Errors come back per field (`channels.prompt.detectors.0.threshold: …`) and are shown next to the editor. Rule sets may not hold key material: provider options name a stored secret (`keyId`), and the fallback cannot be `protect`. Custom dictionary patterns are limited to 256 characters, and patterns with nested quantifiers such as `(a+)+` are refused (and skipped if an older rule set already holds one). A rule set's `allowList` (values and simple `*` patterns, edited under **Allow-list**) lists values its data checks never report; see [Allow-list](./content-rules-tools.md#allow-list). Person names, locations and street addresses are found only by a rule set that lists `data.entities` with the classes it wants; see [Names, locations and street addresses](./content-rules-engine.md#names-locations-and-street-addresses).
 - **Built-in default.** The shipped default rule set is seeded read-only. Duplicate it to change it. When an upgrade ships a changed default, a new version is added.
+- **Redact personal data.** A second built-in rule set, `redact-personal-data`, also seeded read-only. It is the
+  default rule set plus person names and street addresses (the `data.entities` detector: the deployment's names and
+  addresses service when one is configured, otherwise the built-in rules), and it redacts personal data (names, email
+  addresses, phone numbers, street addresses, account and ID numbers) instead of only recording it, in prompts, tool
+  results, model output and final answers. Tick **Redact personal data** on a Content Rules node to use it there (it
+  sets the node's rule set; untick for the effective one), or pick it in **Bindings** for a project or a workflow.
+  Nothing uses it until you pick it. A rule set stored before with the same id is kept, and the built-in is then not
+  seeded.
 - **Deleting** a rule set is refused while a project or workflow is bound to it.
 - **Simulate.** **Simulate on recent traffic**, next to Save, replays recent recorded runs with the editor's changes before you save them. See [Rule set simulation](./content-rules-simulation.md).
 - **Scan a document.** Check a file or a page with the rule set's data checks before you rely on them. See [Scanning documents](#scanning-documents).

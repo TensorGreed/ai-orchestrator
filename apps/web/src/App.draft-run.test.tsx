@@ -113,6 +113,36 @@ describe("editor drafts and run feedback", () => {
     expect((saveWorkflowMock.mock.calls[0]![0] as Workflow).name).toBe("Order intake");
   });
 
+  it("does not save a new workflow that Clear leaves empty, nor after Undo brings its nodes back", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    try {
+      render(<App />);
+      await screen.findByRole("heading", { name: "Orders hook" });
+      fireEvent.click(await screen.findByRole("button", { name: "New workflow" }));
+      await screen.findByLabelText("Workflow name");
+      fireEvent.click(await screen.findByRole("button", { name: "Clear" }));
+      await waitFor(() => expect(document.querySelectorAll(".react-flow__node").length).toBe(0));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(saveWorkflowMock).not.toHaveBeenCalled();
+
+      // Undo brings the two nodes back: the graph is as it was opened, so there is still nothing to save.
+      fireEvent.keyDown(window, { key: "z", ctrlKey: true });
+      await waitFor(() => expect(document.querySelectorAll(".react-flow__node").length).toBe(2));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(saveWorkflowMock).not.toHaveBeenCalled();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it("names a new workflow so it does not repeat another workflow's name", async () => {
+    fetchWorkflowsMock.mockResolvedValue([listItem("wf-hook", "Orders hook"), listItem("wf-old", "Workflow 3")]);
+    render(<App />);
+    await screen.findByRole("heading", { name: "Orders hook" });
+    fireEvent.click(await screen.findByRole("button", { name: "New workflow" }));
+    expect(await screen.findByLabelText("Workflow name")).toHaveValue("Workflow 4");
+  });
+
   it("saves once when Save is pressed while a new workflow's first-edit save is still running", async () => {
     let finishSave: (() => void) | undefined;
     saveWorkflowMock.mockImplementation(

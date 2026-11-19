@@ -223,7 +223,7 @@ describe("POST /api/guard/profiles/:id/benchmark", () => {
     expect(ok.statusCode).toBe(200);
     const draftOfBuiltIn = await call(context, "POST", "/api/guard/profiles/default/benchmark", builder, { document: emailBlocking("default"), categories: ["sql_injection"] });
     expect(draftOfBuiltIn.statusCode).toBe(403);
-    expect(draftOfBuiltIn.json<{ error: string }>().error).toContain("default rule set is read-only");
+    expect(draftOfBuiltIn.json<{ error: string }>().error).toContain("Built-in rule sets are read-only");
     expect((await call(context, "POST", "/api/guard/profiles/default/benchmark", viewer, {})).statusCode).toBe(403);
     expect((await call(context, "POST", "/api/guard/profiles/nope/benchmark", builder, {})).statusCode).toBe(404);
     expect((await call(context, "GET", "/api/guard/profiles/default/benchmarks", viewer)).json<{ benchmarks: unknown[] }>().benchmarks).toHaveLength(1);

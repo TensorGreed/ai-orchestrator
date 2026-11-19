@@ -217,6 +217,41 @@ describe("node inspector: calm by default", () => {
     expect(screen.getByText("The field of the incoming item to check. Empty checks the whole item.")).not.toBeVisible();
   });
 
+  it("a Content Rules node redacts personal data with one tick, which picks the built-in rule set", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn();
+    render(<NodeInspector {...props({ node: node("rules", "guard", { profileId: "effective" }, "Content Rules"), onSave })} />);
+    await waitFor(() => expect(api.fetchGuardProfiles).toHaveBeenCalled());
+    const toggle = screen.getByRole("checkbox", { name: "Redact personal data" });
+    expect(toggle).not.toBeChecked();
+    await user.click(toggle);
+    expect(screen.getByLabelText("Rule set")).toHaveValue("redact-personal-data");
+    await user.click(screen.getByRole("button", { name: /Save changes/ }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave.mock.calls.at(-1)![0].config).toMatchObject({ profileId: "redact-personal-data" });
+    // Unticked: back to the effective rule set.
+    await user.click(toggle);
+    expect(screen.getByLabelText("Rule set")).toHaveValue("effective");
+  });
+
+  it("unticking Redact personal data goes back to the rule set picked before; a stored rule set with the preset's id gets no tick box", async () => {
+    const user = userEvent.setup();
+    const profile = (id: string, builtIn: boolean) => ({ id, name: id, description: null, builtIn, currentVersion: 1, hash: "h", createdAt: "", updatedAt: "" });
+    vi.mocked(api.fetchGuardProfiles).mockResolvedValue({ profiles: [profile("default", true), profile("strict", false), profile("redact-personal-data", true)] } as unknown as Awaited<ReturnType<typeof api.fetchGuardProfiles>>);
+    const { unmount } = render(<NodeInspector {...props({ node: node("rules", "guard", { profileId: "strict" }, "Content Rules") })} />);
+    await waitFor(() => expect(screen.getByRole("option", { name: "strict" })).toBeInTheDocument());
+    const toggle = screen.getByRole("checkbox", { name: "Redact personal data" });
+    await user.click(toggle);
+    expect(screen.getByLabelText("Rule set")).toHaveValue("redact-personal-data");
+    await user.click(toggle);
+    expect(screen.getByLabelText("Rule set")).toHaveValue("strict");
+    unmount();
+
+    vi.mocked(api.fetchGuardProfiles).mockResolvedValue({ profiles: [profile("default", true), profile("redact-personal-data", false)] } as unknown as Awaited<ReturnType<typeof api.fetchGuardProfiles>>);
+    render(<NodeInspector {...props({ node: node("rules", "guard", { profileId: "effective" }, "Content Rules") })} />);
+    await waitFor(() => expect(screen.queryByRole("checkbox", { name: "Redact personal data" })).not.toBeInTheDocument());
+  });
+
   it("keeps an agent's tuning fields under Advanced and its prompts in view", () => {
     render(
       <NodeInspector

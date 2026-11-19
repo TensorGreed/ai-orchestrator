@@ -42,6 +42,12 @@ Open the palette with **Add node**, a double-click on empty canvas, or the `+` b
 
 The canvas pans to show a node it adds when the node would land out of view.
 
+A node you add starts with what it needs filled in empty, with an example as a grey placeholder: an HTTP Request's
+URL, one Set row, one Filter condition (empty, it keeps every item), a Loop's input key. A Merge appends (or collects
+a loop's passes when added straight after a Loop body node). A **Schedule Trigger** starts off, in your browser's time
+zone; an **Expose as MCP Tool** trigger asks for a bearer token. A webhook, form, chat or MCP trigger or a schedule
+that is off says **Off** on its card: click it to open the node, then **Turn on**.
+
 ## Describe a workflow
 
 Builders and admins can say what a workflow should do and get a draft to review. **Describe it…** is on the Workflows
@@ -51,9 +57,12 @@ page (Home) and on an empty canvas.
    email address, post the details to our CRM API and reply with a thank-you".
 2. **Build** asks the model for a workflow. The model reads the node catalog (the node types, their settings, their
    outputs and an agent's model, memory, tool and worker ports) and hands in a workflow. That workflow is checked
-   against the workflow schema and the same graph rules as a save; when something is wrong, the problems go back to
-   the model, which fixes them (three tries in all). If the description is too vague, the model asks a question
-   instead: add the answer to your description and build again.
+   against the workflow schema and the same graph rules as a save, and every <span v-pre>`{{ }}`</span> path is checked
+   against what the steps before it output (an **LLM Call** outputs `answer`, so <span v-pre>`{{response}}`</span> after
+   it is sent back). When something is wrong, the problems go back to the model, which fixes them (three tries in all).
+   A path still wrong after the last try does not stop the draft: the preview lists it under the settings still to fill
+   in. If the description is too vague, the model asks a question instead: add the answer to your description and build
+   again.
 3. The preview shows a small drawing of the workflow and lists what it creates, the credentials to pick, the settings
    still to fill in and the addresses it calls when it runs. Nothing is saved yet. **Edit description** goes back.
 4. **Create draft** saves it as a new workflow and opens it. It never replaces a workflow you have.
@@ -71,7 +80,8 @@ What the builder never does:
 - Triggers get paths no other workflow uses.
 
 It uses the same model a new **LLM Call** starts on (see [Model nodes](#model-nodes)), with the keys saved in the
-project; the dialog shows which one. Under **More** you can choose
+project; the dialog shows which one, and under **More** its **Credential** shows the saved key it uses (or "The
+server's key" when the key comes from the API server's environment). Under **More** you can choose
 another one (a provider, a model, a base URL for an OpenAI-compatible server, Azure OpenAI or Ollama, and a saved
 credential); the browser remembers the choice, never a key. On **Echo** nothing is sent to a model: Echo only repeats its
 input, so the dialog says a real model is needed and offers the three closest templates (on a tie, those that run
@@ -114,6 +124,19 @@ the server's `OLLAMA_BASE_URL`.
 
 The agent's **Language Models** drawer offers **LLM Call** too, so an agent can run on Echo before it has a real model.
 
+An **LLM Call**'s answer is `answer`: read it with <span v-pre>`{{answer}}`</span> in the next step, or
+<span v-pre>`{{results.<nodeId>.answer}}`</span> further on. Its output also has `text`, the same value, kept so
+workflows that read it keep working; autocomplete offers `answer` only. The [node reference](../nodes/reference/llm.md)
+lists what each node outputs.
+
+A model node whose name says its provider or model, such as "Chat Model (echo)" or "OpenAI Chat Model", is renamed
+with it when you change the provider or the model ("Chat Model (anthropic)"). A name you gave it yourself stays.
+
+In a workflow with several agents (a **Supervisor** and its workers), each agent has its own chat model. When you
+change the model of one that is an **LLM Call** and another agent's **LLM Call** uses a different one, the node
+offers **Use for all agents in this workflow**: one click saves the node and puts the same provider, model, base URL
+and credential on every agent's **LLM Call** chat model (each keeps its own temperature and token limit). **Undo** takes it back in one step.
+
 ## Workflow settings
 
 The **⋯** menu in the editor's top bar holds the settings of the whole workflow (they are saved with it), under
@@ -129,7 +152,11 @@ clean-up (`settings.errorWorkflowId` in the workflow JSON). Start it with an **E
 run's `source_workflow_id`, `source_workflow_name`, `execution_id`, `error`, `error_stack` and `timestamp`. The failed
 run's caller still gets the error, replays never start it, and an error workflow in another project runs only when
 that project shared it with execute access (see [what a running workflow can reach](../security/auth-rbac.md#what-a-running-workflow-can-reach)). Pick **None** to turn it
-off.
+off. Its runs are listed in **Runs** like any other, with the trigger `error`: the failed run's details say
+**Error workflow ran → run …**, and the error workflow's run says which failed run it handled. Each belongs to the
+person who started the failed run, so someone who sees only their own runs sees the error runs of their runs. An
+error workflow that fails does not start another one, and a failed run starts its error workflow once, even if it runs
+again (unless a used-up budget refused that error run, or the queue failed to take it: then it is tried again).
 
 ## Running from the editor
 
@@ -175,7 +202,7 @@ While the run is going the cards update live (running time, the step a node is o
 
 ### The node inspector
 
-Double-click a node to open it. The inspector opens as a panel over the dimmed editor; click the dimmed area, press
+Double-click a node to open it, or click a selected node again. The inspector opens as a panel over the dimmed editor; click the dimmed area, press
 `Esc` or use the close button to return to the canvas (unsaved edits are confirmed first). On a wide window the
 inspector shows **Input | Parameters | Output** side by side,
 for every node, so it keeps its shape while you move between nodes; on a narrow window the same parts are tabs
@@ -248,6 +275,25 @@ history keeps masked or as placeholders (see [content rules](/product/content-ru
      - `tool`: one or more `mcp_tool` or `workflow_tool` nodes
 3. RAG:
    - `text_input -> rag_retrieve -> prompt_template -> llm_call -> output`
+
+### What a webhook's caller gets
+
+A run started by a webhook (its URL, `/webhook-test/`, `POST /api/webhooks/execute` and its stream) answers with the
+reply of the last **Webhook Response** node that ran, even when other nodes (an Output node, a notification) run after
+it. The run's output in Runs is that reply too, so it shows what the caller got; replays and golden sets of a webhook run
+follow the same rule. That is the webhook trigger's default **Response Mode**, **Automatic** (under More): the last
+Webhook Response that ran, else the last node's output. **Last Node Output** always answers with the last node's output.
+A run that fails after its Webhook Response answers with the error. Runs that no webhook started (the editor's **Run**,
+sub-workflows, schedules) keep their Output node's result.
+
+**On Received** answers the caller at once, before the run starts its work: `202` with
+`{"executionId": "…", "status": "accepted"}`, on the webhook's URL and on `/webhook-test/`. The run goes on in the
+background (on a worker when runs are queued) and is listed in **Runs** under that id, where its result is. Use it
+for callers that must not wait, such as a service that retries a slow reply. Content rules on responses check this
+reply too (a withheld reply starts no run), an idempotency key answers a retry with the same `202`, and a used-up block
+budget, a full queue or too many such runs at once on the instance (`DISPATCH_MAX_WAITING`, `503`) is refused before
+anything runs. A time limit in the request body counts only for a caller its token or signature verified.
+`POST /api/webhooks/execute` always waits for the run.
 
 ## Validation behavior
 

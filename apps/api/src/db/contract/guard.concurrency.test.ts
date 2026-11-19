@@ -83,7 +83,7 @@ postgres("guard on two Postgres stores sharing one database", () => {
     const gb = new GuardService(b, new SecretService(b, key), { autoApply: true, logger: () => {} });
     await ga.ensureBuiltIns();
     await gb.ensureBuiltIns();
-    expect((await a.listGuardProfiles()).map((p) => p.id)).toEqual(["default"]);
+    expect((await a.listGuardProfiles()).map((p) => p.id)).toEqual(["default", "redact-personal-data"]);
     const stack = async () => (await ga.resolveRun({ workflowId: "wf", projectId: "default" })).stack.map((entry) => `${entry.profileId}@${entry.version}`);
 
     expect(await ga.mayUseLabels()).toBe(false);

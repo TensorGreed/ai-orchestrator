@@ -117,6 +117,16 @@ Retrieves context chunks from provided documents or vector store.
 | `vectorStoreConfig` | `object` | no | — |
 | `embeddingSecretRef` | `object` | no | — |
 
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `query` | The query that was searched. |
+| `documents` | The chunks found, best first. |
+| `context` | The chunks joined as one text, ready for a prompt. |
+| `citationInstructions` | Instructions that ask the model to cite chunks as [1], [2]... |
+| `contentRules` | What content rules did to the chunks, when they apply. |
+
 **Example config**
 
 ```json

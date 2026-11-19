@@ -8,7 +8,8 @@ import { ORBIT, emptySlots, isHubType, ringGeometry, summarizeNode } from "../li
 import type { McpCanvasMarker, McpNavTarget } from "../lib/mcp-control-plane";
 import { NodeTypeIcon } from "./node-icons";
 import { ERROR_OUTPUT_HANDLE, showsErrorOutput } from "../lib/error-output";
-import { CanvasInsertContext } from "./canvas-insert-context";
+import { CanvasInsertContext, CanvasOpenNodeContext } from "./canvas-insert-context";
+import { isLiveEntryOff } from "@ai-orchestrator/shared";
 
 const TERMINAL_TYPES = new Set([
   "schedule_trigger",
@@ -49,6 +50,8 @@ function statusTitle(status: EditorNodeData["executionStatus"]): string {
       return "Completed";
     case "error":
       return "Failed";
+    case "handled":
+      return "Failed, handled by its Error output";
     case "skipped":
       return "Skipped";
     case "canceled":
@@ -158,6 +161,38 @@ function Badges({ data }: { data: EditorNodeData }) {
         </span>
       )}
     </>
+  );
+}
+
+/**
+ * A webhook, form, chat or MCP trigger or a schedule that is switched off says so on its card: "Off" opens its
+ * settings, where one click turns it on.
+ */
+function LiveEntryOffBadge({ nodeId, data }: { nodeId: string; data: EditorNodeData }) {
+  const openNode = useContext(CanvasOpenNodeContext);
+  if (!isLiveEntryOff({ type: data.nodeType, config: data.config })) return null;
+  const title = "Off: takes no live calls until it is turned on. Run in the editor works either way.";
+  return openNode ? (
+    <button
+      type="button"
+      className="wf-node-off-badge nodrag nopan"
+      title={`${title} Click to open it and turn it on.`}
+      aria-label="Off: open to turn on"
+      data-testid="node-off-badge"
+      onMouseDown={(event) => event.stopPropagation()}
+      onPointerDown={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
+      onClick={(event) => {
+        event.stopPropagation();
+        openNode(nodeId);
+      }}
+    >
+      Off
+    </button>
+  ) : (
+    <span className="wf-node-off-badge" title={title} data-testid="node-off-badge">
+      Off
+    </span>
   );
 }
 
@@ -275,6 +310,7 @@ function CardNode({ id, data, selected }: VariantProps) {
         {data.mcpMarker && <McpMarker marker={data.mcpMarker} onOpen={data.onOpenMcpTarget} variant="card" />}
       </div>
       <span className={`wf-status-ring wf-status-${status ?? "idle"}`} title={statusTitle(status)} aria-label={statusTitle(status)} />
+      <LiveEntryOffBadge nodeId={id} data={data} />
       <StructuralPorts nodeId={id} data={data} />
       <ErrorOutputPort nodeId={id} data={data} placement="card" />
       <DebugPreview data={data} />
