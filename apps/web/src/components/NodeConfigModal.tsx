@@ -40,7 +40,7 @@ import {
 } from "@ai-orchestrator/shared";
 import { buildToolPolicyTraceView, readToolPolicyTrace } from "../lib/tool-policy-trace";
 import { isNumberOrTemplateSchema, numberOrTemplateText, parseNumberOrTemplate } from "../lib/number-or-template";
-import type { LiveNodeResult } from "../lib/run-trace";
+import { isLiveExecutionResult, type LiveNodeResult } from "../lib/run-trace";
 import { LiveElapsed } from "./WorkflowCanvasNode";
 import { latestResolvedFields, NodeActivityList, ResolvedFieldsTable } from "./NodeActivityList";
 import { isInternalKey, NodeRunInput, NodeRunOutput, RunDataView, RunStatusLine, RunStepBar, type RunNodeResult } from "./NodeRunData";
@@ -10783,7 +10783,7 @@ export function NodeInspector({
     storeInspectorLayout(next);
   };
   const runLabel = executionResult && showRuntimeInspection
-    ? `Run ${executionResult.status === "partial" ? "in progress" : executionResult.status}${
+    ? `Run ${isLiveExecutionResult(executionResult) ? "in progress" : executionResult.status}${
         executionResult.startedAt ? `, started ${new Date(executionResult.startedAt).toLocaleTimeString()}` : ""
       }`
     : undefined;
