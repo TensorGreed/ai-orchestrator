@@ -48,6 +48,13 @@ describe("RunPicker", () => {
     expect(onPick).toHaveBeenCalledWith("run-1", false);
   });
 
+  it("says the list holds only your own runs when the workflow is shared only with you", async () => {
+    render(<RunPicker workflowId="wf" enabled ownRunsOnly current={null} onPick={vi.fn()} />);
+    const select = await screen.findByLabelText("Your runs");
+    await waitFor(() => expect(select.querySelectorAll("option")).toHaveLength(3));
+    expect(select.closest("label")!.getAttribute("title")).toMatch(/only your own runs are listed/);
+  });
+
   it("tells the host when the newest run is picked, so the canvas follows new runs again", async () => {
     const onPick = vi.fn();
     render(<RunPicker workflowId="wf" enabled current={{ executionId: "run-1", startedAt: "2026-01-01T10:00:00.000Z", status: "error" }} onPick={onPick} />);

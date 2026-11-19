@@ -55,6 +55,7 @@ import type { BudgetScopeType, McpGatewayRateLimit } from "@ai-orchestrator/shar
 import type { McpGatewayLabelMark, McpGatewayLabelMarkKey, McpGatewayLabelMarkRaise } from "./gateway-label-marks.js";
 import type {
   ApprovalReadScope,
+  OwnRunsFilter,
   ApprovalRequestInsert,
   ApprovalRequestRecord,
   AuditSigningKeyRecord,
@@ -2158,6 +2159,11 @@ export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentR
     workflowId?: string;
     /** Only runs of these workflows; an empty list matches nothing. */
     workflowIds?: string[];
+    /**
+     * With `workflowIds`: also the runs of these workflows that are the person's (started by them, or run in their
+     * sessions). For workflows shared only with the person.
+     */
+    ownRunsOnly?: OwnRunsFilter;
     triggerType?: string;
     startedFrom?: string;
     startedTo?: string;

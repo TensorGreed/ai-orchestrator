@@ -4753,7 +4753,14 @@ export async function createApp(
     canInProject: async (user, projectId, permission) => await rbacService.can(user, projectId, permission),
     listWorkflowIdsSharedToProject: async (projectId) => (await store.listWorkflowsSharedToProject(projectId)).map((share) => share.workflowId),
     projectExists: async (projectId) => Boolean(await store.getProject(projectId)),
-    listWorkflowIdsSharedToUser: async (userId) => (await store.listWorkflowsSharedToUser(userId)).map((share) => share.workflowId)
+    listWorkflowIdsSharedToUser: async (userId) => (await store.listWorkflowsSharedToUser(userId)).map((share) => share.workflowId),
+    readsOnlyThroughUserShare: async (user, workflow) => await rbacService.readsOnlyThroughUserShare(user, workflow),
+    // Who started a run (its history, or the paused state of a run that has none yet) and whose sessions it used.
+    getRunOwner: async (executionId) => {
+      const started = (await store.getExecutionHistory(executionId)) ?? (await store.getWorkflowExecutionState(executionId));
+      if (!started) return null;
+      return { triggeredBy: started.triggeredBy ?? null, sessionOwner: await store.getExecutionSessionOwner(executionId) };
+    }
   });
   // Phase 9.1 — built-in persistent vector store. A run sees the knowledge
   // bases of its own project and the shared ones without a project; any other
@@ -5878,7 +5885,7 @@ export async function createApp(
           const actorRecord = await backgroundRunUser(actorUserId, actorApiKeyId);
           actor = actorRecord && actorRecord.email === actorEmail ? actorRecord : null;
           const check = actor
-            ? await approvalPersonCheck(request, actor, async (user, workflowId, permission) => await runAccess.run(user, { id: workflowId, workflowId }, permission), {
+            ? await approvalPersonCheck(request, actor, async (user, workflowId, permission) => await runAccess.runsOfWorkflow(user, workflowId, permission), {
                 skipSelfApproval: true,
                 accessOnly: timedOut
               })
@@ -6052,8 +6059,9 @@ export async function createApp(
     dispatch: dispatchApprovalResume,
     isLeader: () => leaderElection.isLeader(),
     // Project authorization is the shared run-access check, on the workflow as it is now.
-    access: async (user, workflowId, permission) => await runAccess.run(user, { id: workflowId, workflowId }, permission),
-    readableWorkflowIds: async (user) => await runAccess.readableWorkflowIds(user),
+    access: async (user, workflowId, permission) => await runAccess.runsOfWorkflow(user, workflowId, permission),
+    runListScope: async (user) => await runAccess.runListScope(user),
+    runAccess: async (user, run, permission) => await runAccess.run(user, run, permission),
     canExecuteDraft: async (user, workflow) =>
       await store.getWorkflow(workflow.id)
         ? (await runAccess.workflow(user, workflow.id, "workflow:execute")).ok
@@ -11224,7 +11232,9 @@ export async function createApp(
     // with another project takes workflow:write on the owning project.
     const canShare = user.role === "admin" || (await rbacService.can(user, owningProject, "project:invite"));
     const canShareWithProjects = user.role === "admin" || (await rbacService.can(user, owningProject, "workflow:write"));
-    return { workflowId: workflow.id, role: user.role, canRead: true, canEdit: canWrite, canRun: canExecute, canShare, canShareWithProjects };
+    // A share with the person is all they have: they see only their own runs of it.
+    const ownRunsOnly = !(await runAccess.seesAllRuns(user, workflow));
+    return { workflowId: workflow.id, role: user.role, canRead: true, canEdit: canWrite, canRun: canExecute, canShare, canShareWithProjects, ownRunsOnly };
   });
 
   app.get<{ Params: { id: string } }>("/api/workflows/:id/variables", async (request, reply) => {
@@ -16556,7 +16566,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const limit = typeof (request.query as Record<string, unknown>).limit === "string"
         ? Math.min(200, Math.max(1, Number((request.query as Record<string, unknown>).limit)))
         : 50;
-      return await queueProducer.listDlq(limit, await runAccess.readableWorkflowIds(user) ?? undefined);
+      // Dead-lettered runs of workflows whose runs the user sees all of (not those shared only with them).
+      return await queueProducer.listDlq(limit, await runAccess.runVisibleWorkflowIds(user) ?? undefined);
     });
 
     app.post<{ Params: { id: string }; Body: unknown }>(

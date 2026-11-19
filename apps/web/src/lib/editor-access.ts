@@ -8,6 +8,8 @@ export interface WorkflowAccessView {
   canEdit: boolean;
   canRun: boolean;
   canShare: boolean;
+  /** True when a share with you is all you have: you see only the runs you started (or that ran in your sessions). */
+  ownRunsOnly?: boolean;
 }
 
 export interface EditorAccess {

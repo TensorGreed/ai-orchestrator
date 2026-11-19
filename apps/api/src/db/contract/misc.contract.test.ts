@@ -504,3 +504,27 @@ describeStoreContract("store contract: notification configs", (ctx) => {
     expect((await store.listNotificationConfigs()).map((n) => n.id)).toEqual(["n2"]);
   });
 });
+
+describeStoreContract("store contract: run history lists with own runs only", (ctx) => {
+  it("lists every run of the full workflows and, of the others, the person's own runs, before paging", async () => {
+    const store = ctx.store();
+    const at = (minute: number) => new Date(Date.UTC(2026, 0, 1, 0, minute)).toISOString();
+    await store.saveExecutionHistory({ id: "mine", workflowId: "wf-shared", status: "success", startedAt: at(1), triggeredBy: "Pat@Example.com" });
+    await store.saveExecutionHistory({ id: "by-id", workflowId: "wf-shared", status: "success", startedAt: at(2), triggeredBy: "u-pat" });
+    await store.saveExecutionHistory({ id: "in-session", workflowId: "wf-shared", status: "error", startedAt: at(3), triggeredBy: "scheduler" });
+    await store.setExecutionSessionOwner("in-session", "u-pat");
+    await store.saveExecutionHistory({ id: "other", workflowId: "wf-shared", status: "success", startedAt: at(4), triggeredBy: "lee@example.com" });
+    await store.saveExecutionHistory({ id: "anon", workflowId: "wf-shared", status: "success", startedAt: at(5) });
+    await store.saveExecutionHistory({ id: "team", workflowId: "wf-team", status: "success", startedAt: at(6), triggeredBy: "lee@example.com" });
+    const own = { workflowIds: ["wf-shared"], userId: "u-pat", email: "pat@example.com" };
+    const list = async (input: Parameters<Store["listExecutionHistory"]>[0]) => {
+      const page = await store.listExecutionHistory(input);
+      return { ids: page.items.map((item) => item.id), total: page.total };
+    };
+    expect(await list({ workflowIds: ["wf-team"], ownRunsOnly: own })).toEqual({ ids: ["team", "in-session", "by-id", "mine"], total: 4 });
+    expect(await list({ workflowIds: [], ownRunsOnly: own, pageSize: 2 })).toEqual({ ids: ["in-session", "by-id"], total: 3 });
+    expect(await list({ workflowIds: [], ownRunsOnly: own, status: "success" })).toEqual({ ids: ["by-id", "mine"], total: 2 });
+    expect(await list({ workflowIds: [], ownRunsOnly: { ...own, workflowIds: [] } })).toEqual({ ids: [], total: 0 });
+    expect(await list({ workflowIds: ["wf-shared", "wf-team"] })).toMatchObject({ total: 6 });
+  });
+});

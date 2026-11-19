@@ -192,9 +192,12 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
 
   const notFound = (reply: FastifyReply, what: string) => denyRunAccess(reply, { status: 404, error: `${what} not found` });
 
-  /** The run filter for the user: runs of readable workflows only (`undefined` for admins). */
+  /**
+   * The run filter for the user: runs of readable workflows only (`undefined` for admins), and not of workflows shared
+   * only with the person, who sees only their own runs.
+   */
   const readableWorkflowFilter = async (user: SafeUser): Promise<{ workflowIds?: string[] }> => {
-    const ids = await runAccess.readableWorkflowIds(user);
+    const ids = await runAccess.runVisibleWorkflowIds(user);
     return ids ? { workflowIds: ids } : {};
   };
 
@@ -500,7 +503,7 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     const replaySource = mcpOptions.data.replay;
     if (replaySource?.cassetteId) {
       const summary = await store.getMcpCassetteSummary(replaySource.cassetteId);
-      const access = await runAccess.run(user, summary && { id: summary.id, workflowId: summary.workflowId ?? "" }, "workflow:read", "Cassette");
+      const access = await runAccess.run(user, summary && { id: summary.id, workflowId: summary.workflowId ?? "", executionId: summary.executionId }, "workflow:read", "Cassette");
       if (!access.ok) return denyRunAccess(reply, access);
       if (summary?.workflowId !== workflowId) {
         reply.code(409);

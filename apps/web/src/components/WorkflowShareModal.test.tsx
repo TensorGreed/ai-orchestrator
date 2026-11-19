@@ -41,6 +41,7 @@ describe("WorkflowShareModal people", () => {
     renderModal();
     expect(await screen.findByText("victor@example.com")).toBeInTheDocument();
     expect(screen.getByRole("cell", { name: /Can view \(role cannot run\)/ })).toBeInTheDocument();
+    expect(screen.getByText(/They see only their own runs of it/)).toBeInTheDocument();
 
     await userEvent.type(screen.getByLabelText("Email"), "olivia@example.com");
     await userEvent.selectOptions(screen.getByLabelText("Access"), "execute");

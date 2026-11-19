@@ -1536,10 +1536,11 @@ function StudioApp() {
   const canManageWorkflows = authUser?.role === "admin" || authUser?.role === "builder";
   const canManageSecrets = authUser?.role === "admin" || authUser?.role === "builder";
   // What you may do with the open workflow: viewers and operators open it read-only; a builder may only view a
-  // workflow shared with them (or in a project where their role is view-only). Asked for each saved workflow.
+  // workflow shared with them (or in a project where their role is view-only). Asked for each saved workflow, also
+  // for viewers: a workflow shared only with you lists only your own runs.
   const [workflowAccess, setWorkflowAccess] = useState<WorkflowAccessView | null>(null);
   useEffect(() => {
-    if (!authUser || !currentWorkflowExists || authUser.role === "viewer") {
+    if (!authUser || !currentWorkflowExists) {
       setWorkflowAccess(null);
       return;
     }
@@ -5763,6 +5764,7 @@ function StudioApp() {
                       : null
                   }
                   busy={busy}
+                  ownRunsOnly={Boolean(workflowAccess?.workflowId === currentWorkflow.id && workflowAccess.ownRunsOnly)}
                   onPick={(executionId, isLatest) => void handlePickRun(executionId, isLatest)}
                 />
               }

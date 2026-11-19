@@ -1973,7 +1973,17 @@ export async function fetchProjectSharedWorkflows(projectId: string) {
 
 /** What you may do with a workflow (the editor shows only the controls that work). */
 export async function fetchWorkflowAccess(workflowId: string) {
-  return apiRequest<{ workflowId: string; role: string; canRead: boolean; canEdit: boolean; canRun: boolean; canShare: boolean; canShareWithProjects?: boolean }>(
+  return apiRequest<{
+    workflowId: string;
+    role: string;
+    canRead: boolean;
+    canEdit: boolean;
+    canRun: boolean;
+    canShare: boolean;
+    canShareWithProjects?: boolean;
+    /** A share with you is all you have: run lists and run data hold only your own runs. */
+    ownRunsOnly?: boolean;
+  }>(
     `/api/workflows/${encodeURIComponent(workflowId)}/access`
   );
 }

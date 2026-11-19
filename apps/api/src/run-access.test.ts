@@ -17,7 +17,7 @@ import type { Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
-import { createRunAccess } from "./run-access.js";
+import { createRunAccess, runOwnedBy, type RunOwner } from "./run-access.js";
 import { AuthService, type SafeUser } from "./services/auth-service.js";
 import { QueueService } from "./services/queue-service.js";
 import { strictIsolationStartupWarning } from "./services/rbac-service.js";
@@ -206,7 +206,9 @@ describe("run-access helper", () => {
     canAccessWorkflow: async (_user, workflow, permission) => workflow.projectId === "pa" || permission === "workflow:read",
     canInProject: async (_user, projectId, permission) => projectId === "pa" || permission === "workflow:read",
     listWorkflowIdsSharedToProject: async () => [],
-    projectExists: async (projectId) => projectId === "pa" || projectId === "pb"
+    projectExists: async (projectId) => projectId === "pa" || projectId === "pb",
+    readsOnlyThroughUserShare: async () => false,
+    getRunOwner: async () => null
   });
 
   it("answers 404 for unknown or unreadable workflows and 403 for readable ones without the permission", async () => {
@@ -225,6 +227,8 @@ describe("run-access helper", () => {
     expect(await access.run(admin, { id: "r", workflowId: "gone" }, "workflow:execute")).toMatchObject({ ok: true, workflow: null });
     expect(await access.run(user("builder"), { id: "r", workflowId: "gone" }, "workflow:read")).toMatchObject({ ok: false, status: 404 });
     expect(await access.run(admin, null, "workflow:read")).toMatchObject({ ok: false, status: 404 });
+    expect(await access.runsOfWorkflow(admin, "gone", "workflow:execute")).toMatchObject({ ok: true, workflow: null });
+    expect(await access.runsOfWorkflow(user("builder"), "gone", "workflow:read")).toMatchObject({ ok: false, status: 404 });
     expect(await access.readableWorkflowIds(admin)).toBeNull();
     expect(await access.readableProjectIds(admin)).toBeNull();
   });
@@ -238,6 +242,76 @@ describe("run-access helper", () => {
     expect(await locked.readableWorkflowIds(user("viewer"))).toEqual(["a", "b"]);
     expect(await locked.readableWorkflowIds(user("builder"))).toEqual(["a"]);
     expect(await locked.readableWorkflowIds({ ...user("viewer"), projectScope: ["pa"] })).toEqual(["a"]);
+  });
+
+  describe("a person who reads a workflow only through a share with them sees only their own runs", () => {
+    // pa is the viewer's project; b (in pb) is shared with the viewer only; c (in pb) is shared with the viewer and to pa.
+    const owners: Record<string, RunOwner> = {
+      "run-mine": { triggeredBy: "Viewer@Example.com", sessionOwner: null },
+      "run-session": { triggeredBy: "someone@example.com", sessionOwner: "u-viewer" },
+      "run-by-id": { triggeredBy: "u-viewer", sessionOwner: null },
+      "run-other": { triggeredBy: "someone@example.com", sessionOwner: null },
+      "run-anon": { triggeredBy: null, sessionOwner: null }
+    };
+    const withC = { ...workflows, c: { ...workflows.b!, id: "c" } } as Record<string, Workflow>;
+    const shareOnly = createRunAccess({
+      ...accessDeps(),
+      getWorkflow: async (id) => withC[id] ?? null,
+      listWorkflows: async () => Object.values(withC),
+      canInProject: async (_user, projectId) => projectId === "pa",
+      canAccessWorkflow: async (_user, workflow) => workflow.projectId === "pa" || ["b", "c"].includes(workflow.id),
+      listWorkflowIdsSharedToProject: async (projectId) => (projectId === "pa" ? ["c"] : []),
+      listWorkflowIdsSharedToUser: async (userId) => (userId === "u-viewer" ? ["b", "c"] : []),
+      readsOnlyThroughUserShare: async (_user, workflow) => workflow.id === "b",
+      getRunOwner: async (id) => owners[id] ?? null
+    });
+    const viewer = { ...user("viewer"), email: "viewer@example.com" };
+
+    it("answers 404 for someone else's run and passes their own (started by them, by id, or in their sessions)", async () => {
+      for (const id of ["run-mine", "run-session", "run-by-id"]) {
+        expect(await shareOnly.run(viewer, { id, workflowId: "b" }, "workflow:read")).toMatchObject({ ok: true });
+      }
+      for (const id of ["run-other", "run-anon", "no-such-run"]) {
+        expect(await shareOnly.run(viewer, { id, workflowId: "b" }, "workflow:read")).toMatchObject({ ok: false, status: 404, error: "Execution not found" });
+      }
+      // A record that belongs to a run is judged by that run.
+      expect(await shareOnly.run(viewer, { id: "cassette-1", executionId: "run-mine", workflowId: "b" }, "workflow:read", "Cassette")).toMatchObject({ ok: true });
+      expect(await shareOnly.run(viewer, { id: "cassette-2", executionId: "run-other", workflowId: "b" }, "workflow:read", "Cassette")).toMatchObject({ ok: false, status: 404 });
+      // A workflow they also read through their project (c, shared to pa), or their own project's: every run.
+      expect(await shareOnly.run(viewer, { id: "run-other", workflowId: "c" }, "workflow:read")).toMatchObject({ ok: true });
+      expect(await shareOnly.run(viewer, { id: "run-other", workflowId: "a" }, "workflow:read")).toMatchObject({ ok: true });
+      // Admins see every run.
+      expect(await shareOnly.run(user("admin"), { id: "run-other", workflowId: "b" }, "workflow:read")).toMatchObject({ ok: true });
+    });
+
+    it("scopes run lists: every run of fully readable workflows, own runs of the others", async () => {
+      expect(await shareOnly.runListScope(viewer)).toEqual({
+        workflowIds: ["a", "c"],
+        ownRunsOnly: { workflowIds: ["b"], userId: "u-viewer", email: "viewer@example.com" }
+      });
+      expect(await shareOnly.runVisibleWorkflowIds(viewer)).toEqual(["a", "c"]);
+      expect(await shareOnly.readableWorkflowIds(viewer)).toEqual(["a", "c", "b"]);
+      expect(await shareOnly.runListScope(user("admin"))).toBeNull();
+      expect(await shareOnly.runVisibleWorkflowIds(user("admin"))).toBeNull();
+      // Nobody shares anything with the builder: no own-only part.
+      expect(await shareOnly.runListScope(user("builder"))).toEqual({ workflowIds: ["a", "c"], ownRunsOnly: null });
+      const rows = [
+        { id: "run-mine", workflowId: "b" },
+        { id: "run-other", workflowId: "b" },
+        { id: "run-other", workflowId: "a" },
+        { id: "x", executionId: "run-session", workflowId: "b" }
+      ];
+      expect(await shareOnly.filterRuns(viewer, rows)).toEqual([rows[0], rows[2], rows[3]]);
+    });
+
+    it("judges ownership by email (any case), user id or session owner", () => {
+      const person = { id: "u-1", email: "pat@example.com" };
+      expect(runOwnedBy({ triggeredBy: "PAT@example.com", sessionOwner: null }, person)).toBe(true);
+      expect(runOwnedBy({ triggeredBy: "u-1", sessionOwner: null }, person)).toBe(true);
+      expect(runOwnedBy({ triggeredBy: "scheduler", sessionOwner: "u-1" }, person)).toBe(true);
+      expect(runOwnedBy({ triggeredBy: "scheduler", sessionOwner: "u-2" }, person)).toBe(false);
+      expect(runOwnedBy({ triggeredBy: null, sessionOwner: null }, person)).toBe(false);
+    });
   });
 
   it("filters rows to readable workflows", async () => {
@@ -255,7 +329,9 @@ describe("run-access helper", () => {
       canAccessWorkflow: async () => true,
       canInProject: async () => true,
       listWorkflowIdsSharedToProject: async (_projectId: string): Promise<string[]> => [],
-      projectExists: async () => true
+      projectExists: async () => true,
+      readsOnlyThroughUserShare: async (): Promise<boolean> => false,
+      getRunOwner: async (_executionId: string): Promise<RunOwner | null> => null
     };
   }
 });

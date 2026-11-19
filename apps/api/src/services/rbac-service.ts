@@ -373,6 +373,19 @@ export class RbacService {
     return true;
   }
 
+  /**
+   * True when the person may read this workflow only through a share with them: no read in its project and no share
+   * to a project they can read. Such a person sees only their own runs of it (run-access.ts).
+   */
+  async readsOnlyThroughUserShare(user: SafeUser, workflow: { id: string; projectId?: string | null }): Promise<boolean> {
+    if (!await this.userShareAccess(user, workflow)) return false;
+    if (await this.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "workflow:read")) return false;
+    for (const share of await this.store.listWorkflowShares(workflow.id)) {
+      if (await this.can(user, share.projectId, "workflow:read")) return false;
+    }
+    return true;
+  }
+
   async shareWorkflowWithUser(input: { workflowId: string; userId: string; accessLevel: "read" | "execute"; sharedBy?: string | null }): Promise<boolean> {
     return await this.store.upsertWorkflowUserShare(input);
   }

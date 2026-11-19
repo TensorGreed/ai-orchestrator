@@ -112,6 +112,31 @@ describeStoreContract("store contract: approvals", (ctx) => {
     expect(isOnePendingApprovalViolation(new Error("other"))).toBe(false);
   });
 
+  it("own runs only: of a workflow shared only with the person, the requests of runs they started or that ran in their sessions", async () => {
+    const store = ctx.store();
+    const startedAt = new Date().toISOString();
+    // run-mine: started by Pat (email in another case); run-session: started by someone else in Pat's sessions;
+    // run-paused-only: no history yet, a paused state started by Pat's user id; run-other: someone else's.
+    await store.saveExecutionHistory({ id: "run-mine", workflowId: "wf", status: "waiting_approval", startedAt, triggeredBy: "PAT@example.com" });
+    await store.saveExecutionHistory({ id: "run-session", workflowId: "wf", status: "waiting_approval", startedAt, triggeredBy: "lee@example.com" });
+    await store.setExecutionSessionOwner("run-session", "u-pat");
+    await store.saveWorkflowExecutionState({ id: "run-paused-only", workflowId: "wf", status: "waiting_approval", waitingNodeId: "gate", startedAt, triggeredBy: "u-pat", state: {} });
+    await store.saveExecutionHistory({ id: "run-other", workflowId: "wf", status: "waiting_approval", startedAt, triggeredBy: "lee@example.com" });
+    await store.saveExecutionHistory({ id: "run-team", workflowId: "wf-team", status: "waiting_approval", startedAt, triggeredBy: "lee@example.com" });
+    for (const [id, executionId, workflowId] of [
+      ["r-mine", "run-mine", "wf"], ["r-session", "run-session", "wf"], ["r-paused", "run-paused-only", "wf"], ["r-other", "run-other", "wf"], ["r-team", "run-team", "wf-team"]
+    ] as const) {
+      await store.insertApprovalRequest(request(id, { executionId, workflowId }));
+    }
+    const pat = { userId: "u-pat", email: "pat@example.com" };
+    const ids = async (scope: { workflowIds: string[]; ownRunsOnly?: { workflowIds: string[]; userId: string; email: string } }) =>
+      (await store.listApprovalRequests({ status: "all", scope })).map((r) => r.id).sort();
+    expect(await ids({ workflowIds: ["wf-team"], ownRunsOnly: { workflowIds: ["wf"], ...pat } })).toEqual(["r-mine", "r-paused", "r-session", "r-team"]);
+    expect(await ids({ workflowIds: [], ownRunsOnly: { workflowIds: ["wf"], ...pat } })).toEqual(["r-mine", "r-paused", "r-session"]);
+    expect(await ids({ workflowIds: [], ownRunsOnly: { workflowIds: ["wf"], userId: "u-nobody", email: "nobody@example.com" } })).toEqual([]);
+    expect(await ids({ workflowIds: ["wf", "wf-team"] })).toEqual(["r-mine", "r-other", "r-paused", "r-session", "r-team"]);
+  });
+
   it("a deleted workflow's requests leave scoped lists", async () => {
     const store = ctx.store();
     await store.insertApprovalRequest(request("r1"));
