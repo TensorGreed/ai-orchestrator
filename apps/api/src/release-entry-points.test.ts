@@ -117,6 +117,7 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "app.ts", match: "const version = store.getWorkflowVersion(execution.workflowId, ranOn.version);", kind: "not_run", why: "v74: the version a production run ran, checked for declared sensitive sources; nothing runs" },
   { file: "app.ts", match: "const current = store.getWorkflow(candidate.workflow.id);", kind: "draft", why: "a replay job's case: the candidate's current project" },
   { file: "execution-routes.ts", match: "const workflow = store.getWorkflow(source.workflowId);", kind: "draft", why: "executions replay (cassette) runs the draft" },
+  { file: "app.ts", match: "const forEditCheck = store.getWorkflow(workflowId);", kind: "not_run", why: "a replay job's case re-checks the edit rule on the workflow's project; nothing runs from it" },
   { file: "app.ts", match: "const current = store.getWorkflow(pending.workflowId);", kind: "not_run", why: "an approval resume runs the paused snapshot; only its current project is read" },
   { file: "app.ts", match: "getWorkflow: (id) => store.getWorkflow(id),", kind: "draft", why: "run-access and run-scope dependencies: access checks and draft-run sub-workflows", count: 2 },
   { file: "app.ts", match: "store.getWorkflow(workflow.id)", exact: true, kind: "draft", why: "approval routes: whether a draft can be executed by the user" },

@@ -5161,8 +5161,8 @@ export async function createApp(
     if (!actor || !(await runAccess.workflow(actor, workflowId, "workflow:execute")).ok) return null;
     if (permission === "workflow:execute") return actor;
     // Write means the one edit rule: a builder role and workflow:write (runAccess.mayEdit).
-    const workflow = await store.getWorkflow(workflowId);
-    return workflow && (await runAccess.mayEdit(actor, workflow)) ? actor : null;
+    const forEditCheck = await store.getWorkflow(workflowId);
+    return forEditCheck && (await runAccess.mayEdit(actor, forEditCheck)) ? actor : null;
   };
 
   const evalService = new EvalService(store, async (input) => {
