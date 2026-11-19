@@ -391,6 +391,33 @@ describe("POST /api/workflow-builder/build", () => {
     expect(JSON.stringify(modelRequests[0]!.messages[0]!.content)).toMatch(/outputFields/);
   });
 
+  it("a described schedule starts off, in the time zone the studio sends (an unknown zone is ignored)", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context, "builder");
+    const nightly = {
+      name: "Nightly",
+      nodes: [
+        { id: "nightly", type: "schedule_trigger", config: { cronExpression: "0 2 * * *", active: true } },
+        { id: "done", type: "output", config: {} }
+      ],
+      edges: [{ source: "nightly", target: "done" }]
+    };
+    script = [{ toolCalls: [{ name: "submit_workflow", arguments: nightly }] }];
+    const first = (await build(context, cookie, { prompt: "every night", model: mockModel(), timeZone: "Europe/Berlin" })).json<WorkflowBuilderResult>();
+    expect(first.status).toBe("ready");
+    if (first.status !== "ready") return;
+    expect(first.workflow.nodes[0]!.config).toMatchObject({ active: false, timezone: "Europe/Berlin" });
+
+    modelRequests.length = 0;
+    script = [{ toolCalls: [{ name: "submit_workflow", arguments: nightly }] }];
+    const unknown = await build(context, cookie, { prompt: "every night", model: mockModel(), timeZone: "Mars/Olympus_Mons" });
+    expect(unknown.statusCode).toBe(200);
+    const second = unknown.json<WorkflowBuilderResult>();
+    if (second.status !== "ready") throw new Error(`expected ready, got ${second.status}`);
+    expect((second.workflow.nodes[0]!.config as Record<string, unknown>).timezone).not.toBe("Mars/Olympus_Mons");
+    expect(second.workflow.nodes[0]!.config).toMatchObject({ active: false });
+  });
+
   it("refuses a secret of another project, even one the person may use there", async () => {
     const context = await createTestContext();
     const cookie = await login(context, "builder");

@@ -85,6 +85,44 @@ describe("checkBuilderDraft", () => {
     expect(workflow.edges).toEqual([expect.objectContaining({ source: "incoming", target: "post_order" })]);
   });
 
+  it("starts nodes from the editor's new-node defaults: no example values, a schedule off in the person's time zone", () => {
+    const check = checkBuilderDraft(
+      {
+        name: "Nightly",
+        nodes: [
+          { id: "nightly", type: "schedule_trigger", config: { cronExpression: "0 2 * * *", active: true } },
+          { id: "fetch", type: "http_request", config: { method: "GET" } },
+          { id: "keep", type: "filter_node", config: {} },
+          { id: "shape", type: "set_node", config: {} },
+          { id: "join", type: "merge_node", config: {} }
+        ],
+        edges: [
+          { source: "nightly", target: "fetch" },
+          { source: "fetch", target: "keep" },
+          { source: "keep", target: "shape", sourceHandle: "pass" },
+          { source: "shape", target: "join" }
+        ]
+      },
+      { workflowId: "wf", timeZone: "Europe/Berlin" }
+    );
+    expect(check.issues).toEqual([]);
+    const byId = new Map(check.workflow!.nodes.map((node) => [node.id, node.config as Record<string, unknown>]));
+    expect(byId.get("nightly")).toMatchObject({ cronExpression: "0 2 * * *", active: false, timezone: "Europe/Berlin" });
+    expect(byId.get("fetch")!.urlTemplate).toBe("");
+    expect(byId.get("keep")!.conditions).toEqual([{ field: "", operator: "eq", value: "" }]);
+    expect(byId.get("shape")!.assignments).toEqual([{ key: "", valueTemplate: "", type: "auto" }]);
+    expect(byId.get("join")).not.toHaveProperty("combineKey");
+    // An empty required field is unfinished (the draft saves), not an example that looks like real config.
+    expect(check.unfinished.map((issue) => issue.nodeId)).toEqual(expect.arrayContaining(["fetch", "shape"]));
+    expect(check.notes.join("\n")).toMatch(/schedule starts off \(nightly\)/);
+    // A time zone the model chose is kept.
+    const chosen = checkBuilderDraft(
+      { name: "x", nodes: [{ id: "tick", type: "schedule_trigger", config: { timezone: "Asia/Tokyo" } }], edges: [] },
+      { workflowId: "wf", timeZone: "Europe/Berlin" }
+    );
+    expect(chosen.workflow!.nodes[0]!.config).toMatchObject({ timezone: "Asia/Tokyo", active: false });
+  });
+
   it("reports unknown types, bad ids, missing nodes and wrong outputs for the model to fix", () => {
     const check = checkBuilderDraft(
       {
@@ -288,6 +326,7 @@ describe("checkBuilderDraft", () => {
       },
       { workflowId: "wf" }
     );
+    expect(check.issues).toEqual([]);
     const byId = new Map(check.workflow!.nodes.map((node) => [node.id, node]));
     for (const node of check.workflow!.nodes) {
       expect(legacyBehaviours(node.type, node.config as Record<string, unknown>), node.id).toEqual([]);

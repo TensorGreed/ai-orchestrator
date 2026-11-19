@@ -66,7 +66,8 @@ describe("WorkflowBuilderDialog", () => {
     await userEvent.type(screen.getByLabelText("What should the workflow do?"), "When an order arrives, post it to the shop");
     await userEvent.click(screen.getByRole("button", { name: "Build" }));
     expect(api.buildWorkflowFromDescription).toHaveBeenCalledWith(
-      { prompt: "When an order arrives, post it to the shop", projectId: "default" },
+      // The browser's time zone goes along, so a described schedule starts in it.
+      { prompt: "When an order arrives, post it to the shop", projectId: "default", timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone },
       expect.any(AbortSignal)
     );
 
@@ -144,7 +145,8 @@ describe("WorkflowBuilderDialog", () => {
       {
         prompt: "x",
         projectId: "default",
-        model: { providerId: "openai_compatible", model: "local", baseUrl: "http://127.0.0.1:8000/v1", secretRef: { secretId: "sec-1" } }
+        model: { providerId: "openai_compatible", model: "local", baseUrl: "http://127.0.0.1:8000/v1", secretRef: { secretId: "sec-1" } },
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
       },
       expect.any(AbortSignal)
     );

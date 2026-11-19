@@ -21,6 +21,7 @@ import {
   WORKFLOW_SCHEMA_VERSION,
   isReservedNodeId,
   legacyBehaviours,
+  newNodeBaseConfig,
   nodeDefinitions,
   upgradeToNewBehaviour,
   type LLMProviderConfig,
@@ -276,6 +277,8 @@ export interface BuilderDraftOptions {
   projectId?: string;
   /** The model the draft's model nodes start on (the same as a new LLM Call node in the editor). */
   nodeModel?: LLMProviderConfig;
+  /** The person's time zone: a Schedule Trigger the model gave none starts in it. */
+  timeZone?: string;
 }
 
 export interface BuilderDraftCheck {
@@ -361,6 +364,7 @@ export function checkBuilderDraft(raw: unknown, options: BuilderDraftOptions): B
   const givenKeys = new Map<string, Set<string>>();
   const removedCredentials: string[] = [];
   const removedAdminKeys: string[] = [];
+  const scheduleIds: string[] = [];
   const removedAddresses: string[] = [];
   let modelChanged = false;
   rawNodes!.forEach((entry, index) => {
@@ -392,13 +396,20 @@ export function checkBuilderDraft(raw: unknown, options: BuilderDraftOptions): B
       issues.push({ message: `node '${id}': config must be an object`, nodeId: id });
       return;
     }
-    const sample = structuredClone(definition.sampleConfig ?? {}) as Record<string, unknown>;
+    // The base is what a node added in the editor starts with: example values blanked, a schedule switched off.
+    const sample = newNodeBaseConfig(definition.type, definition.sampleConfig as Record<string, unknown> | undefined);
     const given = withoutCredentials(entry.config ?? {}, removedCredentials, [id]) as Record<string, unknown>;
     givenKeys.set(id, new Set(Object.keys(given)));
     let config: Record<string, unknown> = { ...(withoutCredentials(sample, []) as Record<string, unknown>), ...given };
     for (const key of ADMIN_ONLY_KEYS) {
       if (key in given) removedAdminKeys.push(`${id}.${key}`);
       delete config[key];
+    }
+    if (definition.type === "schedule_trigger") {
+      // A described schedule starts off, as one added in the editor does: nothing fires before the person turns it on.
+      config.active = false;
+      scheduleIds.push(id);
+      if (!(typeof given.timezone === "string" && given.timezone.trim()) && options.timeZone) config.timezone = options.timeZone;
     }
     if (PROVIDER_CONFIG_NODE_TYPES.has(definition.type)) {
       const asked = isRecord(given.provider) ? given.provider : undefined;
@@ -523,6 +534,7 @@ export function checkBuilderDraft(raw: unknown, options: BuilderDraftOptions): B
   if (removedCredentials.length > 0) notes.push(`Left out credential values the model wrote (${removedCredentials.join(", ")}): pick saved credentials on those nodes.`);
   if (removedAdminKeys.length > 0) notes.push(`Left out settings only an admin sets (${removedAdminKeys.join(", ")}).`);
   if (removedAddresses.length > 0) notes.push(`Left the model server address at its placeholder on ${removedAddresses.join(", ")}: set your server on those nodes.`);
+  if (scheduleIds.length > 0) notes.push(`The schedule starts off (${scheduleIds.join(", ")}): open it and choose Turn on when the workflow is ready.`);
   if (modelChanged) notes.push("Model nodes use the model the builder used; change it on each node if you want another one.");
   return { workflow, issues, unfinished, pathIssues, notes };
 }
@@ -701,6 +713,8 @@ export interface WorkflowBuilderRunOptions {
   resolveSecret: AgentRuntimeContext["resolveSecret"];
   workflowId: string;
   projectId?: string;
+  /** The person's time zone, for a Schedule Trigger the model gave none. */
+  timeZone?: string;
   maxAttempts?: number;
   /** The most model turns (default 10). */
   maxIterations?: number;
@@ -743,7 +757,7 @@ export async function runWorkflowBuilder(options: WorkflowBuilderRunOptions): Pr
       }
       if (name === SUBMIT_TOOL) {
         attempts += 1;
-        const check = checkBuilderDraft(args, { workflowId: options.workflowId, projectId: options.projectId, nodeModel });
+        const check = checkBuilderDraft(args, { workflowId: options.workflowId, projectId: options.projectId, nodeModel, ...(options.timeZone ? { timeZone: options.timeZone } : {}) });
         if (check.workflow && check.issues.length === 0) {
           accepted = { workflow: check.workflow, check };
           throw new BuilderStop("accepted");

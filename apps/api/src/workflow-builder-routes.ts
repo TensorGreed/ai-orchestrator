@@ -26,6 +26,7 @@ import {
   envModelProviders,
   pickDefaultModelProvider,
   rankTemplatesForPrompt,
+  isKnownTimeZone,
   workflowBuilderRequestSchema,
   type LLMProviderConfig,
   type SecretReference,
@@ -240,6 +241,7 @@ export function registerWorkflowBuilderRoutes(deps: WorkflowBuilderRoutesDeps): 
         resolveSecret: deps.resolveSecretForUser(user),
         workflowId: crypto.randomUUID(),
         projectId,
+        ...(parsed.data.timeZone && isKnownTimeZone(parsed.data.timeZone) ? { timeZone: parsed.data.timeZone } : {}),
         signal: controller.signal
       });
       let result: WorkflowBuilderResult;

@@ -34,7 +34,12 @@ export const workflowBuilderRequestSchema = z
     /** The project the draft is for (default: the default project). */
     projectId: z.string().trim().min(1).max(120).optional(),
     /** The model to use. Absent: the default model (a server key, else a saved secret, else Echo). */
-    model: workflowBuilderModelSchema.optional()
+    model: workflowBuilderModelSchema.optional(),
+    /**
+     * The person's IANA time zone: a Schedule Trigger the model gave none starts in it, as one added in the editor does.
+     * A zone the server does not know is ignored.
+     */
+    timeZone: z.string().trim().max(64).optional()
   })
   .strict();
 

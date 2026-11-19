@@ -1,3 +1,5 @@
+import { newNodeBaseConfig } from "@ai-orchestrator/shared";
+
 /**
  * The config a node added in the editor starts with. It is the node catalog's sample config with three kinds of
  * change, all for NEW nodes only (a saved node keeps what it has):
@@ -10,20 +12,6 @@
  * - A Schedule Trigger starts switched off, in the browser's time zone, so a scratch workflow never fires on its own.
  */
 const TRIGGER_PATH_NODE_TYPES = new Set(["webhook_input", "form_trigger", "mcp_server_trigger"]);
-
-/** Values that replace the sample's for a new node (each is what the node needs before it does anything). */
-const BLANK_FIELDS: Record<string, Record<string, unknown>> = {
-  http_request: { urlTemplate: "" },
-  set_node: { assignments: [{ key: "", valueTemplate: "", type: "auto" }] },
-  filter_node: { conditions: [{ field: "", operator: "eq", value: "" }] },
-  loop_node: { inputKey: "" }
-};
-
-/** Sample keys a new node leaves out: they only matter once another setting asks for them. */
-const DROPPED_FIELDS: Record<string, readonly string[]> = {
-  // The combine key matters only in "Combine by Key" mode, where its field shows `id` as a placeholder.
-  merge_node: ["combineKey"]
-};
 
 export interface NewNodeContext {
   /** Makes the random path suffix (tests pass a fixed one). */
@@ -57,11 +45,10 @@ export function newNodeConfig(
   context: NewNodeContext | (() => string) = {}
 ): Record<string, unknown> {
   const options: NewNodeContext = typeof context === "function" ? { suffix: context } : context;
-  const config: Record<string, unknown> = { ...structuredClone(sampleConfig ?? {}), ...structuredClone(BLANK_FIELDS[nodeType] ?? {}) };
-  for (const key of DROPPED_FIELDS[nodeType] ?? []) delete config[key];
+  // The blanked fields and the schedule switched off are shared with Describe it (newNodeBaseConfig).
+  const config = newNodeBaseConfig(nodeType, sampleConfig);
 
   if (nodeType === "schedule_trigger") {
-    config.active = false;
     const zone = options.timeZone ?? browserTimeZone();
     if (zone) config.timezone = zone;
   }

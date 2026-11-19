@@ -14,6 +14,7 @@ import {
   type WorkflowBuilderModel,
   type WorkflowBuilderResult
 } from "@ai-orchestrator/shared";
+import { browserTimeZone } from "../lib/new-node-config";
 import { buildWorkflowFromDescription, fetchSecrets, fetchWorkflowBuilderStatus, type SecretListItem } from "../lib/api";
 
 const MODEL_STORAGE_KEY = "l2m:builder-model";
@@ -240,12 +241,14 @@ export function WorkflowBuilderDialog({
     const controller = new AbortController();
     buildAbort.current = controller;
     const sent = overrideToSend();
+    const timeZone = browserTimeZone();
     try {
       const result = await buildWorkflowFromDescription(
         {
           prompt: text,
           ...(projectId ? { projectId } : {}),
-          ...(sent ? { model: sent } : {})
+          ...(sent ? { model: sent } : {}),
+          ...(timeZone ? { timeZone } : {})
         },
         controller.signal
       );
