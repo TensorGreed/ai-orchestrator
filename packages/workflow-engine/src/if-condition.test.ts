@@ -53,7 +53,7 @@ function ifWorkflow(values: Record<string, unknown>, condition: string): Workflo
 
 describe("evaluateConditionTemplate", () => {
   it("keeps the old truthiness when the condition is one {{ }} or plain text", () => {
-    expect(evaluateConditionTemplate("{{answer}}", { answer: "yes" })).toEqual({ result: true, evaluatedValue: "yes" });
+    expect(evaluateConditionTemplate("{{answer}}", { answer: "yes" })).toEqual({ result: true, evaluatedValue: "yes", missing: [] });
     expect(evaluateConditionTemplate("{{answer}}", { answer: "false" }).result).toBe(false);
     expect(evaluateConditionTemplate("  {{ answer }}  ", { answer: "" }).result).toBe(false);
     expect(evaluateConditionTemplate("true", {}).result).toBe(true);
@@ -63,8 +63,8 @@ describe("evaluateConditionTemplate", () => {
   });
 
   it("evaluates text outside {{ }} as an expression over the filled-in values", () => {
-    expect(evaluateConditionTemplate("{{userScore}} > 90", { userScore: 95 })).toEqual({ result: true, evaluatedValue: "true" });
-    expect(evaluateConditionTemplate("{{userScore}} > 90", { userScore: 40 })).toEqual({ result: false, evaluatedValue: "false" });
+    expect(evaluateConditionTemplate("{{userScore}} > 90", { userScore: 95 })).toEqual({ result: true, evaluatedValue: "true", missing: [] });
+    expect(evaluateConditionTemplate("{{userScore}} > 90", { userScore: 40 })).toEqual({ result: false, evaluatedValue: "false", missing: [] });
     expect(evaluateConditionTemplate("{{answer}} === 'true'", { answer: "true" }).result).toBe(true);
     expect(evaluateConditionTemplate("{{answer}} === 'true'", { answer: "no" }).result).toBe(false);
     // Values keep their type: a number stays a number, a string stays a string.

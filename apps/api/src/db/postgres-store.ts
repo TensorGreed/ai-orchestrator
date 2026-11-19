@@ -1591,6 +1591,9 @@ export class PostgresStore implements Store {
   async listWorkflowVersions(...args: Parameters<Store["listWorkflowVersions"]>): ReturnType<Store["listWorkflowVersions"]> {
     return workflows.listWorkflowVersions(this.ctx, ...args);
   }
+  async listWorkflowVersionJson(...args: Parameters<Store["listWorkflowVersionJson"]>): ReturnType<Store["listWorkflowVersionJson"]> {
+    return workflows.listWorkflowVersionJson(this.ctx, ...args);
+  }
   async getWorkflowVersion(...args: Parameters<Store["getWorkflowVersion"]>): ReturnType<Store["getWorkflowVersion"]> {
     return workflows.getWorkflowVersion(this.ctx, ...args);
   }

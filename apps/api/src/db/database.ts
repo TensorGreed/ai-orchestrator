@@ -9731,6 +9731,11 @@ export class SqliteStore implements Store {
     }));
   }
 
+  async listWorkflowVersionJson(workflowId: string): Promise<string[]> {
+    const rows = this.queryAll<{ workflow_json: string }>(`SELECT workflow_json FROM workflow_versions WHERE workflow_id = ?`, [workflowId]);
+    return rows.map((row) => toString(row.workflow_json));
+  }
+
   async getWorkflowVersion(workflowId: string, version: number): Promise<{
     id: string;
     workflowId: string;

@@ -132,6 +132,25 @@ describe("StudioHud", () => {
     expect(screen.getByRole("menuitemcheckbox", { name: "No write tools" })).toHaveAttribute("aria-checked", "true");
   });
 
+  it("toggles the workflow's Strict templates setting from the overflow menu, and hides it from users who cannot edit", async () => {
+    const user = userEvent.setup();
+    const onToggleStrictTemplates = vi.fn();
+    const { rerender } = render(<StudioHud {...makeProps({ onToggleStrictTemplates, strictTemplates: false })} />);
+
+    await user.click(screen.getByRole("button", { name: "More actions" }));
+    const item = screen.getByRole("menuitemcheckbox", { name: "Strict templates" });
+    expect(item).toHaveAttribute("aria-checked", "false");
+    await user.click(item);
+    expect(onToggleStrictTemplates).toHaveBeenCalledTimes(1);
+
+    rerender(<StudioHud {...makeProps({ onToggleStrictTemplates, strictTemplates: true })} />);
+    await user.click(screen.getByRole("button", { name: "More actions" }));
+    expect(screen.getByRole("menuitemcheckbox", { name: "Strict templates" })).toHaveAttribute("aria-checked", "true");
+
+    rerender(<StudioHud {...makeProps()} />);
+    expect(screen.queryByRole("menuitemcheckbox", { name: "Strict templates" })).not.toBeInTheDocument();
+  });
+
   it("hides the No write tools toggle when the user cannot edit workflows", async () => {
     const user = userEvent.setup();
     render(<StudioHud {...makeProps()} />);

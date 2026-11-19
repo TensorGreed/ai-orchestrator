@@ -168,6 +168,15 @@ export function isAgentGuardInterrupt(error: unknown): error is AgentGuardInterr
   return error instanceof AgentGuardInterrupt || (error instanceof Error && error.name === "AgentGuardInterrupt" && "reason" in error);
 }
 
+/**
+ * An error a tool call throws that must fail the agent's node instead of going back to the model as a tool error:
+ * it is the builder's to fix, not the model's (for example a worker's own template that has no value under strict
+ * templates). The thrower marks it with `stopsAgent: true`.
+ */
+export function stopsAgentRun(error: unknown): boolean {
+  return error instanceof Error && (error as Error & { stopsAgent?: unknown }).stopsAgent === true;
+}
+
 export interface AgentRuntimeAdapter {
   id: string;
   run(request: AgentRunRequest, tools: AgentToolRuntime, context: AgentRuntimeContext): Promise<AgentRunState>;

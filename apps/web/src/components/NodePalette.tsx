@@ -52,8 +52,11 @@ interface FlatRow {
  */
 export function NodePalette({ title, subtitle, sections, flatItems, emptyMessage, onPick, onClose, onTidy }: NodePaletteProps) {
   const [query, setQuery] = useState("");
-  const [activeIndex, setActiveIndex] = useState(0);
+  // The highlighted row belongs to the search it was chosen in: a new search starts on its best match at once (not
+  // after an effect), so an Enter right after typing never lands on a row of the previous list.
+  const [highlight, setHighlight] = useState<{ query: string; flatItems: typeof flatItems; index: number }>({ query: "", flatItems, index: 0 });
   const inputRef = useRef<HTMLInputElement>(null);
+  const lastPointerRef = useRef<{ x: number; y: number } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -84,9 +87,10 @@ export function NodePalette({ title, subtitle, sections, flatItems, emptyMessage
     [visibleSections]
   );
 
-  useEffect(() => {
-    setActiveIndex(0);
-  }, [normalized, flatItems]);
+  const sameList = highlight.query === normalized && highlight.flatItems === flatItems;
+  const activeIndex = sameList ? Math.min(highlight.index, Math.max(rows.length - 1, 0)) : 0;
+  const setActiveIndex = (next: number | ((index: number) => number)) =>
+    setHighlight({ query: normalized, flatItems, index: typeof next === "function" ? next(activeIndex) : next });
 
   useEffect(() => {
     const el = listRef.current?.querySelector<HTMLElement>(`[data-row-index="${activeIndex}"]`);
@@ -198,7 +202,13 @@ export function NodePalette({ title, subtitle, sections, flatItems, emptyMessage
                     className={`node-palette-node-row${active ? " active" : ""}`}
                     draggable
                     onDragStart={(event) => onDragStart(event, itemKey)}
-                    onMouseEnter={() => setActiveIndex(rowIndex)}
+                    // A real pointer move highlights the row; a list that re-renders under a resting pointer does not.
+                    onMouseMove={(event) => {
+                      const last = lastPointerRef.current;
+                      lastPointerRef.current = { x: event.clientX, y: event.clientY };
+                      if (last && last.x === event.clientX && last.y === event.clientY) return;
+                      if (rowIndex !== activeIndex) setActiveIndex(rowIndex);
+                    }}
                     onClick={() => onPick(item)}
                     title={item.description}
                   >

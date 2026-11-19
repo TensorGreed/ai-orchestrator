@@ -47,6 +47,9 @@ export interface StudioHudProps {
   onShare?: () => void;
   /** Phase 10.2 — the workflow's "No write tools" setting; the menu item shows only when the toggle handler is set. */
   noWriteTools?: boolean;
+  /** The workflow's strict templates setting (a `{{ }}` without a value fails its node). */
+  strictTemplates?: boolean;
+  onToggleStrictTemplates?: () => void;
   onToggleNoWriteTools?: () => void;
   /** Phase 11.2 — the workflow's "Ask before write tools" setting (agents pause for approval before an MCP write tool); the item opens its settings. */
   writeToolApproval?: boolean;
@@ -121,6 +124,8 @@ export function StudioHud({
   isDirty = false,
   onShare,
   noWriteTools = false,
+  strictTemplates = false,
+  onToggleStrictTemplates,
   onToggleNoWriteTools,
   writeToolApproval = false,
   onEditWriteToolApproval,
@@ -496,6 +501,24 @@ export function StudioHud({
                       {noWriteTools ? "✓" : ""}
                     </span>
                     No write tools
+                  </button>
+                )}
+                {onToggleStrictTemplates && (
+                  <button
+                    type="button"
+                    className="hud-dropdown-item hud-dropdown-check"
+                    role="menuitemcheckbox"
+                    aria-checked={strictTemplates}
+                    title="A {{ }} without a value fails its node instead of rendering empty"
+                    onClick={() => {
+                      setOverflowOpen(false);
+                      onToggleStrictTemplates();
+                    }}
+                  >
+                    <span className="hud-check-box" aria-hidden="true">
+                      {strictTemplates ? "✓" : ""}
+                    </span>
+                    Strict templates
                   </button>
                 )}
                 {onEditWriteToolApproval && (

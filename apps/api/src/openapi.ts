@@ -3087,6 +3087,14 @@ export const openApiSpec = {
     },
 
     // ── Expressions ─────────────────────────────────────────────────────────
+    "/api/workflows/{id}/node-ids": {
+      get: {
+        tags: ["Workflows"],
+        summary: "Node ids the workflow uses now or used in a stored version (the editor avoids them for new nodes)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ nodeIds: string[] }" }, "404": { description: "Workflow not found" } }
+      }
+    },
     "/api/expressions/preview": {
       post: {
         tags: ["Workflows"],
@@ -3095,7 +3103,7 @@ export const openApiSpec = {
           required: true,
           content: { "application/json": { schema: { type: "object", required: ["expression"], properties: { expression: { type: "string" }, mode: { type: "string", enum: ["expression", "template", "condition"] }, context: { type: "object" } } } } }
         },
-        responses: { "200": { description: "Expression result" } }
+        responses: { "200": { description: "Expression result. Template and condition previews also list each {{ }} that rendered nothing (`missing`: body and reason)." } }
       }
     },
 
