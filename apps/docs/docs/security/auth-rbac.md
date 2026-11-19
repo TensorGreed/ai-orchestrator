@@ -262,6 +262,12 @@ their inputs, outputs and node data, stay hidden. This applies when the share is
 workflow's project with a role that reads it, not through a share to a project they can read, and not an admin. A
 project member keeps the full view, and so does anyone who also has the workflow through their project.
 
+- **Whose run it is.** A run records the user id of the person who started it: from the app, with their API key, or
+  by a signed-in form submission or chat (a signed-in form also keeps the submitter's session memory to them, as a
+  signed-in chat does). The run stays theirs when someone else approves it. A run recorded before this (migration v80)
+  has only an email: it counts as theirs only when their account was created before the run started, so an email that
+  a new account gets later does not bring the old account's runs with it. Runs no person started (webhooks, schedules,
+  public forms and chats, MCP and gateway calls) are nobody's own.
 - **Lists.** The run history, the editor's run picker (it reads **Your runs** then) and the restored run data show only
   their runs, filtered before paging, so totals count only those.
 - **Single runs.** Someone else's run answers `404`, the same answer as a run that does not exist: its detail, its live
@@ -275,6 +281,9 @@ project member keeps the full view, and so does anyone who also has the workflow
   over them), release gate cases and release requests, captured runs, recorded MCP cassettes (their own run's
   cassette still opens from the run), eval and replay runs, content rule events and statistics, simulations of content
   rules, recent tool calls in the MCP catalog and the dead-letter queue leave such a workflow out or answer `404`.
+- **Releases.** The publish dialog shows them the gate's verdict with a note instead of its reasons and figures, and
+  the release history leaves out each release's gate reasons and replay job: the gate judges golden runs taken from
+  other people's runs, and its reasons can name required cases. Both answers carry `detailsHidden: true`.
 - **The editor.** `GET /api/workflows/:id/access` answers `ownRunsOnly: true` for them.
 
 **Opening shared workflows.** A link to a workflow (`?workflowId=`) opens it for anyone who can read it, through their

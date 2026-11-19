@@ -6155,8 +6155,8 @@ export async function createApp(
     readableWorkflowIds: async (user) => await runAccess.runVisibleWorkflowIds(user),
     // Nor do the publish preview's and the release history's gate details.
     seesAllRuns: async (user, workflowId) => {
-      const workflow = await store.getWorkflow(workflowId);
-      return !workflow || await runAccess.seesAllRuns(user, workflow);
+      const releasedWorkflow = await store.getWorkflow(workflowId);
+      return !releasedWorkflow || await runAccess.seesAllRuns(user, releasedWorkflow);
     },
     audit: async (event) => {
       await auditService.record(event);
