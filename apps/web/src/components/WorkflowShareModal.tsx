@@ -164,6 +164,7 @@ export function WorkflowShareModal({
           {userShares !== undefined && (
             <div className="settings-card">
               <h4>People</h4>
+              <p className="settings-muted">They see only their own runs of it. Add them to the project to show them every run.</p>
               <form
                 className="share-person-row"
                 onSubmit={(event) => {

@@ -68,4 +68,17 @@ describe("AppSidebar", () => {
     await user.click(screen.getByRole("button", { name: "New project" }));
     expect(onCreateProject).toHaveBeenCalledTimes(1);
   });
+
+  it("offers no New project to someone who may not create one, and no picker when they are in no project", () => {
+    const props = { activeMode: "dashboard" as const, canManageSecrets: false, onModeChange: vi.fn(), activeProjectId: "default", onChangeActiveProject: vi.fn() };
+    const { rerender } = render(<AppSidebar {...props} projects={[{ id: "p1", name: "Alpha", createdAt: "", updatedAt: "" }]} />);
+    expect(screen.getByRole("combobox", { name: "Project" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "New project" })).toBeNull();
+    expect(screen.queryByRole("option", { name: /New project/ })).toBeNull();
+    rerender(<AppSidebar {...props} projects={[]} />);
+    expect(screen.queryByRole("combobox", { name: "Project" })).toBeNull();
+    // A builder in no project may still create one.
+    rerender(<AppSidebar {...props} projects={[]} onCreateProject={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "New project" })).toBeInTheDocument();
+  });
 });

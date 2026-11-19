@@ -548,6 +548,8 @@ export interface WorkflowExecutionState {
   nodeOutputs: Record<string, unknown>;
   nodeResults: NodeExecutionResult[];
   skippedByBranch: string[];
+  /** Loop body nodes their Loop already ran: the resumed run passes them (absent on states saved before it existed). */
+  loopInlineNodes?: string[];
   tryCatchScopes: Array<{
     nodeId: string;
     errorTargets: string[];

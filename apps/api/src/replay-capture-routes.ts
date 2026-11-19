@@ -168,6 +168,8 @@ export function registerReplayCaptureRoutes(deps: ReplayCaptureRoutesDeps): void
       reply.code(400);
       return { error: firstIssue(parsed.error), details: parsed.error.issues };
     }
+    // Captured runs are other people's runs: none for someone who sees only their own runs of the workflow.
+    if (!await runAccess.seesAllRuns(user, access.workflow)) return { items: [], total: 0 };
     const page = await store.listReplayCaptures({ workflowId: access.workflow.id, ...parsed.data });
     return { items: page.items.map(ReplayCaptureService.view), total: page.total };
   });

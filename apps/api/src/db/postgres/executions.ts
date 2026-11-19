@@ -8,6 +8,7 @@ import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { deleteUnlockedInBatches } from "./prune.js";
 import { notHeldSql } from "../legal-hold-sql.js";
+import type { OwnRunsFilter } from "../database.js";
 
 /** 12.6 (D13) — see Store.recordBudgetRefusedRun: one row per trigger per budget period, its counter bumped atomically. */
 export async function recordBudgetRefusedRun(ctx: PgContext, input: Parameters<Store["recordBudgetRefusedRun"]>[0]): ReturnType<Store["recordBudgetRefusedRun"]> {
@@ -153,6 +154,7 @@ export async function listExecutionHistory(ctx: PgContext, input: {
   status?: string;
   workflowId?: string;
   workflowIds?: string[];
+  ownRunsOnly?: OwnRunsFilter;
   triggerType?: string;
   startedFrom?: string;
   startedTo?: string;
@@ -192,12 +194,20 @@ export async function listExecutionHistory(ctx: PgContext, input: {
     whereParams.push(input.workflowId);
   }
   if (input.workflowIds) {
-    if (input.workflowIds.length === 0) {
-      whereParts.push("1 = 0");
-    } else {
-      whereParts.push(`workflow_id IN (${input.workflowIds.map(() => `$${paramIdx++}`).join(", ")})`);
+    const own = input.ownRunsOnly && input.ownRunsOnly.workflowIds.length > 0 ? input.ownRunsOnly : null;
+    const anyOf: string[] = [];
+    if (input.workflowIds.length > 0) {
+      anyOf.push(`workflow_id IN (${input.workflowIds.map(() => `$${paramIdx++}`).join(", ")})`);
       whereParams.push(...input.workflowIds);
     }
+    if (own) {
+      const ids = own.workflowIds.map(() => `$${paramIdx++}`).join(", ");
+      const email = `$${paramIdx++}`;
+      const userId = `$${paramIdx++}`;
+      anyOf.push(`(workflow_id IN (${ids}) AND (LOWER(triggered_by) = ${email} OR triggered_by = ${userId} OR session_owner = ${userId}))`);
+      whereParams.push(...own.workflowIds, own.email.toLowerCase(), own.userId);
+    }
+    whereParts.push(anyOf.length > 0 ? `(${anyOf.join(" OR ")})` : "1 = 0");
   }
   if (input.triggerType) {
     whereParts.push(`trigger_type = $${paramIdx++}`);

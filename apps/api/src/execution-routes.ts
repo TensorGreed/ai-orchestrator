@@ -512,13 +512,15 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const page = Number(query.page);
     const pageSize = Number(query.pageSize);
 
+    // Only runs the user may see, filtered before paging so totals match: runs of workflows they can read, and of a
+    // workflow shared only with them, their own runs.
+    const scope = await runAccess.runListScope(user);
     const history = await store.listExecutionHistory({
       page: Number.isFinite(page) ? page : 1,
       pageSize: Number.isFinite(pageSize) ? pageSize : 20,
       status: typeof query.status === "string" && query.status.trim() ? query.status.trim() : undefined,
       workflowId: typeof query.workflowId === "string" && query.workflowId.trim() ? query.workflowId.trim() : undefined,
-      // Only runs of workflows the user can read, filtered before paging so totals match.
-      workflowIds: await runAccess.readableWorkflowIds(user) ?? undefined,
+      ...(scope ? { workflowIds: scope.workflowIds, ...(scope.ownRunsOnly ? { ownRunsOnly: scope.ownRunsOnly } : {}) } : {}),
       triggerType:
         typeof query.triggerType === "string" && query.triggerType.trim() ? query.triggerType.trim() : undefined,
       startedFrom: normalizeIsoDateFilter(query.startedFrom),
@@ -739,7 +741,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     // An unreadable cassette reads as missing; a readable one must belong to
     // this workflow (a cassette with no workflow never does).
     if (parsed.data.cassetteId) {
-      const cassetteAccess = await runAccess.run(user, { id: cassette.id, workflowId: cassette.workflowId ?? "" }, "workflow:read", "Cassette");
+      const cassetteAccess = await runAccess.run(user, { id: cassette.id, workflowId: cassette.workflowId ?? "", executionId: cassette.executionId }, "workflow:read", "Cassette");
       if (!cassetteAccess.ok) return denyRunAccess(reply, cassetteAccess);
     }
     if (cassette.workflowId !== source.workflowId) {

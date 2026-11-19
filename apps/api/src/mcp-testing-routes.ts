@@ -166,7 +166,8 @@ export function registerMcpTestingRoutes(deps: McpTestingDeps): void {
       workflowId: str(query.workflowId),
       projectId: str(query.projectId),
       evalRunId: str(query.evalRunId),
-      workflowIds: await deps.runAccess.readableWorkflowIds(user) ?? undefined,
+      // Recorded from many people's runs: not of workflows shared only with the person (their own run's cassette opens from the run).
+      workflowIds: await deps.runAccess.runVisibleWorkflowIds(user) ?? undefined,
       ...(Number.isFinite(limit) ? { limit } : {}),
       ...(Number.isFinite(offset) ? { offset } : {})
     });
@@ -176,14 +177,14 @@ export function registerMcpTestingRoutes(deps: McpTestingDeps): void {
     const user = await deps.requireRole(request, reply, ["builder"]);
     if (!user) return;
     const cassette = await store.getMcpCassette(request.params.id);
-    const access = await deps.runAccess.run(user, cassette && { id: cassette.id, workflowId: cassette.workflowId ?? "" }, "workflow:read", "Cassette");
+    const access = await deps.runAccess.run(user, cassette && { id: cassette.id, workflowId: cassette.workflowId ?? "", executionId: cassette.executionId }, "workflow:read", "Cassette");
     if (!access.ok) {
       reply.code(access.status);
       return { error: access.error };
     }
     // Phase 15.3 — the model tape (prompts and answers) and memory seed (earlier sessions' chat history) are
     // scrubbed for secrets, not for personal data: only users who may edit the workflow see them in full.
-    const full = cassette && (await deps.runAccess.run(user, { id: cassette.id, workflowId: cassette.workflowId ?? "" }, "workflow:write", "Cassette")).ok;
+    const full = cassette && (await deps.runAccess.run(user, { id: cassette.id, workflowId: cassette.workflowId ?? "", executionId: cassette.executionId }, "workflow:write", "Cassette")).ok;
     return { cassette: cassette && !full ? cassetteSummaryView(cassette) : cassette };
   });
 
@@ -192,7 +193,7 @@ export function registerMcpTestingRoutes(deps: McpTestingDeps): void {
     if (!user) return;
     const record = await store.getMcpCassette(request.params.id);
     // Phase 15.3 — the export is the whole cassette (model tape and memory seed included): it needs workflow:write.
-    const access = await deps.runAccess.run(user, record && { id: record.id, workflowId: record.workflowId ?? "" }, "workflow:write", "Cassette");
+    const access = await deps.runAccess.run(user, record && { id: record.id, workflowId: record.workflowId ?? "", executionId: record.executionId }, "workflow:write", "Cassette");
     if (!access.ok || !record) {
       reply.code(access.ok ? 404 : access.status);
       return { error: access.ok ? "Cassette not found" : access.error };

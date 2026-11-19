@@ -55,7 +55,13 @@ export interface GateAdmissionServiceOptions {
   store: Store;
   /** The shared run-access check (run-access.ts): 404 unreadable, 403 without the permission; admins pass. */
   access: (user: SafeUser, workflowId: string, permission: ReleasePermission) => Promise<RunAccessResult<object>>;
+  /** Workflow ids whose runs the user sees all of, or null for everything (admins); applied in SQL before the list limit. */
   readableWorkflowIds: (user: SafeUser) => Promise<string[] | null>;
+  /**
+   * Does the user see every run of the workflow? A gate's cases are golden runs of other people's runs: someone who sees
+   * only their own runs gets 404 for them. Left out, everyone who can read the workflow does.
+   */
+  seesAllRuns?: (user: SafeUser, workflowId: string) => Promise<boolean>;
   audit: (event: AuditEventInput) => void | Promise<void>;
   notify: (event: NotificationEvent) => Promise<void>;
   redact: (value: string) => string;
@@ -136,6 +142,7 @@ export class GateAdmissionService {
 
   async casesView(user: SafeUser, workflowId: string): Promise<ReleaseGateCasesView> {
     await this.check(user, workflowId, "workflow:read");
+    if (this.options.seesAllRuns && !await this.options.seesAllRuns(user, workflowId)) throw new ReleaseError("Workflow not found", 404);
     const gate = await this.store.getReleaseGate(workflowId);
     const snapshot = await gateAdmissionSnapshot(this.store, gate);
     const canWrite = (await this.options.access(user, workflowId, "workflow:write")).ok;

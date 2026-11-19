@@ -2234,8 +2234,21 @@ export interface ApprovalRequestInsert {
 }
 
 /** Phase 11.2 — which approval requests a user may see: everything, or these projects plus workflows shared to them. */
-/** Which requests a user may list: every one (admins) or those of the workflows they can read now. */
-export type ApprovalReadScope = { all: true } | { all?: false; workflowIds: string[] };
+/**
+ * Runs of these workflows count only when they are the person's: started by them (`triggered_by` is their email in any
+ * case, or their user id) or run in their sessions (`session_owner`). For a workflow shared only with the person.
+ */
+export interface OwnRunsFilter {
+  workflowIds: string[];
+  userId: string;
+  email: string;
+}
+
+/**
+ * Which requests a user may list: every one (admins) or those of the workflows they can read now; of `ownRunsOnly`
+ * workflows only the requests of the person's own runs.
+ */
+export type ApprovalReadScope = { all: true } | { all?: false; workflowIds: string[]; ownRunsOnly?: OwnRunsFilter };
 
 /** Phase 15.4 — a workflow's release gate settings. */
 export interface ReleaseGateRecord {
@@ -6234,6 +6247,8 @@ export class SqliteStore implements Store {
     workflowId?: string;
     /** Only runs of these workflows; an empty list matches nothing. */
     workflowIds?: string[];
+    /** With `workflowIds`: also the person's own runs of these workflows (shared only with them). */
+    ownRunsOnly?: OwnRunsFilter;
     triggerType?: string;
     startedFrom?: string;
     startedTo?: string;
@@ -6272,12 +6287,17 @@ export class SqliteStore implements Store {
       whereParams.push(input.workflowId);
     }
     if (input.workflowIds) {
-      if (input.workflowIds.length === 0) {
-        whereParts.push("1 = 0");
-      } else {
-        whereParts.push(`workflow_id IN (${input.workflowIds.map(() => "?").join(", ")})`);
+      const own = input.ownRunsOnly && input.ownRunsOnly.workflowIds.length > 0 ? input.ownRunsOnly : null;
+      const anyOf: string[] = [];
+      if (input.workflowIds.length > 0) {
+        anyOf.push(`workflow_id IN (${input.workflowIds.map(() => "?").join(", ")})`);
         whereParams.push(...input.workflowIds);
       }
+      if (own) {
+        anyOf.push(`(workflow_id IN (${own.workflowIds.map(() => "?").join(", ")}) AND (LOWER(triggered_by) = ? OR triggered_by = ? OR session_owner = ?))`);
+        whereParams.push(...own.workflowIds, own.email.toLowerCase(), own.userId, own.userId);
+      }
+      whereParts.push(anyOf.length > 0 ? `(${anyOf.join(" OR ")})` : "1 = 0");
     }
     if (input.triggerType) {
       whereParts.push("trigger_type = ?");
@@ -7047,9 +7067,28 @@ export class SqliteStore implements Store {
       // By workflow, not the stored project_id: a workflow moved to another
       // project takes its requests with it.
       const { workflowIds } = filter.scope;
-      if (workflowIds.length === 0) return [];
-      clauses.push(`workflow_id IN (${workflowIds.map(() => "?").join(", ")})`);
-      params.push(...workflowIds);
+      const own = filter.scope.ownRunsOnly && filter.scope.ownRunsOnly.workflowIds.length > 0 ? filter.scope.ownRunsOnly : null;
+      if (workflowIds.length === 0 && !own) return [];
+      const anyOf: string[] = [];
+      if (workflowIds.length > 0) {
+        anyOf.push(`workflow_id IN (${workflowIds.map(() => "?").join(", ")})`);
+        params.push(...workflowIds);
+      }
+      if (own) {
+        // Of a workflow shared only with the person: the requests of runs they started or that ran in their sessions.
+        const ids = own.workflowIds.map(() => "?").join(", ");
+        anyOf.push(
+          `(workflow_id IN (${ids}) AND (` +
+            `execution_id IN (SELECT id FROM execution_history WHERE workflow_id IN (${ids}) AND (LOWER(triggered_by) = ? OR triggered_by = ? OR session_owner = ?)) OR ` +
+            `execution_id IN (SELECT id FROM workflow_executions WHERE workflow_id IN (${ids}) AND (LOWER(triggered_by) = ? OR triggered_by = ?))))`
+        );
+        params.push(
+          ...own.workflowIds,
+          ...own.workflowIds, own.email.toLowerCase(), own.userId, own.userId,
+          ...own.workflowIds, own.email.toLowerCase(), own.userId
+        );
+      }
+      clauses.push(`(${anyOf.join(" OR ")})`);
       // A deleted workflow's requests stay admin-only, also when a new workflow reuses its id.
       clauses.push(`workflow_deleted_at IS NULL`);
     }

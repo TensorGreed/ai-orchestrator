@@ -51,7 +51,7 @@ import type { ApprovalReadScope, ApprovalRequestRecord } from "../db/database.js
 import { approvalEditsDigest, newApprovalEditsSalt } from "./approval-digest.js";
 import type { AuditEventInput } from "./audit-service.js";
 import type { SafeUser } from "./auth-service.js";
-import type { RunAccessResult, RunPermission } from "../run-access.js";
+import type { RunAccessResult, RunListScope, RunPermission } from "../run-access.js";
 import type { NotificationEvent } from "./notification-service.js";
 import type { QueueClaimFence, Store } from "../db/store.js";
 import { someAsync } from "../async-array.js";
@@ -97,8 +97,13 @@ export interface ApprovalServiceOptions {
    * workflow's runs (which are admin-only).
    */
   access: (user: SafeUser, workflowId: string, permission: RunPermission) => Promise<RunAccessResult<object>>;
-  /** Workflow ids the user can read, or null for everything (admins); applied in SQL before the list limit. */
-  readableWorkflowIds: (user: SafeUser) => Promise<string[] | null>;
+  /** The runs the user may see, or null for every run (admins); applied in SQL before the list limit. */
+  runListScope: (user: SafeUser) => Promise<RunListScope | null>;
+  /**
+   * The run-access check for one run: as `access`, and 404 for someone else's run when the user sees only their own
+   * runs of the workflow (a share with them is all they have).
+   */
+  runAccess: (user: SafeUser, run: { id: string; workflowId: string }, permission: RunPermission) => Promise<RunAccessResult<object>>;
   /**
    * Execute access for the editor's "who could approve" check, where the
    * workflow may not be saved yet (then its project decides).
@@ -495,8 +500,9 @@ export class ApprovalService {
   async list(user: SafeUser, filter: { status: "pending" | "decided" | "all"; workflowId?: string; executionId?: string; limit?: number }): Promise<ApprovalRequestView[]> {
     if (filter.status !== "decided") await this.backfillMissing();
     const limit = Math.max(1, Math.min(500, filter.limit ?? 200));
-    const workflowIds = await this.options.readableWorkflowIds(user);
-    const scope: ApprovalReadScope = workflowIds === null ? { all: true } : { workflowIds };
+    const runs = await this.options.runListScope(user);
+    // Of a workflow shared only with the person, only the requests of their own runs.
+    const scope: ApprovalReadScope = runs === null ? { all: true } : { workflowIds: runs.workflowIds, ...(runs.ownRunsOnly ? { ownRunsOnly: runs.ownRunsOnly } : {}) };
     const rows = await this.store.listApprovalRequests({ ...filter, limit, scope });
     // The SQL scope already holds only readable workflows; this re-check is per workflow, not per row.
     const readable = new Map<string, boolean>();
@@ -532,7 +538,8 @@ export class ApprovalService {
     // Visibility first, by the workflow's current project: another project's run
     // (or a deleted workflow's, for non-admins) answers as if it did not exist,
     // and nothing is written for it.
-    if (!(await this.options.access(input.user, pending.workflowId, "workflow:read")).ok) {
+    // Someone who sees only their own runs of the workflow decides only those.
+    if (!(await this.options.runAccess(input.user, { id: input.executionId, workflowId: pending.workflowId }, "workflow:read")).ok) {
       throw new ApprovalDecisionError("Pending approval not found", 404);
     }
     if (pending.status === "resuming") throw new ApprovalDecisionError("This approval was already decided", 409);
@@ -540,7 +547,7 @@ export class ApprovalService {
     if (!validState) throw new ApprovalDecisionError("Stored execution state is invalid and cannot be resumed", 400);
     const record = await this.requestFor(input.executionId);
     if (!record) throw new ApprovalDecisionError("Pending approval not found", 404);
-    if (record.workflowId !== pending.workflowId || !(await this.options.access(input.user, record.workflowId, "workflow:read")).ok) {
+    if (record.workflowId !== pending.workflowId || !(await this.options.runAccess(input.user, { id: input.executionId, workflowId: record.workflowId }, "workflow:read")).ok) {
       throw new ApprovalDecisionError("Pending approval not found", 404);
     }
     if (input.requestId && input.requestId !== record.id) {

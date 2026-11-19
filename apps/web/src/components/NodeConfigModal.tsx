@@ -6609,6 +6609,12 @@ export function NodeInspector({
               onChange={(next) => setConfig((current) => ({ ...current, collectResults: next }))}
               help="Adds collected to the Loop's output: one entry per pass, the body node's output (or each body node's output by id when the body has several). Read it after the loop as {{results.<loop id>.collected}}."
             />
+            <ToggleField
+              label="Branches route in the loop"
+              checked={config.routeBranches === true}
+              onChange={(next) => setConfig((current) => ({ ...current, routeBranches: next }))}
+              help="On: an IF, Switch or Filter in the loop runs only the output it takes on each pass, and the nodes on its outputs run once per item too. A body node's own On Error setting applies. Off (Loops saved before this option): the nodes after every output run once, after the loop."
+            />
           </>
         );
       case "merge_node":

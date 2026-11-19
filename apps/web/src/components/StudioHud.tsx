@@ -34,7 +34,7 @@ export interface StudioHudProps {
   projects: Project[];
   activeProjectId: string;
   onChangeActiveProject: (projectId: string) => void;
-  onCreateProject: () => void;
+  onCreateProject?: () => void;
   /** Run-status pill content. */
   runStatus?: RunStatus;
   /** Phase 15.4 — the version pill (published vs draft); rendered in editor mode only. */

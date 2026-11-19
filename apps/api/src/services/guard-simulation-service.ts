@@ -314,7 +314,7 @@ export class GuardSimulationService {
   /** Workflows `actor` can read whose resolved profiles (or guard nodes' profiles) have destination rules. */
   async workflowsWithDestinationRules(actor: SafeUser): Promise<Workflow[]> {
     const { store, guard, runAccess } = this.options;
-    const readable = await runAccess.readableWorkflowIds(actor);
+    const readable = await runAccess.runVisibleWorkflowIds(actor);
     const ids = readable ?? (await store.listWorkflows()).map((workflow) => workflow.id);
     const batch = Math.max(1, this.options.scanBatch ?? 25);
     const named = new Map<string, boolean>();
@@ -474,7 +474,7 @@ export class GuardSimulationService {
   }
 
   private async readable(viewer: SafeUser): Promise<Set<string> | null> {
-    const ids = await this.options.runAccess.readableWorkflowIds(viewer);
+    const ids = await this.options.runAccess.runVisibleWorkflowIds(viewer);
     return ids === null ? null : new Set(ids);
   }
 
@@ -561,7 +561,7 @@ export class GuardSimulationService {
    */
   async workflowsUsing(profileId: string, actor: SafeUser): Promise<Workflow[]> {
     const { store, guard, runAccess } = this.options;
-    const readable = await runAccess.readableWorkflowIds(actor);
+    const readable = await runAccess.runVisibleWorkflowIds(actor);
     const ids = readable ?? (await store.listWorkflows()).map((workflow) => workflow.id);
     const batch = Math.max(1, this.options.scanBatch ?? 25);
     const builtIn = profileId === GUARD_BUILTIN_PROFILE_ID;

@@ -135,6 +135,11 @@ export function registerGoldenSetFileRoutes(deps: GoldenSetFileRoutesDeps): void
       ? await runAccess.workflow(user, dataset.workflowId, "workflow:read", "Golden set")
       : await runAccess.project(user, dataset.projectId ?? DEFAULT_PROJECT_ID, "workflow:read", "Golden set");
     if (!access.ok) return deny(reply, access);
+    // Its cases are other people's runs: none for someone who sees only their own runs of the workflow.
+    if (dataset.workflowId) {
+      const workflow = await store.getWorkflow(dataset.workflowId);
+      if (workflow && !await runAccess.seesAllRuns(user, workflow)) return deny(reply, { status: 404, error: "Golden set not found" });
+    }
     if (!dataset.workflowId) {
       reply.code(400);
       return { error: "This dataset is not a golden set: only golden sets made for a workflow can be exported." };

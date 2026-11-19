@@ -29,6 +29,7 @@ import {
   type NodeExecutionResult,
   type Workflow,
   type WorkflowExecutionResult,
+  type WorkflowListItem,
   type WorkflowValidationIssue
 } from "@ai-orchestrator/shared";
 import {
@@ -1514,10 +1515,42 @@ function StudioApp() {
   const [sharedWithMe, setSharedWithMe] = useState<SharedWorkflowItem[]>([]);
   /** Workflows other projects share to the active project ("Shared with this project"). */
   const [sharedWithProject, setSharedWithProject] = useState<ProjectSharedWorkflowItem[]>([]);
+  /**
+   * A workflow opened from a deep link (`?workflowId=`) that is not in the active project's lists: one you can read
+   * through another project of yours. Cleared when you switch projects.
+   */
+  const [deepLinkedWorkflowId, setDeepLinkedWorkflowId] = useState<string | null>(null);
+  /** Whether the deep link the page opened with has been resolved (opened, or answered "Workflow not found"). */
+  const [deepLinkResolved, setDeepLinkResolved] = useState(false);
+  const deepLinkStartedRef = useRef(false);
+  /** True when you are a member of no project (strict isolation): the Home page offers the workflows shared with you. */
+  const [inNoProject, setInNoProject] = useState(false);
+  /** Set once the first project lists are in, so the deep link knows whether the workflow is already one of them. */
+  const [listsLoadedOnce, setListsLoadedOnce] = useState(false);
+  const activeProjectIdRef = useRef<string | null>(null);
+  /** The project the workflow lists were last loaded for (so a project switch waits for that project's lists). */
+  const [listsProjectId, setListsProjectId] = useState<string | null>(null);
+  /**
+   * Set when the person switches project in the picker. Until something else is opened, the editor then opens one of
+   * that project's workflows, also in place of a workflow opened from a link or from "Shared with you": an explicit
+   * choice of project wins. `seq` is the workflow-load sequence at the switch; any later open clears it.
+   */
+  const explicitProjectSwitchRef = useRef<{ projectId: string; seq: number } | null>(null);
+  const switchProjectExplicitly = useCallback((id: string) => {
+    explicitProjectSwitchRef.current = { projectId: id, seq: workflowLoadSeqRef.current };
+    setActiveProjectId(id);
+  }, []);
+  /** Shows a project's workflow list unless the person has switched to another project since it was asked for. */
+  const applyProjectWorkflowList = useCallback((projectId: string, workflows: WorkflowListItem[]) => {
+    if (activeProjectIdRef.current !== null && activeProjectIdRef.current !== projectId) return;
+    setWorkflowList(workflows);
+    setListsProjectId(projectId);
+  }, [setWorkflowList]);
   const currentWorkflowExists =
     workflowList.some((item) => item.id === currentWorkflow.id) ||
     sharedWithMe.some((item) => item.id === currentWorkflow.id) ||
-    sharedWithProject.some((item) => item.id === currentWorkflow.id);
+    sharedWithProject.some((item) => item.id === currentWorkflow.id) ||
+    deepLinkedWorkflowId === currentWorkflow.id;
   useEffect(() => {
     const workflowId = currentWorkflow.id;
     if (!currentWorkflowExists || savedVersionNodeIdsRef.current?.workflowId === workflowId) return;
@@ -1536,10 +1569,11 @@ function StudioApp() {
   const canManageWorkflows = authUser?.role === "admin" || authUser?.role === "builder";
   const canManageSecrets = authUser?.role === "admin" || authUser?.role === "builder";
   // What you may do with the open workflow: viewers and operators open it read-only; a builder may only view a
-  // workflow shared with them (or in a project where their role is view-only). Asked for each saved workflow.
+  // workflow shared with them (or in a project where their role is view-only). Asked for each saved workflow, also
+  // for viewers: a workflow shared only with you lists only your own runs.
   const [workflowAccess, setWorkflowAccess] = useState<WorkflowAccessView | null>(null);
   useEffect(() => {
-    if (!authUser || !currentWorkflowExists || authUser.role === "viewer") {
+    if (!authUser || !currentWorkflowExists) {
       setWorkflowAccess(null);
       return;
     }
@@ -2379,6 +2413,8 @@ function StudioApp() {
 
   const hydrateWorkflow = useCallback(
     (workflow: Workflow) => {
+      // Whatever opens a workflow (a run's Debug or Re-run, an import, a duplicate, a load) ends a pending project switch.
+      explicitProjectSwitchRef.current = null;
       const editor = workflowToEditor(workflow);
       const decoratedEdges = editor.edges.map((edge) => decorateEdge(edge, editor.nodes as EditorNode[]));
 
@@ -2401,18 +2437,29 @@ function StudioApp() {
       setLoading(true);
       const [workflowItems, projectPayload, folderPayload, sharedPayload, projectSharedPayload] = await Promise.all([
         fetchWorkflows({ projectId: activeProjectId }),
-        fetchProjects().catch(() => ({ projects: [] })),
+        fetchProjects().catch(() => null),
         fetchFolders(activeProjectId).catch(() => ({ folders: [] })),
         fetchWorkflowsSharedWithMe().catch(() => ({ workflows: [] })),
         fetchProjectSharedWorkflows(activeProjectId).catch(() => ({ workflows: [] }))
       ]);
+      // A slower answer for a project the person has already left must not replace the lists of the one they chose.
+      if (activeProjectIdRef.current !== null && activeProjectIdRef.current !== activeProjectId) return;
 
-      setWorkflowList(workflowItems);
-      setSharedWithProject(projectSharedPayload.workflows);
+      const noProject = Boolean(projectPayload) && (projectPayload?.projects ?? []).length === 0;
+      // Someone in no project has no project's workflows: what they can read is what is shared with them.
+      setWorkflowList(noProject ? [] : workflowItems);
+      setListsProjectId(activeProjectId);
+      setSharedWithProject(noProject ? [] : projectSharedPayload.workflows);
       // A workflow listed as shared with this project is not listed again as shared with you.
       const projectSharedIds = new Set(projectSharedPayload.workflows.map((item) => item.id));
-      setSharedWithMe(sharedPayload.workflows.filter((item) => item.projectId !== activeProjectId && !projectSharedIds.has(item.id)));
-      setProjects(projectPayload.projects ?? []);
+      setSharedWithMe(
+        noProject
+          ? sharedPayload.workflows
+          : sharedPayload.workflows.filter((item) => item.projectId !== activeProjectId && !projectSharedIds.has(item.id))
+      );
+      setProjects(projectPayload?.projects ?? []);
+      setInNoProject(noProject);
+      setListsLoadedOnce(true);
       setFolders(folderPayload.folders ?? []);
     } catch (loadError) {
       if (loadError instanceof ApiError && loadError.status === 401) {
@@ -2456,6 +2503,13 @@ function StudioApp() {
     setActiveFolderFilter(undefined);
     setActiveTagFilter(null);
     didAttemptInitialWipRef.current = false;
+  }, [activeProjectId]);
+  // A workflow opened from a link outside this project's lists does not follow a switch to another project.
+  const deepLinkProjectRef = useRef(activeProjectId);
+  useEffect(() => {
+    if (deepLinkProjectRef.current === activeProjectId) return;
+    deepLinkProjectRef.current = activeProjectId;
+    setDeepLinkedWorkflowId(null);
   }, [activeProjectId]);
 
   useEffect(() => {
@@ -3131,6 +3185,7 @@ function StudioApp() {
 
         const workflows = await fetchWorkflows({ projectId: targetProjectId });
         setWorkflowList(workflows);
+        setListsProjectId(targetProjectId);
         rememberTabWorkflowId(workflow.id);
         setError(null);
         setActiveMode("editor");
@@ -3179,12 +3234,38 @@ function StudioApp() {
       return;
     }
 
-    if (workflowList.length === 0) {
+    // A deep link is resolved first: it decides what opens.
+    if (!deepLinkResolved) {
       return;
     }
 
-    const currentExists = workflowList.some((item) => item.id === currentWorkflow.id);
-    if (currentExists) {
+    // After an explicit project switch, the project's own workflow opens unless something was opened since.
+    let afterProjectSwitch = false;
+    const projectSwitch = explicitProjectSwitchRef.current;
+    if (projectSwitch) {
+      if (projectSwitch.seq !== workflowLoadSeqRef.current || projectSwitch.projectId !== activeProjectId) {
+        explicitProjectSwitchRef.current = null;
+      } else if (listsProjectId !== activeProjectId) {
+        // The lists are still the previous project's: wait for this project's.
+        return;
+      } else {
+        afterProjectSwitch = true;
+      }
+    }
+
+    if (workflowList.length === 0) {
+      if (afterProjectSwitch) explicitProjectSwitchRef.current = null;
+      return;
+    }
+
+    if (afterProjectSwitch) {
+      // Only one of the project's own workflows stays open; one shared with you or opened from a link gives way.
+      if (workflowList.some((item) => item.id === currentWorkflow.id) || sharedWithProject.some((item) => item.id === currentWorkflow.id)) {
+        explicitProjectSwitchRef.current = null;
+        return;
+      }
+    } else if (currentWorkflowExists) {
+      // A workflow shared with you (or with this project), or opened from a link, stays open.
       return;
     }
 
@@ -3209,6 +3290,7 @@ function StudioApp() {
       const wipMatchesProject = !wipWorkflow?.projectId || wipWorkflow.projectId === activeProjectId;
       // An empty tab copy goes through loadWorkflowById below, which checks it against the server.
       if (wipWorkflow && wipWorkflow.nodes.length > 0 && wipMatchesProject && workflowList.some((item) => item.id === wipWorkflow.id)) {
+        explicitProjectSwitchRef.current = null;
         hydrateWorkflow(wipWorkflow);
         return;
       }
@@ -3222,8 +3304,51 @@ function StudioApp() {
         : rememberedId && workflowList.some((item) => item.id === rememberedId)
           ? rememberedId
           : workflowList[0]!.id;
+    explicitProjectSwitchRef.current = null;
     void loadWorkflowById(chosenWorkflowId);
-  }, [activeMode, activeProjectId, authUser, currentWorkflow.id, hydrateWorkflow, loadWorkflowById, loading, readWipWorkflow, workflowList]);
+  }, [activeMode, activeProjectId, authUser, currentWorkflow.id, currentWorkflowExists, deepLinkResolved, hydrateWorkflow, listsProjectId, loadWorkflowById, loading, readWipWorkflow, sharedWithProject, workflowList]);
+
+  /**
+   * A deep link (`?workflowId=`) to a workflow outside the active project's list opens it when you can read it in any
+   * way (another project of yours, a share to a project, a share with you), asked of its access answer. One you cannot
+   * read gets the same "Workflow not found" as one that does not exist.
+   */
+  activeProjectIdRef.current = activeProjectId;
+  useEffect(() => {
+    if (!authUser || loading || !listsLoadedOnce || deepLinkStartedRef.current) return;
+    deepLinkStartedRef.current = true;
+    const linkedId = readStudioUrlState().workflowId;
+    if (!linkedId || workflowList.some((item) => item.id === linkedId)) {
+      setDeepLinkResolved(true);
+      return;
+    }
+    pendingWorkflowLoadIdRef.current = linkedId;
+    const seq = workflowLoadSeqRef.current;
+    const projectAtStart = activeProjectId;
+    // Opening something else or switching project while the answer is pending wins over the link.
+    const overtaken = () => workflowLoadSeqRef.current !== seq || activeProjectIdRef.current !== projectAtStart;
+    void (async () => {
+      try {
+        await fetchWorkflowAccess(linkedId);
+        if (overtaken()) return;
+        setDeepLinkedWorkflowId(linkedId);
+        await loadWorkflowById(linkedId);
+      } catch (linkError) {
+        if (pendingWorkflowLoadIdRef.current === linkedId) pendingWorkflowLoadIdRef.current = null;
+        if (overtaken()) return;
+        // Missing and unreadable answer alike; anything else (a lapsed session, a server error) is reported as such.
+        if (linkError instanceof ApiError && (linkError.status === 404 || linkError.status === 403)) {
+          setError("Workflow not found");
+        } else {
+          handleApiError(linkError, "Failed to open the linked workflow");
+        }
+      } finally {
+        // Overtaken by a project switch with nothing opened since: the link no longer holds the editor's choice.
+        if (pendingWorkflowLoadIdRef.current === linkedId && workflowLoadSeqRef.current === seq) pendingWorkflowLoadIdRef.current = null;
+        setDeepLinkResolved(true);
+      }
+    })();
+  }, [activeProjectId, authUser, handleApiError, listsLoadedOnce, loading, loadWorkflowById, workflowList]);
 
   const buildCurrentWorkflow = useCallback(() => {
     return editorToWorkflow(currentWorkflow, nodes as EditorNode[], edges as Edge[]);
@@ -3246,7 +3371,7 @@ function StudioApp() {
       if (previous) await previous.promise.catch(() => undefined);
       const saved = await saveWorkflow(workflow);
       const workflows = await fetchWorkflows({ projectId: activeProjectId });
-      setWorkflowList(workflows);
+      applyProjectWorkflowList(activeProjectId, workflows);
       setCurrentWorkflow(saved);
       storeLocalWipWorkflow(saved);
       // Phase 15.4 — a save is a new version: the version pill reloads.
@@ -3947,12 +4072,12 @@ function StudioApp() {
     async (content: string, mode: "new" | "replace") => {
       const imported = await importWorkflow({ json: content, mode });
       const workflows = await fetchWorkflows({ projectId: activeProjectId });
-      setWorkflowList(workflows);
+      applyProjectWorkflowList(activeProjectId, workflows);
       hydrateWorkflow(imported);
       storeLocalWipWorkflow(imported);
       setActiveMode("editor");
     },
-    [activeProjectId, hydrateWorkflow, setActiveMode, setWorkflowList]
+    [activeProjectId, applyProjectWorkflowList, hydrateWorkflow, setActiveMode]
   );
 
   const importNativeText = useCallback(
@@ -4039,7 +4164,7 @@ function StudioApp() {
     async (sourceText: string, name: string) => {
       const { workflow, report } = await importExternalWorkflow({ sourceText, name, projectId: activeProjectId || undefined });
       const workflows = await fetchWorkflows({ projectId: activeProjectId });
-      setWorkflowList(workflows);
+      applyProjectWorkflowList(activeProjectId, workflows);
       hydrateWorkflow(workflow);
       storeLocalWipWorkflow(workflow);
       rememberImportReport(workflow.id, report);
@@ -4048,7 +4173,7 @@ function StudioApp() {
       setExternalImportSource(null);
       setActiveMode("editor");
     },
-    [activeProjectId, hydrateWorkflow, setActiveMode, setWorkflowList]
+    [activeProjectId, applyProjectWorkflowList, hydrateWorkflow, setActiveMode]
   );
 
   const closeExternalImport = useCallback(() => {
@@ -4182,7 +4307,7 @@ function StudioApp() {
         setError(null);
         const duplicated = await duplicateWorkflow(workflowId, { name: duplicateName });
         const workflows = await fetchWorkflows({ projectId: activeProjectId });
-        setWorkflowList(workflows);
+        applyProjectWorkflowList(activeProjectId, workflows);
         hydrateWorkflow(duplicated);
         setActiveMode("editor");
         storeLocalWipWorkflow(duplicated);
@@ -4225,7 +4350,7 @@ function StudioApp() {
         await deleteWorkflow(workflowId);
         deleteTabWipWorkflow(workflowId);
         const workflows = await fetchWorkflows({ projectId: activeProjectId });
-        setWorkflowList(workflows);
+        applyProjectWorkflowList(activeProjectId, workflows);
 
         if (currentWorkflow.id === workflowId) {
           const fallback = workflows[0];
@@ -4325,7 +4450,7 @@ function StudioApp() {
           fetchWorkflows({ projectId: activeProjectId })
         ]);
         setFolders(folderPayload.folders);
-        setWorkflowList(workflows);
+        applyProjectWorkflowList(activeProjectId, workflows);
         if (activeFolderFilter === folderId) setActiveFolderFilter(undefined);
       } catch (error) {
         handleApiError(error, "Failed to delete folder");
@@ -4345,7 +4470,7 @@ function StudioApp() {
         setBusy(true);
         await moveWorkflow(workflowId, patch);
         const workflows = await fetchWorkflows({ projectId: activeProjectId });
-        setWorkflowList(workflows);
+        applyProjectWorkflowList(activeProjectId, workflows);
       } catch (error) {
         handleApiError(error, "Failed to move workflow");
       } finally {
@@ -5028,6 +5153,12 @@ function StudioApp() {
     setAuthUser(null);
     setMfaGate(null);
     setWorkflowList([]);
+    setListsProjectId(null);
+    explicitProjectSwitchRef.current = null;
+    setDeepLinkedWorkflowId(null);
+    setInNoProject(false);
+    setSharedWithMe([]);
+    setSharedWithProject([]);
     setCurrentWorkflow(createBlankWorkflow());
     setDefinitions(nodeDefinitions as unknown as DefinitionNode[]);
     setMcpServerDefinitions([]);
@@ -5208,10 +5339,15 @@ function StudioApp() {
         onModeChange={setActiveMode}
         projects={projects}
         activeProjectId={activeProjectId}
-        onChangeActiveProject={(id) => setActiveProjectId(id)}
-        onCreateProject={() => {
-          void handleCreateProject();
-        }}
+        onChangeActiveProject={switchProjectExplicitly}
+        // Only people who may create projects (builders and admins) are offered "New project".
+        onCreateProject={
+          canManageWorkflows
+            ? () => {
+                void handleCreateProject();
+              }
+            : undefined
+        }
         drawerOpen={navDrawerOpen}
         onDrawerOpenChange={setNavDrawerOpen}
         badges={{ approvals: pendingApprovalCount }}
@@ -5258,10 +5394,14 @@ function StudioApp() {
           onOpenShortcuts={() => setShowShortcutsPanel(true)}
           projects={projects}
           activeProjectId={activeProjectId}
-          onChangeActiveProject={(id) => setActiveProjectId(id)}
-          onCreateProject={() => {
-            void handleCreateProject();
-          }}
+          onChangeActiveProject={switchProjectExplicitly}
+          onCreateProject={
+            canManageWorkflows
+              ? () => {
+                  void handleCreateProject();
+                }
+              : undefined
+          }
           runStatus={deriveRunStatus(busy, executionResult)}
           releaseControl={
             currentWorkflowExists ? (
@@ -5353,11 +5493,17 @@ function StudioApp() {
                 <div className="page-head-copy">
                   <h2 className="page-title">Workflows</h2>
                   <p className="page-sub">
-                    <span className="page-project">{activeProject?.name ?? "Default Project"}</span>
-                    {activeProject?.description && <span className="page-sub-sep">· {activeProject.description}</span>}
-                    <span className="page-sub-sep">
-                      · {workflowList.length} workflow{workflowList.length === 1 ? "" : "s"}
-                    </span>
+                    {inNoProject ? (
+                      <span className="page-project">You are not a member of any project yet</span>
+                    ) : (
+                      <>
+                        <span className="page-project">{activeProject?.name ?? "Default Project"}</span>
+                        {activeProject?.description && <span className="page-sub-sep">· {activeProject.description}</span>}
+                        <span className="page-sub-sep">
+                          · {workflowList.length} workflow{workflowList.length === 1 ? "" : "s"}
+                        </span>
+                      </>
+                    )}
                   </p>
                 </div>
                 <div className="page-actions">
@@ -5373,22 +5519,24 @@ function StudioApp() {
                   <button className="pg-btn" onClick={() => void loadData()} disabled={busy}>
                     Refresh
                   </button>
-                  {canManageWorkflows && (
+                  {canManageWorkflows && !inNoProject && (
                     <button className="pg-btn" onClick={() => openExternalImport()} disabled={busy} title="Bring a workflow exported from another builder">
                       Import…
                     </button>
                   )}
-                  <button
-                    className="pg-btn primary"
-                    onClick={() => handleCreateWorkflow()}
-                    disabled={busy || !canManageWorkflows}
-                  >
-                    New workflow
-                  </button>
+                  {!inNoProject && (
+                    <button
+                      className="pg-btn primary"
+                      onClick={() => handleCreateWorkflow()}
+                      disabled={busy || !canManageWorkflows}
+                    >
+                      New workflow
+                    </button>
+                  )}
                 </div>
               </header>
 
-              <div className="dashboard-toolbar">
+              <div className="dashboard-toolbar" style={inNoProject ? { display: "none" } : undefined}>
                 <label className="page-search">
                   <span className="page-search-icon" aria-hidden="true">
                     ⌕
@@ -5460,7 +5608,7 @@ function StudioApp() {
                 </div>
               </div>
 
-              {availableTags.length > 0 && (
+              {!inNoProject && availableTags.length > 0 && (
                 <div className="tag-filter-row" role="group" aria-label="Filter by tag">
                   <button
                     type="button"
@@ -5484,7 +5632,15 @@ function StudioApp() {
                 </div>
               )}
 
-              {filteredWorkflowItems.length === 0 && (
+              {inNoProject && (
+                <div className="page-empty" role="status">
+                  {sharedWithMe.length > 0
+                    ? "Workflows shared with you are listed below. Ask a project admin to add you to a project to work in one."
+                    : "Nothing is shared with you yet. Ask a project admin to add you to a project or to share a workflow with you."}
+                </div>
+              )}
+
+              {!inNoProject && filteredWorkflowItems.length === 0 && (
                 <div className="page-empty">
                   {workflowList.length === 0
                     ? "No workflows in this project yet. Create one, or start from a template."
@@ -5763,6 +5919,7 @@ function StudioApp() {
                       : null
                   }
                   busy={busy}
+                  ownRunsOnly={Boolean(workflowAccess?.workflowId === currentWorkflow.id && workflowAccess.ownRunsOnly)}
                   onPick={(executionId, isLatest) => void handlePickRun(executionId, isLatest)}
                 />
               }
