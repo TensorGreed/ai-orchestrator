@@ -54,9 +54,9 @@ If a step checks a value with [content rules](/product/content-rules), read the 
 
 ### Loops
 
-The nodes connected straight after a **Loop / ForEach** node run once per item. Only those repeat: a node after them runs once, after the loop. Inside a pass, `{{item}}` (or the name set in **Item variable**) is the current item and `{{_loop_index}}` its position, from 0.
+The nodes connected straight after a **Loop / ForEach** node run once per item. Only those repeat: a node after them runs once, after the loop. With **Branches route in the loop** on (new Loops), the nodes on the outputs of an IF, Switch or Filter in the body repeat too, on the passes that take that output (see [Branches in a Loop body](/nodes/core-nodes#branches-in-a-loop-body)). Inside a pass, `{{item}}` (or the name set in **Item variable**) is the current item and `{{_loop_index}}` its position, from 0.
 
-After the loop, a loop body node's result is its **last pass**: `{{results.<bodyId>.field}}`, and the nodes after it, see that pass only. To use every pass, read the Loop node's output: `{{results.<loopId>.items}}` is a list with one entry per pass, each with `index`, `item` and `outputs.<bodyId>`; `{{results.<loopId>.count}}` is the number of passes.
+After the loop, a loop body node's result is its **last pass** (with branch routing, the last pass that ran it): `{{results.<bodyId>.field}}`, and the nodes after it, see that pass only. To use every pass, read the Loop node's output: `{{results.<loopId>.items}}` is a list with one entry per pass, each with `index`, `item` and `outputs.<bodyId>`; `{{results.<loopId>.count}}` is the number of passes.
 
 Two shorter ways to get every pass:
 

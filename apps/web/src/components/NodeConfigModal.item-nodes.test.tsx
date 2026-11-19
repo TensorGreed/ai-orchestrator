@@ -92,6 +92,17 @@ describe("item node forms", () => {
     expect(config.collectResults).toBe(true);
   });
 
+  it("Loop: branch routing is off for a Loop saved without it and saves when turned on", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn();
+    render(<NodeInspector {...props("loop_node", { inputKey: "items", itemVariable: "item" }, onSave)} />);
+    const toggle = screen.getByRole("button", { name: /Branches route in the loop/ });
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    await user.click(toggle);
+    const config = await save(user, onSave);
+    expect(config.routeBranches).toBe(true);
+  });
+
   it("Merge: offers Collect loop passes", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn();

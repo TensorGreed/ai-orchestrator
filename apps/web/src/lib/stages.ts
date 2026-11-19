@@ -608,7 +608,8 @@ export function summarizeNode(node: { type: string; config?: unknown }): string 
         join([
           str(c.inputKey ?? c.itemsKey ?? c.itemsTemplate ?? c.listKey, 32),
           typeof c.maxIterations === "number" ? `max ${c.maxIterations}` : null,
-          c.collectResults === true ? "collects results" : null
+          c.collectResults === true ? "collects results" : null,
+          c.routeBranches === true ? "routes branches" : null
         ]) || "loop"
       );
     case "filter_node": {

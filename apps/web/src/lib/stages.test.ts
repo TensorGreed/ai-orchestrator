@@ -232,6 +232,10 @@ describe("summarizeNode", () => {
 });
 
 describe("item node summaries", () => {
+  it("says when a Loop routes branches", () => {
+    expect(summarizeNode({ type: "loop_node", config: { inputKey: "items", routeBranches: true } })).toBe("items · routes branches");
+  });
+
   it("names a Loop's list (inputKey) and whether it collects results", () => {
     expect(summarizeNode({ type: "loop_node", config: { inputKey: "body.items", maxIterations: 50, collectResults: true } })).toBe("body.items · max 50 · collects results");
   });

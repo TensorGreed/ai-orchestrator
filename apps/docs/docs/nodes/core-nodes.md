@@ -110,8 +110,8 @@ The Filter has two outputs, with the same handles in both modes (changing the mo
 With a list that is empty, neither output runs. An edge saved before the Filter had two outputs has no handle: the
 editor draws it from the first output, and it still runs whatever the Filter decides, as it did before. Reconnect it
 to Pass or Kept to make it follow the Filter. A node such an edge reaches runs even when a skipped output also leads
-to it. Inside a Loop body the outputs do not route (see [Loop and Merge](#loop-and-merge)), so check `passed` or
-`count` there instead. A Filter imported from another builder uses Pass or stop, its kept output
+to it. Inside a Loop body the outputs route on each pass when the Loop has **Branches route in the loop** on (see
+[Loop and Merge](#loop-and-merge)). A Filter imported from another builder uses Pass or stop, its kept output
 on Pass and its discarded output on Stopped.
 
 ### Set / Transform
@@ -136,10 +136,45 @@ See [Loops](/runtime/templates-and-expressions#loops): **Collect results** on a 
 pass), and a Merge in **Collect loop passes** mode (`collect_loop_passes`) gathers every pass of the loop body node
 connected into it. That Merge needs only the one incoming edge.
 
-**Branches do not route inside a Loop body.** The nodes of a loop body run in order on each pass, and a branching
-node there (Filter, IF, Switch) does not choose which of them run: the nodes after every one of its outputs run. Read
-its result instead (`passed`, `count`, the IF's `result`), or move the branching after the loop, or call a
-sub-workflow from the body and branch inside it.
+#### Branches in a Loop body
+
+With **Branches route in the loop** on (`routeBranches`, on for new Loops), an IF, Switch or Filter in the loop body
+works as it does elsewhere, once per item:
+
+- On each pass, only the outputs it takes run. The nodes on the other outputs are skipped for that pass.
+- The nodes connected to its outputs are part of the body, so they run once per item too. The same holds for the
+  outputs of a Content Rules or Chat Intent Router node in the body. A node joins the body this way only when all of
+  its incoming connections come from the Loop or from body nodes. Other nodes after the body run once, after the
+  loop. That includes a node on a body IF's output that also has a connection from outside the loop: it runs once,
+  after the loop, whichever outputs the passes took.
+- A body node's own **On Error** setting applies, as elsewhere. **Continue Anyway** gives the next nodes of that pass
+  `{ error }`. With **Execute Fallback Branch**, the nodes on its Error output run for that pass, and the loop goes
+  on with the next item. The nodes on its other outputs are in the body too. **Stop Execution** (the default)
+  fails the Loop.
+- During a pass, `results.<id>` of a body node that pass skipped is empty. After the loop, a body node's result is
+  the last pass that ran it.
+- After the loop, a body node that no pass ran shows as skipped, and so do the nodes after it, unless a body node
+  that ran also leads to them. A Loop with no items skips nothing.
+- **Collect results** holds one entry per pass, read from the body's last nodes (the ones no other body node
+  follows). With one last node, the entry is its output, or `null` on a pass that skipped it. With several, the entry
+  holds the outputs of those that ran on the pass, by node id:
+  <span v-pre>`{{results.<loopId>.collected.0.<nodeId>}}`</span>.
+- A Merge in **Collect loop passes** mode with several body nodes connected in (the IF's two outputs, for example)
+  gathers their outputs pass by pass, in item order.
+- A Loop can sit in a Loop body. It runs all of its passes on each pass of the outer Loop.
+
+```text
+Loop ─► IF ─ true ─► Tag as large ─┐
+          └─ false ─► Tag as small ─┴─► Merge (Collect loop passes)
+```
+
+A Loop saved before this option has it off. Then a branching node in the body does not choose which nodes run: the
+nodes after every one of its outputs run once, after the loop, and a body node's own On Error is not used (a failure
+fails the Loop). Turn the option on to make that Loop route; check what its later nodes read first, since the nodes
+on the branching node's outputs then run once per item.
+
+A pass cannot pause for a person. An Approval Gate in a body is refused when you save, and a Human Approval node in a
+body fails the Loop when a pass reaches it (the editor warns). On a branch no pass takes, neither runs.
 
 ## Errors and retries
 
@@ -170,8 +205,9 @@ Every node has the same error settings on its **Settings** tab.
   <span v-pre>`{{customer}}: {{error}}`</span>. The editor warns when the option is set and nothing is connected, and when
   something is connected but the option is not set. Try/Catch keeps its own Catch output; a node inside a Try/Catch
   whose own Error output is connected uses that output instead of the Catch. A Loop's Error output is not part of its
-  body: it runs only when the loop fails. Nodes inside a loop body do not use their own On Error setting: a failure
-  there fails the Loop (use the Loop's Error output). A replayed run (the release gate) gives a recorded failure's Error
+  body: it runs only when the loop fails. A node inside a loop body uses its own On Error setting when the Loop has
+  **Branches route in the loop** on; in a Loop without it, a failure there fails the Loop (use the Loop's Error
+  output). A replayed run (the release gate) gives a recorded failure's Error
   output only `error`, without `status` or the original `errorCategory`.
 
 ### HTTP Request status codes

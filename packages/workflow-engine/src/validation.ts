@@ -19,6 +19,7 @@ import {
 } from "@ai-orchestrator/shared";
 import { duplicateAgentToolNameIssues } from "./agent-tool-names";
 import { isAgentAttachmentEdge, isExecutionEdge } from "./graph";
+import { owningLoopsOf } from "./loop-body";
 
 interface GraphMetadata {
   inDegree: Map<string, number>;
@@ -781,6 +782,16 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       }
     }
 
+    // A Loop body cannot pause for a person: a Human Approval there fails the Loop when it is reached.
+    if (node.type === "human_approval" && owningLoopsOf(workflow, node.id).length > 0) {
+      issues.push({
+        code: "human_approval_in_loop",
+        message: "A Human Approval node cannot run inside a Loop body: a pass cannot pause, so the Loop fails when it is reached. Ask before or after the Loop instead.",
+        nodeId: node.id,
+        severity: "warning"
+      });
+    }
+
     if (node.type === "approval_gate") {
       const parsed = approvalGateConfigSchema.safeParse(node.config ?? {});
       if (!parsed.success) {
@@ -806,7 +817,10 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
         });
       }
       // Loop bodies run inline and cannot be paused and resumed part-way.
-      const inLoop = workflow.edges.some((edge) => edge.target === node.id && workflow.nodes.find((entry) => entry.id === edge.source)?.type === "loop_node");
+      // With branch routing, a node on a body IF's (Switch's, Filter's) output is in the body too.
+      const inLoop =
+        workflow.edges.some((edge) => edge.target === node.id && workflow.nodes.find((entry) => entry.id === edge.source)?.type === "loop_node") ||
+        owningLoopsOf(workflow, node.id).length > 0;
       if (inLoop) {
         issues.push({
           code: "approval_gate_in_loop",
@@ -942,7 +956,8 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (config.mode === "collect_loop_passes") {
         const parentIds = workflow.edges.filter((edge) => edge.target === node.id && isExecutionEdge(edge)).map((edge) => edge.source);
         const isLoopBody = (id: string) =>
-          workflow.edges.some((edge) => edge.target === id && isExecutionEdge(edge) && workflow.nodes.find((entry) => entry.id === edge.source)?.type === "loop_node");
+          workflow.edges.some((edge) => edge.target === id && isExecutionEdge(edge) && workflow.nodes.find((entry) => entry.id === edge.source)?.type === "loop_node") ||
+          owningLoopsOf(workflow, id).length > 0;
         if (!parentIds.some(isLoopBody)) {
           issues.push({
             code: "merge_collect_without_loop_body",
