@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { filterModeOf, isMergeMode, isSetValueType, loopCollectsResults, nodeDefinitions } from "./index";
+import { filterModeOf, filterRejectedView, isMergeMode, isSetValueType, loopCollectsResults, nodeDefinitions, readsFilterRejected } from "./index";
 
 describe("item node settings", () => {
   it("reads absent settings as the behaviour before they existed", () => {
@@ -26,5 +26,24 @@ describe("item node settings", () => {
     const set = nodeDefinitions.find((entry) => entry.type === "set_node")!;
     const types = (set.configSchema as { properties: { assignments: { items: { properties: { type: { enum: string[] } } } } } }).properties.assignments.items.properties.type.enum;
     expect(types.every(isSetValueType)).toBe(true);
+  });
+});
+
+describe("a Filter's Rejected output", () => {
+  it("passes the rejected items as items", () => {
+    const output = { items: [1], count: 1, rejected: [2, 3], rejected_count: 2, total: 3, items_from: "rows" };
+    expect(filterRejectedView(output)).toEqual({ items: [2, 3], count: 2, total: 3, items_from: "rows" });
+    expect(filterRejectedView({ passed: true })).toEqual({ passed: true });
+    expect(filterRejectedView([1])).toEqual([1]);
+  });
+
+  it("is what a node reads only when every edge to it leaves an items Filter by Rejected", () => {
+    const items = { type: "filter_node", config: { mode: "items" } };
+    expect(readsFilterRejected(items, ["filtered"])).toBe(true);
+    expect(readsFilterRejected(items, ["filtered", "pass"])).toBe(false);
+    expect(readsFilterRejected(items, [null])).toBe(false);
+    expect(readsFilterRejected(items, [])).toBe(false);
+    expect(readsFilterRejected({ type: "filter_node", config: {} }, ["filtered"])).toBe(false);
+    expect(readsFilterRejected({ type: "if_node", config: { mode: "items" } }, ["filtered"])).toBe(false);
   });
 });

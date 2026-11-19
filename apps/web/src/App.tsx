@@ -19,6 +19,7 @@ import {
   editorRunPrompts,
   nodeDefinitions,
   pickDefaultModelProvider,
+  readsFilterRejected,
   repairNodeErrorConfig,
   withDefaultModelProvider,
   type Folder,
@@ -1344,15 +1345,18 @@ function StudioApp() {
       return [];
     }
 
-    return edges
-      .filter((edge) => edge.target === editingNode.id)
-      .map((edge) => {
-        const sourceNode = nodes.find((node) => node.id === edge.source);
-        return {
-          id: edge.source,
-          label: sourceNode ? `${sourceNode.data.label} (${sourceNode.id})` : edge.source
-        };
-      });
+    const incoming = edges.filter((edge) => edge.target === editingNode.id);
+    return incoming.map((edge) => {
+      const sourceNode = nodes.find((node) => node.id === edge.source);
+      const handles = incoming.filter((other) => other.source === edge.source).map((other) => other.sourceHandle ?? null);
+      return {
+        id: edge.source,
+        label: sourceNode ? `${sourceNode.data.label} (${sourceNode.id})` : edge.source,
+        rejectedItems: sourceNode
+          ? readsFilterRejected({ type: sourceNode.data.nodeType, config: asRecord(sourceNode.data.config) ?? {} }, handles)
+          : false
+      };
+    });
   }, [editingNode, edges, nodes]);
 
   // The editor's built-in prompts go only to workflows that read them, and not where a prompt node's text supplies one.
@@ -1555,6 +1559,8 @@ function StudioApp() {
     authUser?.role,
     workflowAccess && workflowAccess.workflowId === currentWorkflow.id ? workflowAccess : null
   );
+  // Workflow settings in the More actions menu are edits too: only for someone who may save this workflow.
+  const canEditOpenWorkflow = canManageWorkflows && !editDisabledReason;
   // Phase 11.2 — pending approvals the user can decide, for the sidebar badge.
   const [pendingApprovalCount, setPendingApprovalCount] = useState(0);
   const [approvalFocusExecutionId, setApprovalFocusExecutionId] = useState<string | null>(null);
@@ -5284,7 +5290,7 @@ function StudioApp() {
           }
           noWriteTools={Boolean(currentWorkflow.settings?.noWriteTools)}
           onToggleNoWriteTools={
-            canManageWorkflows
+            canEditOpenWorkflow
               ? () =>
                   setCurrentWorkflow((current) => {
                     const { noWriteTools, ...rest } = current.settings ?? {};
@@ -5295,7 +5301,7 @@ function StudioApp() {
           }
           strictTemplates={currentWorkflow.settings?.strictTemplates === true}
           onToggleStrictTemplates={
-            canManageWorkflows
+            canEditOpenWorkflow
               ? () =>
                   setCurrentWorkflow((current) => {
                     const { strictTemplates, ...rest } = current.settings ?? {};
@@ -5305,9 +5311,9 @@ function StudioApp() {
               : undefined
           }
           writeToolApproval={currentWorkflow.settings?.writeToolApproval?.enabled === true}
-          onEditWriteToolApproval={canManageWorkflows ? () => setWriteToolDialogOpen(true) : undefined}
+          onEditWriteToolApproval={canEditOpenWorkflow ? () => setWriteToolDialogOpen(true) : undefined}
           subjectRefsSet={(currentWorkflow.settings?.dataProtection?.subjectRefs?.length ?? 0) > 0}
-          onEditSubjectRefs={canManageWorkflows ? () => setSubjectRefsDialogOpen(true) : undefined}
+          onEditSubjectRefs={canEditOpenWorkflow ? () => setSubjectRefsDialogOpen(true) : undefined}
           errorWorkflowSet={Boolean(currentWorkflow.settings?.errorWorkflowId)}
           onEditErrorWorkflow={canManageWorkflows ? () => setErrorWorkflowDialogOpen(true) : undefined}
           recordMcp={recordMcp}

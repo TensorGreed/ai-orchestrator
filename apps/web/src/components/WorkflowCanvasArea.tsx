@@ -607,13 +607,14 @@ export function WorkflowCanvasArea({
 
   const insertActions = useMemo<CanvasInsertActions | null>(
     () =>
-      onInsertFromHandle
+      // A view-only workflow shows no `+` on outputs (the Filter's Kept/Rejected included): nothing can be added.
+      onInsertFromHandle && !editDisabledReason
         ? {
             onAddAfter: (nodeId, handle) => onInsertFromHandle(nodeId, handle),
             isConnected: (nodeId, handle) => connectedHandles.get(nodeId)?.has(handle) ?? false
           }
         : null,
-    [connectedHandles, onInsertFromHandle]
+    [connectedHandles, editDisabledReason, onInsertFromHandle]
   );
 
   const pendingConnectionRef = useRef<{ nodeId: string; handle: string | null } | null>(null);

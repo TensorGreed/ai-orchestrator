@@ -110,8 +110,8 @@ The Filter has two outputs, with the same handles in both modes (changing the mo
 With a list that is empty, neither output runs. An edge saved before the Filter had two outputs has no handle: the
 editor draws it from the first output, and it still runs whatever the Filter decides, as it did before. Reconnect it
 to Pass or Kept to make it follow the Filter. A node such an edge reaches runs even when a skipped output also leads
-to it. Inside a Loop body the outputs do not route: the nodes after both run, so check `passed` or `count` there
-instead. A Filter imported from another builder uses Pass or stop, its kept output
+to it. Inside a Loop body the outputs do not route (see [Loop and Merge](#loop-and-merge)), so check `passed` or
+`count` there instead. A Filter imported from another builder uses Pass or stop, its kept output
 on Pass and its discarded output on Stopped.
 
 ### Set / Transform
@@ -135,6 +135,11 @@ shown as **Text (as before)**: its value becomes text, and text that is a JSON o
 See [Loops](/runtime/templates-and-expressions#loops): **Collect results** on a Loop adds `collected` (one entry per
 pass), and a Merge in **Collect loop passes** mode (`collect_loop_passes`) gathers every pass of the loop body node
 connected into it. That Merge needs only the one incoming edge.
+
+**Branches do not route inside a Loop body.** The nodes of a loop body run in order on each pass, and a branching
+node there (Filter, IF, Switch) does not choose which of them run: the nodes after every one of its outputs run. Read
+its result instead (`passed`, `count`, the IF's `result`), or move the branching after the loop, or call a
+sub-workflow from the body and branch inside it.
 
 ## Errors and retries
 

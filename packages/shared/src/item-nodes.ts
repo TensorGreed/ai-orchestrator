@@ -37,6 +37,26 @@ export function filterModeOf(config: Record<string, unknown>): FilterMode {
 }
 
 /**
+ * What the next node on an items-mode Filter's Rejected output (`filtered`) receives: the rejected items as `items`,
+ * with `count`, `total` and `items_from`. Any other output is returned as it is.
+ */
+export function filterRejectedView(output: unknown): unknown {
+  if (!output || typeof output !== "object" || Array.isArray(output)) return output;
+  const record = output as Record<string, unknown>;
+  if (!Array.isArray(record.rejected)) return output;
+  return { items: record.rejected, count: record.rejected.length, total: record.total, items_from: record.items_from };
+}
+
+/**
+ * True when a node reads an items-mode Filter only through its Rejected output: every edge from the Filter to it
+ * leaves by `filtered` (an edge without a handle, or from Kept, passes the whole output).
+ */
+export function readsFilterRejected(parent: { type?: string; config?: Record<string, unknown> }, handles: ReadonlyArray<string | null | undefined>): boolean {
+  if (parent.type !== "filter_node" || filterModeOf(parent.config ?? {}) !== "items") return false;
+  return handles.length > 0 && handles.every((handle) => handle === "filtered");
+}
+
+/**
  * Merge modes. `collect_loop_passes` gathers every pass of a Loop body node connected into the Merge (one entry
  * per pass), where the other modes see only the body's last pass.
  */

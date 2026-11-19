@@ -1,4 +1,4 @@
-import { isSetValueType, type SetValueType } from "@ai-orchestrator/shared";
+import { filterRejectedView, isSetValueType, type SetValueType } from "@ai-orchestrator/shared";
 import { renderTemplate, renderTemplateValue } from "./template";
 
 /**
@@ -163,7 +163,7 @@ export function normalizeItemsFrom(value: unknown): string {
 export function filterOutputForHandles(output: unknown, handles: ReadonlySet<string | null>): unknown {
   if (!isRecord(output) || !Array.isArray(output.rejected)) return output;
   if (handles.size === 0 || [...handles].some((handle) => handle !== "filtered")) return output;
-  return { items: output.rejected, count: output.rejected.length, total: output.total, items_from: output.items_from };
+  return filterRejectedView(output);
 }
 
 /**

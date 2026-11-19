@@ -31,6 +31,7 @@ import {
   deriveWorkflowToolDescriptor,
   getNodeDefinition,
   nodeEmbeddingModelTarget,
+  filterRejectedView,
   parseIpAllowlist,
   triggerTrustState
 } from "@ai-orchestrator/shared";
@@ -101,6 +102,8 @@ import {
 export interface NodeInputOption {
   id: string;
   label: string;
+  /** The node is on an items-mode Filter's Rejected output: it receives the rejected items as `items`. */
+  rejectedItems?: boolean;
 }
 
 export type InspectorAttachmentHandle = "chat_model" | "memory" | "tool" | "worker" | "guard";
@@ -758,6 +761,8 @@ interface TemplateAssist {
   hasRunInput: boolean;
   /** The workflow's strict templates setting: a `{{ }}` without a value fails the node. */
   strictTemplates: boolean;
+  /** You may only view this workflow: no suggestions are offered for insertion and no field can be dragged in. */
+  readOnly: boolean;
 }
 
 const TemplateAssistContext = createContext<TemplateAssist | null>(null);
@@ -781,7 +786,7 @@ function useTemplateAutocomplete<T extends TextEntryElement>({
   disabled?: boolean;
 }) {
   const assist = useContext(TemplateAssistContext);
-  const enabled = Boolean(assist) && !disabled;
+  const enabled = Boolean(assist) && !assist?.readOnly && !disabled;
   const elementRef = useRef<T | null>(null);
   const [token, setToken] = useState<TemplateToken | null>(null);
   const [activeOption, setActiveOption] = useState(0);
@@ -2033,16 +2038,20 @@ export function NodeInspector({
     return {
       suggestions: buildTemplateSuggestions({
         nodeId: node.id,
-        parents: (inputOptions ?? []).map((option) => step(option.id)),
+        parents: (inputOptions ?? []).map((option) => {
+          const parent = step(option.id);
+          return option.rejectedItems ? { ...parent, output: filterRejectedView(parent.output) } : parent;
+        }),
         steps: stepIds.map(step),
         input: currentNodeResult?.input,
         vars: workflowContext?.vars,
         isInternalKey
       }),
       hasRunInput: currentNodeResult?.input !== undefined,
-      strictTemplates: workflowContext?.strictTemplates === true
+      strictTemplates: workflowContext?.strictTemplates === true,
+      readOnly: Boolean(readOnlyReason)
     };
-  }, [currentNodeResult?.input, executionResult, inputOptions, node.id, nodeLabels, pinnedData, workflowContext?.strictTemplates, workflowContext?.vars]);
+  }, [currentNodeResult?.input, executionResult, inputOptions, node.id, nodeLabels, pinnedData, readOnlyReason, workflowContext?.strictTemplates, workflowContext?.vars]);
   const currentNodePinned = hasOwnRecordKey(asRecord(pinnedData), node.id);
   const currentPinnedOutput = currentNodePinned ? asRecord(pinnedData)[node.id] : undefined;
 
@@ -10334,7 +10343,7 @@ export function NodeInspector({
         hasOwnTestData={hasTestData(node.data.config)}
         onOpenNode={onNavigateNode}
         nodeExists={nodeExists}
-        draggableFields
+        draggableFields={!readOnlyReason}
         before={
           resolvedThisRun ? (
             <details className="run-data-context insp-resolved">
