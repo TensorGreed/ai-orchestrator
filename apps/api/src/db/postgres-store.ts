@@ -1666,6 +1666,21 @@ export class PostgresStore implements Store {
   async removeWorkflowShare(...args: Parameters<Store["removeWorkflowShare"]>): ReturnType<Store["removeWorkflowShare"]> {
     return workflows.removeWorkflowShare(this.ctx, ...args);
   }
+  async listWorkflowUserShares(...args: Parameters<Store["listWorkflowUserShares"]>): ReturnType<Store["listWorkflowUserShares"]> {
+    return workflows.listWorkflowUserShares(this.ctx, ...args);
+  }
+  async getWorkflowUserShare(...args: Parameters<Store["getWorkflowUserShare"]>): ReturnType<Store["getWorkflowUserShare"]> {
+    return workflows.getWorkflowUserShare(this.ctx, ...args);
+  }
+  async listWorkflowsSharedToUser(...args: Parameters<Store["listWorkflowsSharedToUser"]>): ReturnType<Store["listWorkflowsSharedToUser"]> {
+    return workflows.listWorkflowsSharedToUser(this.ctx, ...args);
+  }
+  async upsertWorkflowUserShare(...args: Parameters<Store["upsertWorkflowUserShare"]>): ReturnType<Store["upsertWorkflowUserShare"]> {
+    return workflows.upsertWorkflowUserShare(this.ctx, ...args);
+  }
+  async removeWorkflowUserShare(...args: Parameters<Store["removeWorkflowUserShare"]>): ReturnType<Store["removeWorkflowUserShare"]> {
+    return workflows.removeWorkflowUserShare(this.ctx, ...args);
+  }
   async listSecretShares(...args: Parameters<Store["listSecretShares"]>): ReturnType<Store["listSecretShares"]> {
     return secrets.listSecretShares(this.ctx, ...args);
   }

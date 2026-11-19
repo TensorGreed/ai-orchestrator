@@ -267,6 +267,7 @@ export async function deleteWorkflow(ctx: PgContext, id: string, options: { refu
     // under the old workflow's legacy default namespaces, exactly `<workflowId>:<nodeId>` for its nodes).
     await run(`DELETE FROM workflow_versions WHERE workflow_id = $1`, [id]);
     await run(`DELETE FROM workflow_shares WHERE workflow_id = $1`, [id]);
+    await run(`DELETE FROM workflow_user_shares WHERE workflow_id = $1`, [id]);
     await run(`DELETE FROM execution_queue WHERE workflow_id = $1`, [id]);
     await run(`DELETE FROM execution_queue_dlq WHERE workflow_id = $1`, [id]);
     await run(`DELETE FROM eval_results WHERE run_id IN (SELECT id FROM eval_runs WHERE workflow_id = $1)`, [id]);
@@ -797,6 +798,58 @@ export async function upsertWorkflowShare(ctx: PgContext, input: Parameters<Stor
 
 export async function removeWorkflowShare(ctx: PgContext, workflowId: string, projectId: string): Promise<boolean> {
   const result = await ctx.pool.query(`DELETE FROM workflow_shares WHERE workflow_id = $1 AND project_id = $2`, [workflowId, projectId]);
+  return (result.rowCount ?? 0) > 0;
+}
+
+const shareLevel = (value: unknown): "read" | "execute" => (toStr(value) === "execute" ? "execute" : "read");
+
+/** v78 — SQLite orders these by user id (its query says so); the "C" collation matches SQLite's byte order. */
+export async function listWorkflowUserShares(ctx: PgContext, workflowId: string): ReturnType<Store["listWorkflowUserShares"]> {
+  const rows = await ctx.query<{ workflow_id: string; user_id: string; access_level: string; shared_by: string | null; created_at: string; email: string | null; role: string | null; disabled_at: string | null }>(
+    `SELECT s.workflow_id, s.user_id, s.access_level, s.shared_by, s.created_at, u.email, u.role, u.disabled_at
+       FROM workflow_user_shares s LEFT JOIN users u ON u.id = s.user_id
+      WHERE s.workflow_id = $1 ORDER BY s.user_id COLLATE "C"`,
+    [workflowId]
+  );
+  return rows.map((row) => ({
+    workflowId: toStr(row.workflow_id),
+    userId: toStr(row.user_id),
+    email: row.email ? toStr(row.email) : null,
+    role: row.role ? toStr(row.role) : null,
+    disabled: Boolean(row.disabled_at),
+    accessLevel: shareLevel(row.access_level),
+    sharedBy: row.shared_by ? toStr(row.shared_by) : null,
+    createdAt: toStr(row.created_at)
+  }));
+}
+
+export async function getWorkflowUserShare(ctx: PgContext, workflowId: string, userId: string): ReturnType<Store["getWorkflowUserShare"]> {
+  const row = await ctx.queryOne<{ access_level: string }>(`SELECT access_level FROM workflow_user_shares WHERE workflow_id = $1 AND user_id = $2`, [workflowId, userId]);
+  return row ? { accessLevel: shareLevel(row.access_level) } : null;
+}
+
+export async function listWorkflowsSharedToUser(ctx: PgContext, userId: string): ReturnType<Store["listWorkflowsSharedToUser"]> {
+  const rows = await ctx.query<{ workflow_id: string; access_level: string }>(
+    `SELECT workflow_id, access_level FROM workflow_user_shares WHERE user_id = $1 ORDER BY workflow_id COLLATE "C"`,
+    [userId]
+  );
+  return rows.map((row) => ({ workflowId: toStr(row.workflow_id), accessLevel: shareLevel(row.access_level) }));
+}
+
+export async function upsertWorkflowUserShare(ctx: PgContext, input: Parameters<Store["upsertWorkflowUserShare"]>[0]): Promise<boolean> {
+  // Only for a workflow and a user that exist; the share locks keep a concurrent delete from leaving an orphan row.
+  const result = await ctx.pool.query(
+    `INSERT INTO workflow_user_shares (workflow_id, user_id, access_level, shared_by, created_at)
+     SELECT $1, $2, $3, $4, $5
+      WHERE EXISTS (SELECT 1 FROM workflows WHERE id = $1 FOR SHARE) AND EXISTS (SELECT 1 FROM users WHERE id = $2 FOR SHARE)
+     ON CONFLICT (workflow_id, user_id) DO UPDATE SET access_level = EXCLUDED.access_level`,
+    [input.workflowId, input.userId, input.accessLevel, input.sharedBy ?? null, new Date().toISOString()]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function removeWorkflowUserShare(ctx: PgContext, workflowId: string, userId: string): Promise<boolean> {
+  const result = await ctx.pool.query(`DELETE FROM workflow_user_shares WHERE workflow_id = $1 AND user_id = $2`, [workflowId, userId]);
   return (result.rowCount ?? 0) > 0;
 }
 

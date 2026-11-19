@@ -4545,6 +4545,18 @@ export class SqliteStore implements Store {
     this.ensureColumn("content_redactions", "version", "INTEGER NOT NULL DEFAULT 0");
     // v77 — a content rules toolset member's options (document scanning).
     this.ensureColumn("mcp_toolset_members", "options_json", "TEXT");
+    // v78 — per-workflow user shares.
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS workflow_user_shares (
+        workflow_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        access_level TEXT NOT NULL DEFAULT 'read',
+        shared_by TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (workflow_id, user_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_workflow_user_shares_user_id ON workflow_user_shares(user_id);
+    `);
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -4878,6 +4890,7 @@ export class SqliteStore implements Store {
       // were project-scoped; a prefix match would also hit `<workflowId>:x`).
       if (hasTable("workflow_versions")) this.exec("DELETE FROM workflow_versions WHERE workflow_id = ?", [id]);
       if (hasTable("workflow_shares")) this.exec("DELETE FROM workflow_shares WHERE workflow_id = ?", [id]);
+      if (hasTable("workflow_user_shares")) this.exec("DELETE FROM workflow_user_shares WHERE workflow_id = ?", [id]);
       if (hasTable("execution_queue")) this.exec("DELETE FROM execution_queue WHERE workflow_id = ?", [id]);
       if (hasTable("execution_queue_dlq")) this.exec("DELETE FROM execution_queue_dlq WHERE workflow_id = ?", [id]);
       if (hasTable("eval_runs")) {
@@ -5357,6 +5370,7 @@ export class SqliteStore implements Store {
     this.exec(`DELETE FROM mfa_secrets WHERE user_id = ?`, [id]);
     this.exec(`DELETE FROM sso_identities WHERE user_id = ?`, [id]);
     this.exec(`DELETE FROM user_project_roles WHERE user_id = ?`, [id]);
+    this.exec(`DELETE FROM workflow_user_shares WHERE user_id = ?`, [id]);
     this.exec(`DELETE FROM user_invites WHERE user_id = ?`, [id]);
     return this.db.prepare(`DELETE FROM users WHERE id = ?`).run(id).changes > 0;
   }
@@ -8654,6 +8668,62 @@ export class SqliteStore implements Store {
     this.exec(`DELETE FROM workflow_shares WHERE workflow_id = ? AND project_id = ?`, [workflowId, projectId]);
     this.persist();
     return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // v78 — Workflow user shares
+  // ---------------------------------------------------------------------------
+
+  async listWorkflowUserShares(workflowId: string): ReturnType<Store["listWorkflowUserShares"]> {
+    const rows = this.queryAll<{ workflow_id: string; user_id: string; access_level: string; shared_by: string | null; created_at: string; email: string | null; role: string | null; disabled_at: string | null }>(
+      `SELECT s.workflow_id, s.user_id, s.access_level, s.shared_by, s.created_at, u.email, u.role, u.disabled_at
+         FROM workflow_user_shares s LEFT JOIN users u ON u.id = s.user_id
+        WHERE s.workflow_id = ? ORDER BY s.user_id`,
+      [workflowId]
+    );
+    return rows.map((row) => ({
+      workflowId: toString(row.workflow_id),
+      userId: toString(row.user_id),
+      email: row.email ? toString(row.email) : null,
+      role: row.role ? toString(row.role) : null,
+      disabled: Boolean(row.disabled_at),
+      accessLevel: toString(row.access_level) === "execute" ? "execute" : "read",
+      sharedBy: row.shared_by ? toString(row.shared_by) : null,
+      createdAt: toString(row.created_at)
+    }));
+  }
+
+  async getWorkflowUserShare(workflowId: string, userId: string): ReturnType<Store["getWorkflowUserShare"]> {
+    const row = this.queryOne<{ access_level: string }>(`SELECT access_level FROM workflow_user_shares WHERE workflow_id = ? AND user_id = ?`, [workflowId, userId]);
+    return row ? { accessLevel: toString(row.access_level) === "execute" ? "execute" : "read" } : null;
+  }
+
+  async listWorkflowsSharedToUser(userId: string): ReturnType<Store["listWorkflowsSharedToUser"]> {
+    const rows = this.queryAll<{ workflow_id: string; access_level: string }>(
+      `SELECT workflow_id, access_level FROM workflow_user_shares WHERE user_id = ? ORDER BY workflow_id`,
+      [userId]
+    );
+    return rows.map((row) => ({ workflowId: toString(row.workflow_id), accessLevel: toString(row.access_level) === "execute" ? "execute" : "read" }));
+  }
+
+  async upsertWorkflowUserShare(input: Parameters<Store["upsertWorkflowUserShare"]>[0]): Promise<boolean> {
+    // Only for a workflow and a user that exist (checked in the same statement).
+    const changes = this.db
+      .prepare(
+        `INSERT INTO workflow_user_shares (workflow_id, user_id, access_level, shared_by, created_at)
+         SELECT ?, ?, ?, ?, ?
+          WHERE EXISTS (SELECT 1 FROM workflows WHERE id = ?) AND EXISTS (SELECT 1 FROM users WHERE id = ?)
+         ON CONFLICT(workflow_id, user_id) DO UPDATE SET access_level = excluded.access_level`
+      )
+      .run(input.workflowId, input.userId, input.accessLevel, input.sharedBy ?? null, new Date().toISOString(), input.workflowId, input.userId).changes;
+    this.persist();
+    return changes > 0;
+  }
+
+  async removeWorkflowUserShare(workflowId: string, userId: string): Promise<boolean> {
+    const changes = this.db.prepare(`DELETE FROM workflow_user_shares WHERE workflow_id = ? AND user_id = ?`).run(workflowId, userId).changes;
+    this.persist();
+    return changes > 0;
   }
 
   // ---------------------------------------------------------------------------

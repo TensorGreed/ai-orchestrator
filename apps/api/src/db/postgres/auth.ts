@@ -373,6 +373,7 @@ async function deleteUserRows(client: PgClient, id: string): Promise<boolean> {
   await client.query(`DELETE FROM mfa_secrets WHERE user_id = $1`, [id]);
   await client.query(`DELETE FROM sso_identities WHERE user_id = $1`, [id]);
   await client.query(`DELETE FROM user_project_roles WHERE user_id = $1`, [id]);
+  await client.query(`DELETE FROM workflow_user_shares WHERE user_id = $1`, [id]);
   await client.query(`DELETE FROM user_invites WHERE user_id = $1`, [id]);
   const result = await client.query(`DELETE FROM users WHERE id = $1`, [id]);
   return (result.rowCount ?? 0) > 0;

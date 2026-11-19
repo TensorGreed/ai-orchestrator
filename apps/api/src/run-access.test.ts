@@ -229,6 +229,17 @@ describe("run-access helper", () => {
     expect(await access.readableProjectIds(admin)).toBeNull();
   });
 
+  it("lists workflows shared with the person, inside an API key's projects only (v78)", async () => {
+    const locked = createRunAccess({
+      ...accessDeps(),
+      canInProject: async (_user, projectId) => projectId === "pa",
+      listWorkflowIdsSharedToUser: async (userId) => (userId === "u-viewer" ? ["b"] : [])
+    });
+    expect(await locked.readableWorkflowIds(user("viewer"))).toEqual(["a", "b"]);
+    expect(await locked.readableWorkflowIds(user("builder"))).toEqual(["a"]);
+    expect(await locked.readableWorkflowIds({ ...user("viewer"), projectScope: ["pa"] })).toEqual(["a"]);
+  });
+
   it("filters rows to readable workflows", async () => {
     const locked = createRunAccess({ ...accessDeps(), canInProject: async (_user, projectId) => projectId === "pa" });
     const rows = [{ workflowId: "a" }, { workflowId: "b" }, { workflowId: "gone" }];

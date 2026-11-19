@@ -473,6 +473,22 @@ export interface UserInviteCreate {
   expiresAt: string;
 }
 
+export type WorkflowShareAccessLevel = "read" | "execute";
+
+/** v78 — a workflow shared with one person. */
+export interface WorkflowUserShareRecord {
+  workflowId: string;
+  userId: string;
+  email: string | null;
+  /** The person's global role (null when the user row is gone). */
+  role: string | null;
+  /** Deactivated (SCIM): the share stays but gives nothing while they cannot sign in. */
+  disabled: boolean;
+  accessLevel: WorkflowShareAccessLevel;
+  sharedBy: string | null;
+  createdAt: string;
+}
+
 export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentRedactionStore {
   // ---- Store lifecycle
 
@@ -1491,6 +1507,14 @@ export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentR
     sharedBy?: string | null;
   }): Promise<void>;
   removeWorkflowShare(workflowId: string, projectId: string): Promise<boolean>;
+  /** v78 — the people a workflow is shared with (email null when the user row is gone), in user id order. */
+  listWorkflowUserShares(workflowId: string): Promise<WorkflowUserShareRecord[]>;
+  getWorkflowUserShare(workflowId: string, userId: string): Promise<{ accessLevel: WorkflowShareAccessLevel } | null>;
+  /** v78 — the workflows shared with one person (one indexed read). */
+  listWorkflowsSharedToUser(userId: string): Promise<Array<{ workflowId: string; accessLevel: WorkflowShareAccessLevel }>>;
+  /** v78 — adds or changes a user share; false when the workflow or the user does not exist. */
+  upsertWorkflowUserShare(input: { workflowId: string; userId: string; accessLevel: WorkflowShareAccessLevel; sharedBy?: string | null }): Promise<boolean>;
+  removeWorkflowUserShare(workflowId: string, userId: string): Promise<boolean>;
   listSecretShares(secretId: string): Promise<Array<{
     secretId: string;
     projectId: string;

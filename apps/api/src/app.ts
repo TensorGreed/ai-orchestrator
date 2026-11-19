@@ -209,6 +209,7 @@ import {
 import {
   ALL_PERMISSIONS,
   RbacService,
+  roleMayRunWorkflows,
   isProjectRole,
   strictIsolationStartupWarning,
   type Permission,
@@ -4710,7 +4711,8 @@ export async function createApp(
     canAccessWorkflow: async (user, workflow, permission) => await rbacService.canAccessWorkflow(user, workflow, permission),
     canInProject: async (user, projectId, permission) => await rbacService.can(user, projectId, permission),
     listWorkflowIdsSharedToProject: async (projectId) => (await store.listWorkflowsSharedToProject(projectId)).map((share) => share.workflowId),
-    projectExists: async (projectId) => Boolean(await store.getProject(projectId))
+    projectExists: async (projectId) => Boolean(await store.getProject(projectId)),
+    listWorkflowIdsSharedToUser: async (userId) => (await store.listWorkflowsSharedToUser(userId)).map((share) => share.workflowId)
   });
   // Phase 9.1 — built-in persistent vector store. A run sees the knowledge
   // bases of its own project and the shared ones without a project; any other
@@ -4801,6 +4803,7 @@ export async function createApp(
     getSecretProjectId: async (secretId) => (await store.getSecret(secretId))?.projectId ?? null,
     listSecretIdsSharedToProject: async (projectId) => await store.listSecretsSharedToProject(projectId),
     canUseSecretsInProject: async (user, projectId) => await rbacService.can(user, projectId, "secret:use"),
+    userMayRunViaShare: async (user, workflow) => (await rbacService.userShareAccess(user, workflow)) === "execute",
     defaultSecretsShared: config.PROJECT_ISOLATION === "role",
     getMcpServerProjectId: async (serverId) => {
       const server = await store.getMcpServer(serverId);
@@ -10480,11 +10483,15 @@ export async function createApp(
   // Phase 5.2 — Project memberships
   // ---------------------------------------------------------------------------
 
-  const projectMemberSchema = z.object({
-    userId: z.string().min(1).max(120),
-    role: z.string().min(1).max(60),
-    customRoleId: z.string().min(1).max(120).nullable().optional()
-  });
+  // The member is named by user id or, from the studio's picker, by email (exactly one of the two).
+  const projectMemberSchema = z
+    .object({
+      userId: z.string().min(1).max(120).optional(),
+      email: z.string().trim().email().max(320).optional(),
+      role: z.string().min(1).max(60),
+      customRoleId: z.string().min(1).max(120).nullable().optional()
+    })
+    .refine((value) => Boolean(value.userId) !== Boolean(value.email), { message: "Send either userId or email" });
 
   app.get<{ Params: { id: string } }>("/api/projects/:id/members", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
@@ -10498,7 +10505,9 @@ export async function createApp(
       reply.code(403);
       return { error: "Insufficient permissions to view project members" };
     }
-    return { members: await rbacService.listMembers(project.id) };
+    // Each member with the email it signs in with, so the studio shows people rather than ids.
+    const members = await rbacService.listMembers(project.id);
+    return { members: await mapAsync(members, async (member) => ({ ...member, email: (await store.getUserById(member.userId))?.email ?? null })) };
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/projects/:id/members", async (request, reply) => {
@@ -10519,11 +10528,12 @@ export async function createApp(
       reply.code(400);
       return { error: "Invalid member payload", details: parsed.error.issues };
     }
-    const targetUser = await store.getUserById(parsed.data.userId);
+    const targetUser = parsed.data.email ? await store.getUserByEmail(parsed.data.email.toLowerCase()) : await store.getUserById(parsed.data.userId!);
     if (!targetUser) {
       reply.code(400);
-      return { error: "Target user does not exist" };
+      return { error: parsed.data.email ? `No user with the email ${parsed.data.email}. Invite them first.` : "Target user does not exist" };
     }
+    const memberUserId = targetUser.id;
     const role = parsed.data.role;
     if (!isProjectRole(role) && role !== "custom") {
       reply.code(400);
@@ -10534,13 +10544,13 @@ export async function createApp(
       reply.code(403);
       return { error: "Only an admin can give a role that grants a deployment-wide permission (legal holds, data-subject requests)." };
     }
-    if (user.role !== "admin" && (await rbacService.membershipGrantsDeploymentPermission(parsed.data.userId, project.id))) {
+    if (user.role !== "admin" && (await rbacService.membershipGrantsDeploymentPermission(memberUserId, project.id))) {
       reply.code(403);
       return { error: "Only an admin can change the membership of someone whose role grants a deployment-wide permission." };
     }
     try {
       await rbacService.addMember({
-        userId: parsed.data.userId,
+        userId: memberUserId,
         projectId: project.id,
         role: role as ProjectRole | "custom",
         customRoleId: parsed.data.customRoleId ?? null
@@ -10561,11 +10571,11 @@ export async function createApp(
       eventType: "project.member.add",
       action: "add_member",
       resourceType: "project_member",
-      resourceId: `${project.id}:${parsed.data.userId}`,
+      resourceId: `${project.id}:${memberUserId}`,
       projectId: project.id,
-      metadata: { userId: parsed.data.userId, role, customRoleId: parsed.data.customRoleId ?? null }
+      metadata: { userId: memberUserId, role, customRoleId: parsed.data.customRoleId ?? null }
     });
-    return { ok: true, membership: await rbacService.getMembership(parsed.data.userId, project.id) };
+    return { ok: true, membership: await rbacService.getMembership(memberUserId, project.id) };
   });
 
   app.delete<{ Params: { id: string; userId: string } }>(
@@ -10716,7 +10726,13 @@ export async function createApp(
     if (!user) return;
     const access = await runAccess.workflow(user, request.params.id, "workflow:read");
     if (!access.ok) return denyRunAccess(reply, access);
-    return { shares: await rbacService.listWorkflowShares(access.workflow.id) };
+    const workflow = access.workflow;
+    // v78 — the people it is shared with are listed to whoever may manage its shares.
+    const manages = user.role === "admin" || (await rbacService.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "workflow:write"));
+    return {
+      shares: await rbacService.listWorkflowShares(workflow.id),
+      ...(manages ? { userShares: await workflowUserShareViews(workflow.id) } : {})
+    };
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/shares", async (request, reply) => {
@@ -10792,6 +10808,109 @@ export async function createApp(
       return { ok: true };
     }
   );
+
+  // ---------------------------------------------------------------------------
+  // v78 — Workflow shares with people
+  // ---------------------------------------------------------------------------
+  // Who may manage them: users with workflow:write on the workflow's own project (or admins), as for project shares.
+  // A share gives read or execute, never write, and never more than the person's role (`effectiveAccess`).
+
+  const workflowUserShareSchema = z
+    .object({
+      email: z.string().trim().email().max(320).optional(),
+      userId: z.string().min(1).max(120).optional(),
+      accessLevel: z.enum(["read", "execute"]).default("read")
+    })
+    .refine((value) => Boolean(value.email) !== Boolean(value.userId), { message: "Send either email or userId" });
+
+  const workflowUserShareViews = async (workflowId: string) =>
+    (await rbacService.listWorkflowUserShares(workflowId)).map((share) => ({
+      ...share,
+      effectiveAccess: share.disabled || !share.role ? null : share.accessLevel === "execute" && roleMayRunWorkflows(share.role as UserRole) ? "execute" : "read"
+    }));
+
+  const workflowShareManager = async (user: SafeUser, workflowId: string): Promise<{ ok: true; workflow: Workflow } | { ok: false; status: number; error: string }> => {
+    // Unreadable reads as missing; managing shares needs write on the owning project.
+    const access = await runAccess.workflow(user, workflowId, "workflow:read");
+    if (!access.ok) return access;
+    const owningProject = access.workflow.projectId ?? DEFAULT_PROJECT_ID;
+    if (user.role !== "admin" && !(await rbacService.can(user, owningProject, "workflow:write"))) {
+      return { ok: false, status: 403, error: "Only users with workflow:write on the owning project can manage who the workflow is shared with" };
+    }
+    return { ok: true, workflow: access.workflow };
+  };
+
+  app.get<{ Params: { id: string } }>("/api/workflows/:id/user-shares", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const managed = await workflowShareManager(user, request.params.id);
+    if (!managed.ok) return denyRunAccess(reply, managed);
+    const workflow = managed.workflow;
+    return { userShares: await workflowUserShareViews(workflow.id) };
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/user-shares", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const managed = await workflowShareManager(user, request.params.id);
+    if (!managed.ok) return denyRunAccess(reply, managed);
+    const workflow = managed.workflow;
+    const parsed = workflowUserShareSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid share payload", details: parsed.error.issues };
+    }
+    const target = parsed.data.email ? await store.getUserByEmail(parsed.data.email.toLowerCase()) : await store.getUserById(parsed.data.userId!);
+    // Service accounts reach workflows through their keys' projects, not through shares.
+    if (!target || target.kind === "service") {
+      reply.code(400);
+      return { error: parsed.data.email ? `No user with the email ${parsed.data.email}. Invite them first.` : "Target user does not exist" };
+    }
+    if (target.id === user.id) {
+      reply.code(400);
+      return { error: "You cannot share a workflow with yourself" };
+    }
+    const saved = await rbacService.shareWorkflowWithUser({ workflowId: workflow.id, userId: target.id, accessLevel: parsed.data.accessLevel, sharedBy: user.email });
+    if (!saved) {
+      // The workflow or the user was deleted after the checks above.
+      reply.code(409);
+      return { error: "The workflow or the user no longer exists" };
+    }
+    const effectiveAccess = parsed.data.accessLevel === "execute" && roleMayRunWorkflows(target.role as UserRole) ? "execute" : "read";
+    await audit(request, user, {
+      category: "sharing",
+      eventType: "workflow.user_share",
+      action: "share",
+      resourceType: "workflow",
+      resourceId: workflow.id,
+      projectId: workflow.projectId ?? null,
+      metadata: { targetUserId: target.id, targetEmail: target.email, accessLevel: parsed.data.accessLevel, effectiveAccess }
+    });
+    return { ok: true, share: { userId: target.id, email: target.email, role: target.role, accessLevel: parsed.data.accessLevel, effectiveAccess } };
+  });
+
+  app.delete<{ Params: { id: string; userId: string } }>("/api/workflows/:id/user-shares/:userId", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const managed = await workflowShareManager(user, request.params.id);
+    if (!managed.ok) return denyRunAccess(reply, managed);
+    const workflow = managed.workflow;
+    const removed = await rbacService.unshareWorkflowWithUser(workflow.id, request.params.userId);
+    if (!removed) {
+      reply.code(404);
+      return { error: "Share not found" };
+    }
+    await audit(request, user, {
+      category: "sharing",
+      eventType: "workflow.user_unshare",
+      action: "unshare",
+      resourceType: "workflow",
+      resourceId: workflow.id,
+      projectId: workflow.projectId ?? null,
+      metadata: { targetUserId: request.params.userId }
+    });
+    return { ok: true };
+  });
 
   // ---------------------------------------------------------------------------
   // Phase 5.2 — Secret sharing

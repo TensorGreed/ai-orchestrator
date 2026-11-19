@@ -989,9 +989,29 @@ export const openApiSpec = {
     "/api/workflows/import": {
       post: {
         tags: ["Workflows"],
-        summary: "Import a workflow from JSON",
-        requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: { json: { type: "string" }, workflow: { type: "object" } } } } } },
-        responses: { "200": { description: "Imported workflow" }, "400": { description: "Import failed" } }
+        summary:
+          "Import a workflow from JSON. mode new (default): a new workflow; the file's id is kept when free, otherwise it gets a new id, \" (imported)\" after its name and its own trigger paths. mode replace: overwrite the stored workflow with the file's id (a version of it is kept). dryRun: store nothing; return the workflow it would save, the stored workflow with that id (if you can read it) and what a replace changes",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  json: { type: "string" },
+                  workflow: { type: "object" },
+                  mode: { type: "string", enum: ["new", "replace"], default: "new" },
+                  dryRun: { type: "boolean" }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "Imported workflow, or with dryRun { dryRun, mode, workflow, existing, diff }" },
+          "400": { description: "Import failed" },
+          "404": { description: "mode replace: no workflow you can read has the file's id" }
+        }
       }
     },
     "/api/workflows/{id}/export": {
@@ -1104,6 +1124,39 @@ export const openApiSpec = {
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["projectId"], properties: { projectId: { type: "string" }, accessLevel: { type: "string", enum: ["read", "execute"] } } } } } },
         responses: { "200": { description: "Shared" } }
+      }
+    },
+    "/api/workflows/{id}/user-shares": {
+      get: {
+        tags: ["RBAC"],
+        summary: "The people a workflow is shared with, with the access each one gets (workflow:write on its project, or admin)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ userShares: [{ userId, email, role, disabled, accessLevel, effectiveAccess, sharedBy, createdAt }] }" }, "403": { description: "Not a manager of the workflow" } }
+      },
+      post: {
+        tags: ["RBAC"],
+        summary: "Share a workflow with a person, by email or user id: read, or execute (runs only for operators and up; never write)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { type: "object", properties: { email: { type: "string" }, userId: { type: "string" }, accessLevel: { type: "string", enum: ["read", "execute"], default: "read" } } }
+            }
+          }
+        },
+        responses: { "200": { description: "Shared" }, "400": { description: "Unknown user, a service account or yourself" }, "403": { description: "Not a manager of the workflow" } }
+      }
+    },
+    "/api/workflows/{id}/user-shares/{userId}": {
+      delete: {
+        tags: ["RBAC"],
+        summary: "Stop sharing a workflow with a person",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "userId", in: "path", required: true, schema: { type: "string" } }
+        ],
+        responses: { "200": { description: "Share removed" }, "404": { description: "Share not found" } }
       }
     },
     "/api/workflows/{id}/shares/{projectId}": {
@@ -1320,7 +1373,19 @@ export const openApiSpec = {
         tags: ["RBAC"],
         summary: "Add a member to a project",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["userId", "role"], properties: { userId: { type: "string" }, role: { type: "string" }, customRoleId: { type: "string", nullable: true } } } } } },
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["role"],
+                description: "Name the member by userId or by email (exactly one)",
+                properties: { userId: { type: "string" }, email: { type: "string" }, role: { type: "string" }, customRoleId: { type: "string", nullable: true } }
+              }
+            }
+          }
+        },
         responses: { "200": { description: "Member added" } }
       }
     },

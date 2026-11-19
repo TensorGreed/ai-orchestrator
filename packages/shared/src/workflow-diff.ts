@@ -39,7 +39,9 @@ interface DiffableNode {
   name?: string;
   position?: unknown;
   config?: unknown;
-  [key: string]: unknown;
+  disabled?: unknown;
+  color?: unknown;
+  errorConfig?: unknown;
 }
 
 interface DiffableEdge {
@@ -51,11 +53,24 @@ interface DiffableEdge {
   label?: string;
 }
 
+/** Any workflow shape: the fields below are the ones a caller may know of; every own field is compared. */
 export interface DiffableWorkflow {
-  nodes?: DiffableNode[];
-  edges?: DiffableEdge[];
-  [key: string]: unknown;
+  id?: string;
+  name?: string;
+  nodes?: readonly DiffableNode[];
+  edges?: readonly DiffableEdge[];
+  schemaVersion?: unknown;
+  workflowVersion?: unknown;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+  projectId?: unknown;
+  folderId?: unknown;
+  tags?: unknown;
+  settings?: unknown;
+  variables?: unknown;
 }
+
+const fieldsOf = (value: object): Record<string, unknown> => value as Record<string, unknown>;
 
 /** Fields that say nothing about what a workflow does, or that the store sets. */
 const IGNORED_WORKFLOW_FIELDS = new Set(["nodes", "edges", "createdAt", "updatedAt", "workflowVersion", "schemaVersion"]);
@@ -102,8 +117,10 @@ function edgeRef(edge: DiffableEdge): WorkflowDiffEdgeRef {
   };
 }
 
-function changedNodeFields(before: DiffableNode, after: DiffableNode): string[] {
+function changedNodeFields(beforeNode: DiffableNode, afterNode: DiffableNode): string[] {
   const fields: string[] = [];
+  const before = fieldsOf(beforeNode);
+  const after = fieldsOf(afterNode);
   const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
   for (const key of [...keys].sort()) {
     if (key === "id" || key === "position") continue;
@@ -157,11 +174,13 @@ export function diffWorkflows(before: DiffableWorkflow, after: DiffableWorkflow,
   }
 
   const fields: string[] = [];
-  for (const key of [...new Set([...Object.keys(before), ...Object.keys(after)])].sort()) {
+  const beforeFields = fieldsOf(before);
+  const afterFields = fieldsOf(after);
+  for (const key of [...new Set([...Object.keys(beforeFields), ...Object.keys(afterFields)])].sort()) {
     if (IGNORED_WORKFLOW_FIELDS.has(key)) continue;
     // A workflow without a project is in the default one.
     const project = (value: unknown) => (key === "projectId" && blank(value) ? options.defaultProjectId : value);
-    if (!same(project(before[key]), project(after[key]))) fields.push(key);
+    if (!same(project(beforeFields[key]), project(afterFields[key]))) fields.push(key);
   }
 
   const identical =
