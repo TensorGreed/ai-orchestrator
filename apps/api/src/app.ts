@@ -292,7 +292,7 @@ import type { SensitiveValuesMarker } from "@ai-orchestrator/shared";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { registerUserInviteRoutes } from "./user-invite-routes.js";
-import { registerWorkflowBuilderRoutes } from "./workflow-builder-routes.js";
+import { WORKFLOW_BUILDER_TRIGGER_TYPE, WORKFLOW_BUILDER_USAGE_LABEL, WORKFLOW_BUILDER_USAGE_WORKFLOW_ID, registerWorkflowBuilderRoutes } from "./workflow-builder-routes.js";
 import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { LIVE_ENTRY_OFF_CODE, isLiveEntryOff, liveEntryOffMessage } from "@ai-orchestrator/shared";
 import { envModelProviders } from "@ai-orchestrator/shared";
@@ -17031,6 +17031,42 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       // Like a duplicate or a template: trigger paths nobody uses, and no setting only an admin may make.
       const withPaths = withUniqueTriggerPaths(workflow, await releaseService.usedRoutingKeys());
       return { ...workflow, nodes: withoutTriggerTrust(withPaths).nodes };
+    },
+    checkBudget: async (user, projectId) => {
+      const blocked = await budgetService.checkBlock({ workflowId: null, projectId, userEmail: user.email, userId: user.id });
+      return blocked
+        ? { budgetId: blocked.budget.id, budgetName: blocked.budget.name, period: blocked.budget.period, periodStart: blocked.periodStart }
+        : null;
+    },
+    recordUsage: async ({ user, projectId, buildId, status, durationMs, calls }) => {
+      const totals = await usageService.recordExecution({
+        executionId: buildId,
+        workflowId: WORKFLOW_BUILDER_USAGE_WORKFLOW_ID,
+        workflowName: WORKFLOW_BUILDER_USAGE_LABEL,
+        userId: user.id,
+        userEmail: user.email,
+        projectId,
+        triggerType: WORKFLOW_BUILDER_TRIGGER_TYPE,
+        status,
+        durationMs,
+        nodeResults: {},
+        liveModelCalls: calls.map((call) => ({
+          providerId: call.providerId,
+          model: call.model,
+          inputTokens: call.usage.inputTokens ?? null,
+          outputTokens: call.usage.outputTokens ?? null,
+          cachedInputTokens: call.usage.cachedInputTokens ?? null
+        }))
+      });
+      await budgetService.recordExecution({
+        executionId: buildId,
+        workflowId: null,
+        projectId,
+        userEmail: user.email,
+        userId: user.id,
+        spentUsd: totals.costUsd,
+        spentTokens: totals.totalTokens
+      });
     },
     isModelNotAllowed: (error) => isModelNotAllowedError(error),
     redact: (text) => String(secretService.redact(text))

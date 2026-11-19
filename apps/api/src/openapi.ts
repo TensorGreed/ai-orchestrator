@@ -1028,8 +1028,11 @@ export const openApiSpec = {
           "200": { description: "{ status: ready, workflow, preview, attempts, model } | { status: needs_model, message, templates } | { status: question, question } | { status: failed, message, issues, attempts }" },
           "400": { description: "Invalid request or unknown provider" },
           "403": { description: "Not a builder, no write access to the project, a secret you may not use, a model the allowlist refuses, or the builder is turned off (code workflow_builder_disabled)" },
+          "402": { description: "A block budget that applies to the project, the person or the deployment is used up (code budget_exceeded); refused before any model call. A build's model calls are recorded as usage (Describe it (builds))" },
           "409": { description: "A build of yours is already running" },
+          "429": { description: "Several builds are running on this server" },
           "502": { description: "The model call failed" },
+          "503": { description: "The budgets could not be checked" },
           "504": { description: "The model took too long" }
         }
       }

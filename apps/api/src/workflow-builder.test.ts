@@ -2,6 +2,8 @@
  * Describe-it builder: POST /api/workflow-builder/build drafts a workflow through a model (here a mock
  * OpenAI-compatible server that answers with canned tool calls), checks it, and returns a preview without saving
  * anything. On Echo no model is called and the closest templates come back. Builders only; an admin can turn it off.
+ * A build's model calls count toward the model spending limits: recorded as the project's and the person's usage
+ * ("Describe it (builds)"), and refused before any call while a block budget is used up.
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -376,5 +378,104 @@ describe("POST /api/workflow-builder/build", () => {
     expect(text).not.toContain("a1B2c3D4e5a1B2c3D4e5");
     expect(text).toContain("REDACTED");
     expect(modelRequests.length).toBeGreaterThan(0);
+  }, 30_000);
+});
+
+describe("Describe it and model spending limits", () => {
+  const usageOfBuilds = async (context: TestContext) => {
+    const events = await context.store.listUsageEvents({ limit: 50, workflowId: "workflow-builder" });
+    return events as Array<Record<string, unknown>>;
+  };
+  const draftScript = (): Turn[] => [
+    { toolCalls: [{ name: "list_node_types", arguments: { query: "webhook http" } }] },
+    { toolCalls: [{ name: "submit_workflow", arguments: goodDraft }] }
+  ];
+
+  it("records a build's model calls as the project's and the person's usage, labelled as a build", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context, "builder");
+    const builder = (await context.store.getUserByEmail("builder@example.com"))!;
+    script = draftScript();
+    const response = await build(context, cookie, { prompt: "When an order arrives, post it to the shop API", model: mockModel() });
+    expect(response.json()).toMatchObject({ status: "ready" });
+    expect(modelRequests).toHaveLength(2);
+    const events = await usageOfBuilds(context);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      workflowId: "workflow-builder",
+      workflowName: "Describe it (builds)",
+      triggerType: "workflow_builder",
+      projectId: "default",
+      userId: builder.id,
+      userEmail: "builder@example.com",
+      status: "success",
+      inputTokens: 20,
+      outputTokens: 10,
+      totalTokens: 30,
+      llmCallCount: 2
+    });
+
+    // The usage views show it under its own label.
+    const admin = await login(context, "admin");
+    const rollup = await context.app.inject({ method: "GET", url: "/api/usage/rollup?groupBy=workflow", headers: { cookie: admin } });
+    expect(rollup.json<{ rows: Array<{ workflowName?: string; totalTokens: number }> }>().rows).toEqual(
+      expect.arrayContaining([expect.objectContaining({ workflowName: "Describe it (builds)", totalTokens: 30 })])
+    );
+
+    // A build that fails after a call is charged for that call.
+    script = [{ toolCalls: [{ name: "list_node_types", arguments: {} }] }, { fail: "upstream broke" }];
+    await build(context, cookie, { prompt: "orders again", model: mockModel() });
+    const after = await usageOfBuilds(context);
+    expect(after).toHaveLength(2);
+    expect(after.find((event) => event.status === "error")).toMatchObject({ totalTokens: 15, llmCallCount: 1 });
+  }, 30_000);
+
+  it("refuses a build before any model call once a block budget on the project or the person is used up", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context, "builder");
+    const admin = await login(context, "admin");
+    const budget = async (payload: Record<string, unknown>) => {
+      const created = await context.app.inject({ method: "POST", url: "/api/budgets", headers: { cookie: admin }, payload });
+      expect(created.statusCode, created.body).toBeLessThan(300);
+      return created.json<{ id: string }>();
+    };
+    await budget({ name: "Default project tokens", scopeType: "project", scopeId: "default", period: "month", limitType: "tokens", limitValue: 25, action: "block" });
+
+    // Under the limit: the build runs (and takes it over).
+    script = draftScript();
+    expect((await build(context, cookie, { prompt: "orders", model: mockModel() })).json()).toMatchObject({ status: "ready" });
+    expect(modelRequests).toHaveLength(2);
+
+    script = draftScript();
+    const refused = await build(context, cookie, { prompt: "orders", model: mockModel() });
+    expect(refused.statusCode).toBe(402);
+    expect(refused.json()).toMatchObject({
+      code: "budget_exceeded",
+      error: 'The model spending limit "Default project tokens" is used up for this month, and describing a workflow uses the model too. Try again when the limit resets, or ask an admin to raise it.'
+    });
+    expect(modelRequests).toHaveLength(2);
+    const audit = await context.store.listAuditLogs({ eventType: "workflow.builder.build" });
+    const entries = Array.isArray(audit) ? audit : (audit as { items: unknown[] }).items;
+    expect(JSON.stringify(entries)).toMatch(/"status":"budget_exceeded"/);
+
+    // On Echo nothing is spent, so nothing is refused.
+    expect((await build(context, cookie, { prompt: "orders" })).json()).toMatchObject({ status: "needs_model" });
+
+    // A person's own budget applies too, in any project.
+    const other = await createTestContext();
+    const otherCookie = await login(other, "builder");
+    const otherAdmin = await login(other, "admin");
+    const created = await other.app.inject({
+      method: "POST",
+      url: "/api/budgets",
+      headers: { cookie: otherAdmin },
+      payload: { name: "Builder's tokens", scopeType: "user", scopeId: "builder@example.com", period: "day", limitType: "tokens", limitValue: 10, action: "block" }
+    });
+    expect(created.statusCode, created.body).toBeLessThan(300);
+    script = draftScript();
+    expect((await build(other, otherCookie, { prompt: "orders", model: mockModel() })).json()).toMatchObject({ status: "ready" });
+    const before = modelRequests.length;
+    expect((await build(other, otherCookie, { prompt: "orders", model: mockModel() })).statusCode).toBe(402);
+    expect(modelRequests).toHaveLength(before);
   }, 30_000);
 });
