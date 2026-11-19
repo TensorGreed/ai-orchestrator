@@ -27,6 +27,8 @@ export enum ErrorCategory {
   TEMPLATE_UNRESOLVED = "template_unresolved",
   /** External connector transient failure */
   CONNECTOR_TRANSIENT = "connector_transient",
+  /** An HTTP Request node got a status outside 200–299 and fails on it */
+  HTTP_STATUS = "http_status",
   /** Workflow-level execution timeout */
   WORKFLOW_TIMEOUT = "workflow_timeout",
   /** Circular workflow execution detected */
@@ -96,6 +98,16 @@ export function remediationForCategory(
       return "A template variable in this node references a key that wasn't produced by an upstream node. Open the node and check that every {{...}} reference matches an upstream output key.";
     case ErrorCategory.CONNECTOR_TRANSIENT:
       return "An external connector (database, API, etc.) returned a transient error. Retry the workflow, or check the connector's reachability and credentials.";
+    case ErrorCategory.HTTP_STATUS: {
+      const status = typeof meta.status === "number" ? meta.status : undefined;
+      if (status === 401 || status === 403) {
+        return "The server refused the request's credentials. Check the node's Authorization secret and headers.";
+      }
+      if (status === 429 || (status !== undefined && status >= 500)) {
+        return "The server is busy or failing. The node retries the statuses on its retry list; raise Retries on Failure, or connect the node's Error output to handle it.";
+      }
+      return "The server answered with an error status. Check the URL, method, headers and body; connect the node's Error output to handle it, or turn off \"Fail on HTTP error status\" to read the response yourself.";
+    }
     case ErrorCategory.WORKFLOW_TIMEOUT: {
       const timeout = typeof meta.timeoutMs === "number" ? meta.timeoutMs : undefined;
       return timeout

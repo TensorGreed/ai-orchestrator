@@ -32,6 +32,7 @@ import {
 const FIXTURE_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "samples", "external-imports");
 const FIXTURES = [
   "webhook-http-set",
+  "error-settings",
   "if-two-branches",
   "switch-three-outputs",
   "ai-agent-tools",
@@ -129,6 +130,26 @@ function exportWith(
     ...extra
   };
 }
+
+describe("external workflow import — node error settings", () => {
+  it("maps HTTP error handling, retries and the error output", () => {
+    const { workflow } = convertFixture("error-settings");
+    const byName = (name: string) => workflow.nodes.find((node) => node.name === name)!;
+    expect(byName("Fetch orders").config).toMatchObject({ failOnHttpError: true, onError: "branch", retryCount: 3, retryDelayMs: 2000 });
+    expect(byName("Check status").config).toMatchObject({ failOnHttpError: false, onError: "continue" });
+    expect(byName("Is ok").config).toMatchObject({ onError: "branch" });
+    const edgeTo = (name: string) => workflow.edges.find((edge) => edge.target === byName(name).id)!;
+    expect(edgeTo("Use orders").sourceHandle).toBeUndefined();
+    expect(edgeTo("Handle failure").sourceHandle).toBe("error");
+    expect(edgeTo("Yes").sourceHandle).toBe("true");
+    expect(edgeTo("No").sourceHandle).toBe("false");
+    expect(edgeTo("If failed").sourceHandle).toBe("error");
+    // A Switch without an extra fallback output: its error output is right after its cases; a case named "error" is renamed.
+    expect(edgeTo("Route failed").sourceHandle).toBe("error");
+    expect(edgeTo("Case A").sourceHandle).not.toBe("error");
+    expect(byName("Check status").config.retryCount).toBe(0);
+  });
+});
 
 describe("external workflow import — golden files", () => {
   for (const name of FIXTURES) {

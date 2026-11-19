@@ -65,7 +65,9 @@
           "method": "POST",
           "urlTemplate": "https://hooks.example.com/approvals",
           "responseType": "json",
-          "bodyTemplate": "{\n  \"amount\": {{results.needs_approval.amount}},\n  \"requestedBy\": \"{{results.sample_order.status}}\"\n}"
+          "bodyTemplate": "{\n  \"amount\": {{results.needs_approval.amount}},\n  \"requestedBy\": \"{{results.sample_order.status}}\"\n}",
+          "failOnHttpError": true,
+          "retryCount": 0
         }
       },
       {

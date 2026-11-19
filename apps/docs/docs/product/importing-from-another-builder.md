@@ -67,6 +67,16 @@ Every source node appears exactly once in `report.nodes` with one of three statu
 
 `report.summary` holds the counts, and `report.warnings` lists workflow-level issues such as dropped connections or an invalid timezone.
 
+## Error settings and retries
+
+Each node's own error settings come along:
+
+- **Continue on fail** (continuing through the regular output) becomes On Error **Continue Anyway**.
+- **Continue through the error output** becomes On Error **Execute Fallback Branch**, and the source's extra error output is connected to the node's [Error output](/nodes/core-nodes#on-error).
+- **Retry on fail** becomes **Retries on Failure** (the source's total tries minus one, so 3 tries give 2 retries) with its wait between tries as **Delay between Retries**. An HTTP request without it gets Retries on Failure 0, as it did not retry in the source.
+- A Switch case named `error` is renamed (`output_<n>`), because `error` is the node's Error output. Placeholders for unsupported nodes do not take these settings.
+- An HTTP request fails on an error status, as it did in the source, unless its "never error" response option is on: **Fail on HTTP error status** is set to match.
+
 ## Placeholders for unsupported nodes
 
 An unsupported node is imported as a **disabled** `noop_node` named after the original node, labelled `Unsupported: <short type>`, the last segment of the source type. Its config keeps the original parameters under `importedFrom` (parameters, type, version, notes, and the *names* of any credentials) so nothing is lost when you replace it by hand.

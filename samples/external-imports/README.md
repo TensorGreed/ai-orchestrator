@@ -20,6 +20,7 @@ checks that every converted workflow passes `validateWorkflowGraph`.
 | `apps-chat` | Slack trigger and message posts (channel by id and by URL, blocks, thread reply, dropped options, unsupported reaction), Telegram trigger and send, Discord webhook send and an unsupported bot-token send |
 | `apps-dev` | GitHub trigger, issue comment/create/close and file get, unsupported release; Jira issue create (ids flagged) and JQL search, unsupported comment; Notion database page create (typed properties) and query (JSON filter, sorts), unsupported block append |
 | `apps-data` | Sheets trigger, read, append, append-or-update and unsupported clear; Postgres execute query, select rewritten as SQL, trigger and unsupported insert; Airtable search/create/update by URL and id and unsupported delete; S3 download, upload, list and unsupported bucket create |
+| `error-settings` | HTTP "never error" and the default fail on error status, node retries (tries and wait), continue on fail, and the error output of an HTTP request and an IF |
 | `apps-crm-payments` | Stripe trigger, customer and charge create, unsupported coupon; HubSpot contact upsert (becomes create) and get, unsupported deal; Salesforce lead create, SOQL search, list rewritten as SOQL and unsupported note |
 
 After an intentional converter change, regenerate the goldens and review the diff:

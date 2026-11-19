@@ -26,6 +26,7 @@ import ReactFlow, {
 } from "reactflow";
 import type { WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import type { EditorNodeData } from "../lib/workflow";
+import { ERROR_OUTPUT_HANDLE } from "../lib/error-output";
 import { AGENT_ATTACHMENT_HANDLES, AGENT_ATTACHMENT_STYLES, type AgentAttachmentHandle } from "../lib/agent-attachments";
 import {
   ORBIT,
@@ -360,6 +361,7 @@ export function WorkflowCanvasArea({
   const stageInfo = useMemo(() => computeStages(nodes, edges), [nodes, edges]);
   const hubCount = useMemo(() => Object.values(slots).filter((entry) => isHubEntry(entry)).length, [slots]);
   const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
+  const errorOutputSources = useMemo(() => new Set(edges.filter((edge) => edge.sourceHandle === ERROR_OUTPUT_HANDLE).map((edge) => edge.source)), [edges]);
 
   const renderEdges = useMemo(
     () =>
@@ -382,10 +384,12 @@ export function WorkflowCanvasArea({
         const guardCarrier = nodeType === "guard";
         const attachment = attached.has(node.id) ? findHubOf(node.id, slots) : null;
         const mcpMarker = mcpMarkers?.[node.id];
-        if (!hub && !guardCarrier && !attachment && !mcpMarker) {
+        const errorOutputConnected = errorOutputSources.has(node.id);
+        if (!hub && !guardCarrier && !attachment && !mcpMarker && !errorOutputConnected) {
           return node;
         }
         const data: EditorNodeData = { ...node.data };
+        if (errorOutputConnected) data.errorOutputConnected = true;
         if (mcpMarker) {
           data.mcpMarker = mcpMarker;
           data.onOpenMcpTarget = onOpenMcpTarget;
@@ -422,7 +426,7 @@ export function WorkflowCanvasArea({
           draggable: attachment ? false : node.draggable
         };
       }),
-    [attached, mcpMarkers, nodeById, nodes, onOpenAgentAttachmentDrawer, onOpenMcpTarget, slots]
+    [attached, errorOutputSources, mcpMarkers, nodeById, nodes, onOpenAgentAttachmentDrawer, onOpenMcpTarget, slots]
   );
 
   /** Position changes for every node attached (recursively) to `hubId`. */

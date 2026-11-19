@@ -610,6 +610,8 @@ Performs a configurable HTTP request with templated URL, headers, and body.
 | `responseType` | `string` | no | `json` \| `text` |
 | `secretRef` | `object` | no | — |
 | `timeoutMs` | `number` | no | — |
+| `failOnHttpError` | `boolean` | no | — |
+| `retryOnStatus` | `string` | no | — |
 
 **Example config**
 
@@ -620,7 +622,8 @@ Performs a configurable HTTP request with templated URL, headers, and body.
   "headersTemplate": "{\n  \"Accept\": \"application/json\"\n}",
   "bodyTemplate": "{}",
   "responseType": "json",
-  "timeoutMs": 15000
+  "timeoutMs": 15000,
+  "failOnHttpError": true
 }
 ```
 

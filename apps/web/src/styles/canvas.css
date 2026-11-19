@@ -474,6 +474,45 @@
   padding-right: 2px;
 }
 
+/* Error output (On Error = Execute Fallback Branch): under a card's right edge, on a hub's right side below the main output. */
+.wf-error-output {
+  position: absolute;
+  width: 24px;
+  height: 0;
+  pointer-events: none;
+}
+.wf-error-output .react-flow__handle {
+  pointer-events: all;
+}
+.wf-error-output-card {
+  right: 22px;
+  bottom: 0;
+}
+.wf-error-output-hub {
+  right: 0;
+  top: 74%;
+}
+.wf-error-output .port-label {
+  position: absolute;
+  left: calc(100% + 2px);
+  top: 6px;
+  padding: 1px 4px;
+  border-radius: var(--r-sm);
+  background: var(--canvas-bg);
+  color: var(--err);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.wf-error-output-hub .port-label {
+  left: calc(100% + 14px);
+  top: 2px;
+}
+
 /* ---- hubs (agent_orchestrator / supervisor_node) ----------------------- */
 .wf-node-hub {
   border-radius: 50%;

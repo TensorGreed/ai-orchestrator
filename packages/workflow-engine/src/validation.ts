@@ -7,6 +7,7 @@ import {
   guardRevealNodeConfigSchema,
   OUTPUT_GUARDRAIL_CHECK_VALUES,
   parseIpAllowlist,
+  parseStatusList,
   workflowSchema,
   type Workflow,
   type WorkflowValidationIssue,
@@ -133,6 +134,38 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
 
   for (const node of workflow.nodes) {
     const config = (node.config ?? {}) as Record<string, unknown>;
+
+    // On Error = branch sends a failure to the node's `error` output (Try/Catch has its own catch output; a Switch case may be named "error").
+    if (node.type !== "try_catch" && node.type !== "switch_node") {
+      const errorOutputConnected = workflow.edges.some((edge) => edge.source === node.id && edge.sourceHandle === "error" && isExecutionEdge(edge));
+      if (config.onError === "branch" && !errorOutputConnected) {
+        issues.push({
+          code: "error_output_not_connected",
+          message: "On Error is set to the error output, but nothing is connected to this node's Error output, so a failure stops the run. Connect the Error output.",
+          nodeId: node.id,
+          severity: "warning"
+        });
+      }
+      if (config.onError !== "branch" && errorOutputConnected) {
+        issues.push({
+          code: "error_output_unused",
+          message: "Something is connected to this node's Error output, but On Error is not set to use it, so it never runs. Set On Error to \"Execute Fallback Branch\".",
+          nodeId: node.id,
+          severity: "warning"
+        });
+      }
+    }
+
+    if (node.type === "http_request" && config.retryOnStatus !== undefined) {
+      const { invalid } = parseStatusList(config.retryOnStatus);
+      if (invalid.length > 0) {
+        issues.push({
+          code: "invalid_http_retry_on_status",
+          message: `HTTP Request "Retry on status" has entries that are not status codes: ${invalid.slice(0, 5).join(", ")}. Use codes (503), classes (5xx) or ranges (500-504).`,
+          nodeId: node.id
+        });
+      }
+    }
 
     if (node.type === "schedule_trigger") {
       const cronExpression = typeof config.cronExpression === "string" ? config.cronExpression.trim() : "";

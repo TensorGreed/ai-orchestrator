@@ -75,6 +75,55 @@ covers what a templated field can read from earlier steps.
   them when it runs.
 - Node execution status is persisted in execution history.
 
+## Errors and retries
+
+Every node has the same error settings on its **Settings** tab.
+
+### Retries
+
+- **Retries on Failure** (`retryCount`) is how many times a failed node is tried again. `0` runs it once. Left unset,
+  nodes that call a model, a tool or the network (LLM, agent, MCP Tool, HTTP Request, connectors) try once more after 2 s
+  (3 s for agents); other nodes are not retried.
+- **Delay between Retries** (`retryDelayMs`, default 1000) is the first wait. Each later wait doubles, and every wait
+  is varied by up to 20% either way (jitter), so many runs retrying at once do not hit a server together.
+- **Max delay between Retries** (`retryMaxDelayMs`, default 30000) caps each wait.
+- When an HTTP server sends `Retry-After` (seconds or a date), the node waits at least that long. If it asks for longer
+  than the max delay, the node fails at once and the error says so; raise the max delay to wait it out.
+- Some failures are never retried: a refusal by content rules or a tool rule, a blocked URL, a model outside the
+  allowlist, an approval decision, a spent quota, and an HTTP status that is not on the node's retry list.
+
+### On Error
+
+- **Stop Execution** (default) fails the run.
+- **Continue Anyway** gives the next nodes `{ error }` as this node's output and goes on.
+- **Execute Fallback Branch** gives the node a red **Error** output on the canvas (under a card's right edge, on an
+  agent's right side). When the node fails, the nodes connected to it run and every other output of the node is
+  skipped; when it succeeds, the Error output's nodes are skipped. The Error output carries the fields of the item the
+  node failed on, plus `error` (the message), `errorCategory`, `failedNodeId`, `failedNodeType` and, for an HTTP status
+  error, `status`. So a fallback step can use the same templates as the normal path, for example
+  <span v-pre>`{{customer}}: {{error}}`</span>. The editor warns when the option is set and nothing is connected, and when
+  something is connected but the option is not set. Try/Catch keeps its own Catch output; a node inside a Try/Catch
+  whose own Error output is connected uses that output instead of the Catch. A Loop's Error output is not part of its
+  body: it runs only when the loop fails. Nodes inside a loop body do not use their own On Error setting: a failure
+  there fails the Loop (use the Loop's Error output). A replayed run (the release gate) gives a recorded failure's Error
+  output only `error`, without `status` or the original `errorCategory`.
+
+### HTTP Request status codes
+
+- **Fail on HTTP error status** (`failOnHttpError`): a status outside 200–299 fails the node, so retries and the Error
+  output apply. The error names the status, the method and the URL (without user name, password, query or fragment).
+  Off, the response is returned as before, with `status` and `ok: false`. New HTTP Request nodes have it on.
+  `304 Not Modified` is not an error.
+- **Retry on status** (`retryOnStatus`): the statuses that are retried, as codes (`503`), classes (`5xx`) or ranges
+  (`500-504`). Empty means `429, 5xx`. Any other status fails at once, without retrying.
+- An HTTP Request node saved before the option existed has no `failOnHttpError` and keeps returning the response
+  with `ok: false`. If it asks for retries (Retries on Failure above 0, or retries in its `errorConfig`), the
+  statuses on its retry list are retried and fail the node once the retries are spent; other error statuses are still
+  returned. The editor says so on such a node. Turn the option on to fail on every error status, or off to never fail.
+- A node's `errorConfig` in the workflow JSON (`retryOnFail`, `maxRetries`, `retryIntervalMs`, `continueOnFail`) is
+  kept when the workflow is saved and takes precedence over the Settings fields; the Settings tab shows it.
+- Network failures and timeouts name the method and URL the same way and are retried as set under Retries on Failure.
+
 ## Output Parser (`output_parser`)
 
 `output_parser` supports two independent controls:

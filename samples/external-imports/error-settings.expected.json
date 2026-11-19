@@ -1,0 +1,410 @@
+{
+  "workflow": {
+    "id": "wf-import-error_settings",
+    "name": "Error settings",
+    "description": "Imported from an external workflow export (12 mapped, 0 approximated, 0 unsupported).",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "start",
+        "type": "manual_trigger",
+        "name": "Start",
+        "position": {
+          "x": 0,
+          "y": 300
+        },
+        "config": {
+          "label": "Start"
+        }
+      },
+      {
+        "id": "fetch_orders",
+        "type": "http_request",
+        "name": "Fetch orders",
+        "position": {
+          "x": 220,
+          "y": 300
+        },
+        "config": {
+          "method": "GET",
+          "urlTemplate": "https://api.example.com/v1/orders",
+          "responseType": "json",
+          "failOnHttpError": true,
+          "onError": "branch",
+          "retryCount": 3,
+          "retryDelayMs": 2000
+        }
+      },
+      {
+        "id": "check_status",
+        "type": "http_request",
+        "name": "Check status",
+        "position": {
+          "x": 220,
+          "y": 520
+        },
+        "config": {
+          "method": "GET",
+          "urlTemplate": "https://api.example.com/v1/status",
+          "responseType": "json",
+          "failOnHttpError": false,
+          "retryCount": 0,
+          "onError": "continue"
+        }
+      },
+      {
+        "id": "is_ok",
+        "type": "if_node",
+        "name": "Is ok",
+        "position": {
+          "x": 440,
+          "y": 520
+        },
+        "config": {
+          "condition": "{{ ((results.check_status.ok === true || String(results.check_status.ok ?? \"\") === \"true\")) }}",
+          "trueLabel": "true",
+          "falseLabel": "false",
+          "onError": "branch"
+        }
+      },
+      {
+        "id": "use_orders",
+        "type": "noop_node",
+        "name": "Use orders",
+        "position": {
+          "x": 440,
+          "y": 200
+        },
+        "config": {
+          "label": "Use orders"
+        }
+      },
+      {
+        "id": "handle_failure",
+        "type": "noop_node",
+        "name": "Handle failure",
+        "position": {
+          "x": 440,
+          "y": 400
+        },
+        "config": {
+          "label": "Handle failure"
+        }
+      },
+      {
+        "id": "yes",
+        "type": "noop_node",
+        "name": "Yes",
+        "position": {
+          "x": 660,
+          "y": 460
+        },
+        "config": {
+          "label": "Yes"
+        }
+      },
+      {
+        "id": "no",
+        "type": "noop_node",
+        "name": "No",
+        "position": {
+          "x": 660,
+          "y": 560
+        },
+        "config": {
+          "label": "No"
+        }
+      },
+      {
+        "id": "if_failed",
+        "type": "noop_node",
+        "name": "If failed",
+        "position": {
+          "x": 660,
+          "y": 660
+        },
+        "config": {
+          "label": "If failed"
+        }
+      },
+      {
+        "id": "route",
+        "type": "switch_node",
+        "name": "Route",
+        "position": {
+          "x": 440,
+          "y": 800
+        },
+        "config": {
+          "switchValue": "{{results.start.kind}}",
+          "cases": [
+            {
+              "value": "a",
+              "label": "output_0"
+            }
+          ],
+          "defaultLabel": "default",
+          "onError": "branch"
+        }
+      },
+      {
+        "id": "case_a",
+        "type": "noop_node",
+        "name": "Case A",
+        "position": {
+          "x": 660,
+          "y": 760
+        },
+        "config": {
+          "label": "Case A"
+        }
+      },
+      {
+        "id": "route_failed",
+        "type": "noop_node",
+        "name": "Route failed",
+        "position": {
+          "x": 660,
+          "y": 860
+        },
+        "config": {
+          "label": "Route failed"
+        }
+      },
+      {
+        "id": "import_output",
+        "type": "output",
+        "name": "Output",
+        "position": {
+          "x": 940,
+          "y": 557
+        },
+        "config": {
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge_1",
+        "source": "start",
+        "target": "fetch_orders"
+      },
+      {
+        "id": "edge_2",
+        "source": "start",
+        "target": "check_status"
+      },
+      {
+        "id": "edge_3",
+        "source": "start",
+        "target": "route"
+      },
+      {
+        "id": "edge_4",
+        "source": "fetch_orders",
+        "target": "use_orders"
+      },
+      {
+        "id": "edge_5",
+        "source": "fetch_orders",
+        "target": "handle_failure",
+        "sourceHandle": "error"
+      },
+      {
+        "id": "edge_6",
+        "source": "check_status",
+        "target": "is_ok"
+      },
+      {
+        "id": "edge_7",
+        "source": "is_ok",
+        "target": "yes",
+        "sourceHandle": "true"
+      },
+      {
+        "id": "edge_8",
+        "source": "is_ok",
+        "target": "no",
+        "sourceHandle": "false"
+      },
+      {
+        "id": "edge_9",
+        "source": "is_ok",
+        "target": "if_failed",
+        "sourceHandle": "error"
+      },
+      {
+        "id": "edge_10",
+        "source": "route",
+        "target": "case_a",
+        "sourceHandle": "output_0"
+      },
+      {
+        "id": "edge_11",
+        "source": "route",
+        "target": "route_failed",
+        "sourceHandle": "error"
+      },
+      {
+        "id": "edge_12",
+        "source": "use_orders",
+        "target": "import_output"
+      },
+      {
+        "id": "edge_13",
+        "source": "handle_failure",
+        "target": "import_output"
+      },
+      {
+        "id": "edge_14",
+        "source": "yes",
+        "target": "import_output"
+      },
+      {
+        "id": "edge_15",
+        "source": "no",
+        "target": "import_output"
+      },
+      {
+        "id": "edge_16",
+        "source": "if_failed",
+        "target": "import_output"
+      },
+      {
+        "id": "edge_17",
+        "source": "case_a",
+        "target": "import_output"
+      },
+      {
+        "id": "edge_18",
+        "source": "route_failed",
+        "target": "import_output"
+      }
+    ]
+  },
+  "report": {
+    "sourceName": "Error settings",
+    "nodes": [
+      {
+        "sourceName": "Start",
+        "sourceType": "n8n-nodes-base.manualTrigger",
+        "sourceId": "e0000000-0000-4000-8000-000000000001",
+        "targetNodeId": "start",
+        "targetType": "manual_trigger",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Fetch orders",
+        "sourceType": "n8n-nodes-base.httpRequest",
+        "sourceId": "e0000000-0000-4000-8000-000000000002",
+        "targetNodeId": "fetch_orders",
+        "targetType": "http_request",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Check status",
+        "sourceType": "n8n-nodes-base.httpRequest",
+        "sourceId": "e0000000-0000-4000-8000-000000000003",
+        "targetNodeId": "check_status",
+        "targetType": "http_request",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Is ok",
+        "sourceType": "n8n-nodes-base.if",
+        "sourceId": "e0000000-0000-4000-8000-000000000004",
+        "targetNodeId": "is_ok",
+        "targetType": "if_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Use orders",
+        "sourceType": "n8n-nodes-base.noOp",
+        "sourceId": "e0000000-0000-4000-8000-000000000005",
+        "targetNodeId": "use_orders",
+        "targetType": "noop_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Handle failure",
+        "sourceType": "n8n-nodes-base.noOp",
+        "sourceId": "e0000000-0000-4000-8000-000000000006",
+        "targetNodeId": "handle_failure",
+        "targetType": "noop_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Yes",
+        "sourceType": "n8n-nodes-base.noOp",
+        "sourceId": "e0000000-0000-4000-8000-000000000007",
+        "targetNodeId": "yes",
+        "targetType": "noop_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "No",
+        "sourceType": "n8n-nodes-base.noOp",
+        "sourceId": "e0000000-0000-4000-8000-000000000008",
+        "targetNodeId": "no",
+        "targetType": "noop_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "If failed",
+        "sourceType": "n8n-nodes-base.noOp",
+        "sourceId": "e0000000-0000-4000-8000-000000000009",
+        "targetNodeId": "if_failed",
+        "targetType": "noop_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Route",
+        "sourceType": "n8n-nodes-base.switch",
+        "sourceId": "e0000000-0000-4000-8000-000000000010",
+        "targetNodeId": "route",
+        "targetType": "switch_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Case A",
+        "sourceType": "n8n-nodes-base.noOp",
+        "sourceId": "e0000000-0000-4000-8000-000000000011",
+        "targetNodeId": "case_a",
+        "targetType": "noop_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      },
+      {
+        "sourceName": "Route failed",
+        "sourceType": "n8n-nodes-base.noOp",
+        "sourceId": "e0000000-0000-4000-8000-000000000012",
+        "targetNodeId": "route_failed",
+        "targetType": "noop_node",
+        "status": "mapped",
+        "reason": "Mapped directly."
+      }
+    ],
+    "unresolvedExpressions": [],
+    "secretsToResolve": [],
+    "variablesToSet": [],
+    "warnings": [],
+    "summary": {
+      "total": 12,
+      "mapped": 12,
+      "approximated": 0,
+      "unsupported": 0
+    }
+  }
+}

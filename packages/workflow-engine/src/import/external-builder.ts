@@ -142,7 +142,14 @@ function parseSource(raw: unknown): SourceWorkflow {
       parameters: toRecord(record.parameters),
       credentials,
       disabled: record.disabled === true,
-      notes: typeof record.notes === "string" ? record.notes : undefined
+      notes: typeof record.notes === "string" ? record.notes : undefined,
+      errorSettings: {
+        ...(typeof record.onError === "string" ? { onError: record.onError } : {}),
+        ...(record.continueOnFail === true ? { continueOnFail: true } : {}),
+        ...(record.retryOnFail === true ? { retryOnFail: true } : {}),
+        ...(typeof record.maxTries === "number" ? { maxTries: record.maxTries } : {}),
+        ...(typeof record.waitBetweenTries === "number" ? { waitBetweenTries: record.waitBetweenTries } : {})
+      }
     });
   }
 
@@ -721,6 +728,35 @@ function baseNode(source: SourceNode, scope: ExpressionScope, type: WorkflowNode
   return node;
 }
 
+/**
+ * The source node's own error settings, mapped onto the converted node:
+ * "continue (regular output)" → On Error continue; "continue (error output)"
+ * → On Error branch, with the source's extra last output wired to `error`;
+ * retries → Retries on Failure (tries − 1) and the wait between them.
+ */
+function applySourceErrorSettings(source: SourceNode, result: ConvertedNode): ConvertedNode {
+  const settings = source.errorSettings ?? {};
+  const config = result.node.config as Record<string, unknown>;
+  // A placeholder's outputs are unknown, and it does not run: its settings stay in `importedFrom`.
+  if (result.status === "unsupported") return result;
+  if (result.node.type === "http_request" && settings.retryOnFail !== true) {
+    // The source does not retry unless asked; an HTTP Request would otherwise retry once by default.
+    config.retryCount = 0;
+  }
+  if (settings.onError === "continueErrorOutput") {
+    config.onError = "branch";
+    result.errorOutputIndex = result.sourceOutputCount ?? result.outputHandles?.length ?? 1;
+  } else if (settings.onError === "continueRegularOutput" || (settings.onError === undefined && settings.continueOnFail === true)) {
+    config.onError = "continue";
+  }
+  if (settings.retryOnFail === true) {
+    const tries = Math.max(1, Math.floor(settings.maxTries ?? 3));
+    config.retryCount = tries - 1;
+    config.retryDelayMs = Math.max(0, Math.floor(settings.waitBetweenTries ?? 1000));
+  }
+  return result;
+}
+
 function mapped(node: WorkflowNode, extra: Partial<ConvertedNode> = {}): ConvertedNode {
   return { node, status: "mapped", reason: "Mapped directly.", ...extra };
 }
@@ -1052,7 +1088,10 @@ const httpRequest: NodeHandler = (source, ctx, scope) => {
 
   const options = toRecord(params.options);
   if (options.timeout !== undefined) config.timeoutMs = Math.max(1, Math.floor(asNumber(options.timeout, 15000)));
-  const responseFormat = asString(toRecord(toRecord(options.response).response).responseFormat);
+  // The source's HTTP node fails on a status outside 2xx unless its "never error" option is on.
+  const responseOptions = toRecord(toRecord(options.response).response);
+  config.failOnHttpError = !(responseOptions.neverError === true || options.neverError === true || options.ignoreResponseCode === true);
+  const responseFormat = asString(responseOptions.responseFormat);
   if (responseFormat === "text" || responseFormat === "file") {
     config.responseType = "text";
     if (responseFormat === "file") reasons.push("Binary responses are not supported; responseType set to text.");
@@ -1219,7 +1258,8 @@ const switchNode: NodeHandler = (source, ctx, scope) => {
 
   const uniqueLabel = (candidate: string, index: number): string => {
     let label = candidate.trim() || `output_${index}`;
-    if (label === "default") label = `output_${index}`;
+    // "default" and "error" are the Switch's fallback and Error outputs.
+    if (label === "default" || label === "error") label = `output_${index}`;
     while (usedLabels.has(label)) label = `${label}_${index}`;
     usedLabels.add(label);
     return label;
@@ -1317,6 +1357,8 @@ const switchNode: NodeHandler = (source, ctx, scope) => {
   if (typeof fallbackOutput === "number") {
     reasons.push(`Fallback routed to output #${fallbackOutput + 1} is mirrored on the default handle.`);
   }
+  // The source has one output per case, plus one only for an "extra" fallback; its error output comes after them.
+  const sourceOutputCount = outputHandles.length + (fallbackOutput === "extra" ? 1 : 0);
   outputHandles.push("default");
 
   if (cases.length === 0) {
@@ -1327,6 +1369,7 @@ const switchNode: NodeHandler = (source, ctx, scope) => {
   const node = baseNode(source, scope, "switch_node", { switchValue, cases, defaultLabel: "default" });
   const converted = reasons.length ? approximated(node, reasons) : mapped(node);
   converted.outputHandles = outputHandles;
+  converted.sourceOutputCount = sourceOutputCount;
   return converted;
 };
 
@@ -2066,9 +2109,12 @@ export function convertExternalWorkflow(raw: unknown): ExternalWorkflowConversio
       previousNodeId: previousNodeIdByName.get(sourceNode.name)
     };
     const handler = resolveHandler(sourceNode.type);
-    const result = handler
-      ? handler(sourceNode, ctx, scope)
-      : unsupportedPlaceholder(sourceNode, scope, `Node type '${sourceNode.type}' has no L2M equivalent; imported as a disabled placeholder.`);
+    const result = applySourceErrorSettings(
+      sourceNode,
+      handler
+        ? handler(sourceNode, ctx, scope)
+        : unsupportedPlaceholder(sourceNode, scope, `Node type '${sourceNode.type}' has no L2M equivalent; imported as a disabled placeholder.`)
+    );
 
     converted.set(sourceNode.name, result);
     nodes.push(result.node);
@@ -2104,7 +2150,9 @@ export function convertExternalWorkflow(raw: unknown): ExternalWorkflowConversio
     const connectionType = normalizeType(connection.connectionType);
     if (connectionType === "main") {
       const edge: WorkflowEdge = { id: nextEdgeId("edge"), source: from.node.id, target: to.node.id };
-      if (from.outputHandles) {
+      if (from.errorOutputIndex !== undefined && connection.outputIndex === from.errorOutputIndex) {
+        edge.sourceHandle = "error";
+      } else if (from.outputHandles) {
         edge.sourceHandle = from.outputHandles[connection.outputIndex] ?? from.outputHandles[from.outputHandles.length - 1];
         if (from.node.type === "switch_node") {
           const fallback = toRecord(toRecord(source.nodes.find((n) => n.name === connection.sourceName)?.parameters).options).fallbackOutput;
