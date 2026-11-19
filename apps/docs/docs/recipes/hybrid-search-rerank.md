@@ -81,7 +81,7 @@ Do not take hybrid or a reranker on faith: measure them on your own questions. B
 
 ## Make it yours
 
-- Tune the fusion under **Advanced** on the retrieve node while **Search Mode** is hybrid: **Candidates per Ranker** (`candidatesPerRanker`), **Vector Weight** and **Keyword Weight** (`vectorWeight`, `bm25Weight`) and **RRF k** (`rrfK`). See [hybrid search](/nodes/knowledge-bases#hybrid-search-phase-9-3).
+- Tune the fusion under **More** on the retrieve node while **Search Mode** is hybrid: **Candidates per Ranker** (`candidatesPerRanker`), **Vector Weight** and **Keyword Weight** (`vectorWeight`, `bm25Weight`) and **RRF k** (`rrfK`). See [hybrid search](/nodes/knowledge-bases#hybrid-search-phase-9-3).
 - Swap the reranker: `jina` (default model `jina-reranker-v2-base-multilingual`) or `voyage` (`rerank-2`), with `JINA_API_KEY` or `VOYAGE_API_KEY` or a secret. Change `model` too, or clear it to use the default: the sample's `rerank-english-v3.0` is a Cohere model and is sent as is.
 - The prompt asks the model to "Cite chunkIds inline", but the context numbers chunks `[1]`, `[2]`. Put <span v-pre>`{{citationInstructions}}`</span> in the prompt instead and add an Extract Citations step: see [RAG with citations](/recipes/rag-with-citations).
 

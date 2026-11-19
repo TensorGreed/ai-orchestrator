@@ -81,7 +81,7 @@ By default, a template never fails a node for a missing value: a path that does 
 
 ### Strict templates
 
-Turn on **Strict templates** in the workflow's **More actions** menu to make a missing value fail the node instead (`settings.strictTemplates: true` in the workflow JSON; off by default). With it on, a node fails when a `{{ }}` in a setting it renders:
+Turn on **Strict templates** in the workflow's **More actions** menu, under **More settings**, to make a missing value fail the node instead (`settings.strictTemplates: true` in the workflow JSON; off by default). With it on, a node fails when a `{{ }}` in a setting it renders:
 
 - is a path with no value, such as `{{customer.id}}` when the input has no `customer`;
 - is an expression that returns nothing (`undefined`) or fails, such as `{{ $json.customer.name.first }}`.

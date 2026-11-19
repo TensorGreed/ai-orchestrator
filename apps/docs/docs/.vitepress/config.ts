@@ -309,6 +309,7 @@ export default defineConfig({
         text: "Security",
         items: [
           { text: "Auth + RBAC", link: "/security/auth-rbac" },
+          { text: "Who can see and run what", link: "/security/access-model" },
           { text: "Service Accounts + API Keys", link: "/security/service-accounts" },
           { text: "SCIM Provisioning", link: "/security/scim" },
           { text: "Secrets", link: "/security/secrets" },
