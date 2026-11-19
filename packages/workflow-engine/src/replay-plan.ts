@@ -41,7 +41,7 @@ import {
 /** What the executor does instead of running a node's handler. */
 export type ReplayNodeStub =
   | { kind: "output"; output: unknown }
-  | { kind: "error"; message: string }
+  | { kind: "error"; message: string; output?: unknown }
   | { kind: "pass_through" };
 
 /** Hook handed to the executor: a stub for the node, or null to run it. */
@@ -130,7 +130,10 @@ function runsOf(entry: ReplayRecordedNode): ReplayRecordedRun[] {
 }
 
 function stubFromRun(run: ReplayRecordedRun): ReplayNodeStub {
-  if (run.status === "error") return { kind: "error", message: run.error?.trim() || "The node failed in the recorded run." };
+  if (run.status === "error") {
+    // A recorded failure's output (a rejected approval's decision) goes with it, so a replay can route it as the run did.
+    return { kind: "error", message: run.error?.trim() || "The node failed in the recorded run.", ...(run.output !== undefined ? { output: run.output } : {}) };
+  }
   return { kind: "output", output: run.output };
 }
 

@@ -46,7 +46,7 @@ Customers and auditors send long lists of security questions, usually as a sprea
 Use one <Term id="approval-gate">Approval Gate</Term> after the loop, not an approval per question and not "Ask before write tools". The reasons:
 
 - The decision a person must make is about the whole set going to a customer, and that is one decision. Approving 200 answers one at a time breeds rubber-stamping.
-- A gate cannot sit inside a loop body: loop bodies cannot pause part-way, and an approval inside one fails the loop. Gate the loop's output.
+- A gate cannot sit inside a loop body, and a Human Approval there would ask once per question. Gate the loop's output.
 - There are no agent tool calls here to gate. "Ask before write tools" covers agents calling MCP write tools.
 
 Configure the gate with the security owner as the approver, a message that lists the rows (the gate's message is a template, so it can read the loop's results), and an editable `json` field holding the answer rows. The owner fills in the `needs_owner` rows, corrects any draft, and approves. On our test install the gate's message showed both rows, including `"status": "needs_owner"` for the question about audit-log retention. ([Approve with edits](/product/approvals#approve-with-edits).)

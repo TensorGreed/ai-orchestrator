@@ -82,6 +82,9 @@ import type {
   RunInstrumentation,
   DataLabels,
   LabelEndorsement,
+  LoopPassRef,
+  LoopPauseFrame,
+  LoopPauseState,
   ApprovalDecisionValue,
   ApprovalHandoffState,
   ChatMessage,
@@ -880,6 +883,64 @@ class WorkflowCanceledError extends Error {
   constructor(message = "Workflow execution canceled.") {
     super(message);
     this.name = "WorkflowCanceledError";
+  }
+}
+
+/**
+ * A Human Approval in a Loop body asked for a decision. Thrown up through the Loops it is in (each adds its frame,
+ * so `frames` ends outermost first) to the run, which pauses. Never a node failure.
+ */
+class LoopApprovalPause extends Error {
+  readonly frames: LoopPauseFrame[] = [];
+  routed?: Omit<LoopPauseState, "frames">;
+  constructor(
+    readonly pause: {
+      node: WorkflowNode;
+      nodeInput: unknown;
+      startedAtNode: string;
+      started: number;
+      approvalMessage: string;
+      timeoutMinutes: number;
+      labelScope: NodeLabelScope;
+      shown: ApprovalShown;
+      loopPass: LoopPassRef;
+    }
+  ) {
+    super("A Human Approval in a Loop body asked for a decision.");
+    this.name = "LoopApprovalPause";
+  }
+}
+
+/** A node's failure answered from a recording in a replay, with the recorded output (a rejected approval's decision). */
+class ReplayedNodeError extends Error {
+  constructor(
+    readonly recordedMessage: string,
+    readonly recordedOutput: unknown
+  ) {
+    super(`Replayed from the recording: ${recordedMessage}`);
+    this.name = "ReplayedNodeError";
+  }
+}
+
+/**
+ * A Loop failed because a Human Approval in its body was rejected or timed out with nowhere to go: like a rejection
+ * at the top level, the Loop's own On Error cannot continue past it.
+ */
+class LoopApprovalStop extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LoopApprovalStop";
+  }
+}
+
+/** A Human Approval in a Loop body was rejected (or timed out) when the run resumed: the node's failure. */
+class LoopApprovalRejection extends Error {
+  constructor(
+    message: string,
+    readonly decisionPayload: Record<string, unknown>
+  ) {
+    super(message);
+    this.name = "LoopApprovalRejection";
   }
 }
 
@@ -4563,7 +4624,7 @@ function resolveReplayStub(stub: ReplayNodeStub, context: NodeRuntimeContext): u
     return withoutUsage(mergeParentOutputs(context.parentOutputs));
   }
   if (stub.kind === "error") {
-    throw new Error(`Replayed from the recording: ${stub.message}`);
+    throw new ReplayedNodeError(stub.message, stub.output);
   }
   return stub.output;
 }
@@ -9601,6 +9662,12 @@ async function executeWorkflowRun(
   const errorOutputActivated = new Set<string>();
   // Loop body nodes the Loop ran: the walk passes them (kept over a pause, so a resumed run does not run them again).
   const loopInlineExecutedNodes = new Set<string>(request.resumeState?.loopInlineNodes ?? []);
+  /** A run paused inside a Loop body: the Loops to resume (outermost first) and the routing state, read once. */
+  let loopResume: LoopPauseState | undefined;
+  /** The decision for the Human Approval a Loop body paused at, consumed by that node when its pass resumes. */
+  let loopDecision:
+    | { approved: boolean; payload: Record<string, unknown>; input: unknown; rejectionError: string; decidedAt: string; actedBy?: string }
+    | undefined;
 
   // try_catch error routing: maps try_catch nodeId -> error branch target nodeIds
   const tryCatchScopes = request.resumeState
@@ -9809,11 +9876,28 @@ async function executeWorkflowRun(
     span: ReturnType<typeof openNodeSpan>;
     /** True for a Loop inside another Loop's body. */
     nested?: boolean;
+    /** A run resumed inside this Loop's body: this Loop's frame first, then the Loops inside its body. */
+    resumeFrames?: LoopPauseFrame[];
   }): Promise<{ output: Record<string, unknown>; labels: DataLabels }> => {
     if (args.nested) return runLoopPasses(args);
+    if (args.resumeFrames && loopResume) {
+      // The routing state the outermost Loop had when the run paused.
+      for (const [childId, output] of Object.entries(loopResume.routedBodyRan ?? {})) routedBodyRan.set(childId, output);
+      for (const [childId, loopId] of Object.entries(loopResume.routedBodyNodes ?? {})) routedBodyNodes.set(childId, loopId);
+      for (const loopId of loopResume.routedLoopsWithPasses ?? []) routedLoopsWithPasses.add(loopId);
+      loopResume = undefined;
+    }
     try {
       return await runLoopPasses(args);
     } catch (error) {
+      if (error instanceof LoopApprovalPause) {
+        // The pause keeps the routing state, for the resume.
+        error.routed = {
+          ...(routedBodyRan.size > 0 ? { routedBodyRan: Object.fromEntries(routedBodyRan) } : {}),
+          ...(routedBodyNodes.size > 0 ? { routedBodyNodes: Object.fromEntries(routedBodyNodes) } : {}),
+          ...(routedLoopsWithPasses.size > 0 ? { routedLoopsWithPasses: [...routedLoopsWithPasses] } : {})
+        };
+      }
       // A failed outermost Loop leaves no routing state for a later Loop of the run to settle.
       clearRoutedBodies();
       throw error;
@@ -9836,7 +9920,9 @@ async function executeWorkflowRun(
       candidateItems = getValueByPath(templateData, inputKey);
     }
     const rawItems = Array.isArray(candidateItems) ? candidateItems : [candidateItems];
-    const scopedItems = rawItems.slice(0, maxIterations);
+    // A resumed Loop runs the items it had when the run paused.
+    const resumeFrame = args.resumeFrames?.[0];
+    const scopedItems = resumeFrame ? resumeFrame.items : rawItems.slice(0, maxIterations);
     // The loop's Error output is not part of its body: it runs only when the loop fails.
     const body = loopBodyOf(workflow, node.id, { order: nodeOrder });
     const routing = body.routing;
@@ -9850,27 +9936,48 @@ async function executeWorkflowRun(
       index: number;
       item: unknown;
       outputs: Record<string, unknown>;
-    }> = [];
+    }> = resumeFrame ? [...resumeFrame.passes] : [];
     // Phase 16 — each pass's child labels; the loop's output is their union.
     const itemLabels = labelScope.inputLabels();
-    const passLabels: DataLabels[] = [];
+    const passLabels: DataLabels[] = resumeFrame
+      ? (resumeFrame.passLabels ?? []).map((stored) => parseStoredDataLabels(stored)).filter((labels): labels is DataLabels => Boolean(labels))
+      : [];
     // Branch routing: each body node's output on the last pass that ran it (what `results` holds after the loop).
-    const lastRan = new Map<string, unknown>();
+    const lastRan = new Map<string, unknown>(Object.entries(resumeFrame?.lastRan ?? {}));
+    // A resumed pass starts at the body node it paused at.
+    const resumeChildIndex = resumeFrame ? downstreamNodes.findIndex((child) => child.id === resumeFrame.bodyNodeId) : 0;
+    if (resumeFrame && resumeChildIndex < 0) {
+      throw new Error(`Unable to resume: '${resumeFrame.bodyNodeId}' is no longer in the body of Loop node '${node.id}'.`);
+    }
 
-    for (let loopIndex = 0; loopIndex < scopedItems.length; loopIndex += 1) {
+    for (let loopIndex = resumeFrame ? resumeFrame.passIndex : 0; loopIndex < scopedItems.length; loopIndex += 1) {
       const loopItem = scopedItems[loopIndex];
       const iterationGlobals: Record<string, unknown> = {
         ...loopGlobals,
         [itemVariable]: loopItem,
         _loop_index: loopIndex
       };
-      const iterationOutputs: Record<string, unknown> = {};
+      const resumingPass = resumeFrame !== undefined && loopIndex === resumeFrame.passIndex;
+      const iterationOutputs: Record<string, unknown> = resumingPass ? { ...resumeFrame.passOutputs } : {};
       // Branch routing: what this pass's branching nodes skipped; a body node a pass skipped is not in its `results`.
-      const passBranches = { skipped: new Set<string>(), errorOnly: new Set<string>(), activated: new Set<string>() };
-      if (routing) for (const childId of downstreamNodeIds) nodeOutputs.delete(childId);
+      const passBranches = {
+        skipped: new Set<string>(resumingPass ? resumeFrame.passBranches?.skipped : []),
+        errorOnly: new Set<string>(resumingPass ? resumeFrame.passBranches?.errorOnly : []),
+        activated: new Set<string>(resumingPass ? resumeFrame.passBranches?.activated : [])
+      };
+      // (A resumed pass's `results` are the ones the run paused with.)
+      if (routing && !resumingPass) for (const childId of downstreamNodeIds) nodeOutputs.delete(childId);
+      // 12.2 — an approval in the body vouches only for the pass it was given on.
+      if (!resumingPass) for (const child of downstreamNodes) if (child.type === "human_approval") labelState.withdrawEndorsements(child.id);
+      const loopPass: LoopPassRef = { loopNodeId: node.id, pass: loopIndex + 1, of: scopedItems.length };
 
-      for (const childNode of downstreamNodes) {
+      for (let childIndex = resumingPass ? resumeChildIndex : 0; childIndex < downstreamNodes.length; childIndex += 1) {
+        const childNode = downstreamNodes[childIndex]!;
         if (routing && passBranches.skipped.has(childNode.id)) continue;
+        // The node the run resumed at: the Human Approval that was decided, or the Loop inside the body that paused.
+        const resumedHere = resumingPass && childIndex === resumeChildIndex;
+        const decided = resumedHere && childNode.type === "human_approval" ? loopDecision : undefined;
+        if (decided) loopDecision = undefined;
         const childStarted = Date.now();
         const childStartedAt = nowIso();
         const childParentIds = graphIndexes.incomingExecution.get(childNode.id) ?? [];
@@ -9905,16 +10012,23 @@ async function executeWorkflowRun(
           childLabelScope.add(SENSITIVE_LABELS);
           labelState.record(childNode.id);
         }
-        const childInput = captureNodeInputSnapshot(iterationGlobals, childMerged, childParentOutputs);
-        await dependencies.onNodeStart?.({
-          nodeId: childNode.id,
-          nodeType: childNode.type,
-          startedAt: childStartedAt,
-          input: childInput
-        });
+        // A decided approval records the decision as its input, as at the top level (and reports no new start), with the
+        // pass it is on, as every body node's input has.
+        const childInput = decided
+          ? { ...toRecord(decided.input), _loop_index: loopIndex }
+          : captureNodeInputSnapshot(iterationGlobals, childMerged, childParentOutputs);
+        if (!decided) {
+          await dependencies.onNodeStart?.({
+            nodeId: childNode.id,
+            nodeType: childNode.type,
+            startedAt: childStartedAt,
+            input: childInput
+          });
+        }
 
         // A loop body's node: a child of the Loop node's span, one per pass.
         const childSpan = openNodeSpan(dependencies.instrument, childNode, loopSpan, loopIndex);
+        let pausedAtChild = false;
         /** Records a body node's output for this pass (a success, or a failure its On Error turned into an output). */
         const recordPassOutput = (output: unknown, labels: DataLabels) => {
           iterationOutputs[childNode.id] = output;
@@ -9930,13 +10044,52 @@ async function executeWorkflowRun(
           let childOutput: unknown;
           let childAttempts = 1;
           let childLabels: DataLabels;
-          if (childNode.type === "human_approval" && !dependencies.replayNodeHook) {
-            // A Human Approval cannot pause a pass: it fails the Loop (before, it let the pass go on with nobody asked).
-            throw WorkflowError.nodeConfig(
-              `Approvals cannot pause inside a Loop body: '${childNode.id}' is a Human Approval node. Move the approval before or after the Loop node.`
-            );
+          if (decided) {
+            // The resumed pass: the decision is the approval's outcome, as at the top level.
+            labelState.set(childNode.id, unionLabels([labelState.get(childNode.id), labelsOf(["user"])]));
+            if (!decided.approved) throw new LoopApprovalRejection(decided.rejectionError, decided.payload);
+            endorseApproval(childNode.id, "human_approval", decided.actedBy, decided.decidedAt, shownAtPause);
+          } else if (childNode.type === "human_approval" && !dependencies.replayNodeHook) {
+            // The pass pauses here for a person's decision; the run resumes at this pass and node (a replay answers it
+            // from the recording instead).
+            const approvalConfig = toRecord(childNode.config);
+            const approvalMessageTemplate =
+              typeof approvalConfig.approvalMessage === "string" && approvalConfig.approvalMessage.trim()
+                ? approvalConfig.approvalMessage
+                : "Approval required to continue.";
+            const timeoutMinutes =
+              typeof approvalConfig.timeoutMinutes === "number" && Number.isFinite(approvalConfig.timeoutMinutes) && approvalConfig.timeoutMinutes > 0
+                ? Math.floor(approvalConfig.timeoutMinutes)
+                : 60;
+            const messageRenderer = collectingRenderer({
+              ...iterationGlobals,
+              ...childMerged,
+              parent_outputs: childParentOutputs,
+              results: serializeNodeOutputs(nodeOutputs)
+            });
+            const approvalMessage = messageRenderer.render(approvalMessageTemplate);
+            const shown = approvalShownBy(messageRenderer.pieces, childLabelScope, {
+              parentOutputs: childParentOutputs,
+              shownText: approvalMessage,
+              outputOf: (nodeId) => nodeOutputs.get(nodeId),
+              globals: iterationGlobals
+            });
+            throw new LoopApprovalPause({
+              node: childNode,
+              nodeInput: childInput,
+              startedAtNode: childStartedAt,
+              started: childStarted,
+              approvalMessage,
+              timeoutMinutes,
+              labelScope: childLabelScope,
+              shown,
+              loopPass
+            });
           }
-          if (childNode.type === "loop_node") {
+          if (decided) {
+            childOutput = decided.payload;
+            childLabels = unionLabels([labelState.get(childNode.id)]);
+          } else if (childNode.type === "loop_node") {
             // A Loop inside the body runs all of its passes on this pass.
             const inner = await childSpan.enter(() =>
               runLoop({
@@ -9946,7 +10099,8 @@ async function executeWorkflowRun(
                 templateData: { ...iterationGlobals, ...childMerged, parent_outputs: childParentOutputs },
                 labelScope: childLabelScope,
                 span: childSpan,
-                nested: true
+                nested: true,
+                ...(resumedHere && args.resumeFrames && args.resumeFrames.length > 1 ? { resumeFrames: args.resumeFrames.slice(1) } : {})
               })
             );
             childOutput = inner.output;
@@ -9993,21 +10147,51 @@ async function executeWorkflowRun(
             input: childInput,
             output: childOutput,
             attempts: childAttempts > 1 ? childAttempts : undefined,
-            ...labelState.resultField(childNode.id)
+            ...labelState.resultField(childNode.id),
+            ...(childNode.type === "human_approval" ? { loopPass } : {})
           });
-          await dependencies.onNodeComplete?.({
-            nodeId: childNode.id,
-            nodeType: childNode.type,
-            status: "success",
-            completedAt: nowIso(),
-            durationMs: Date.now() - childStarted,
-            input: childInput,
-            output: childOutput
-          });
+          if (!decided) {
+            await dependencies.onNodeComplete?.({
+              nodeId: childNode.id,
+              nodeType: childNode.type,
+              status: "success",
+              completedAt: nowIso(),
+              durationMs: Date.now() - childStarted,
+              input: childInput,
+              output: childOutput
+            });
+          }
           // Branch routing: the outputs this node did not take are skipped for the rest of the pass.
           if (routing && childNode.type !== "try_catch") applySuccessfulNodeRouting(childNode, childOutput, passBranches);
         } catch (caughtChildError) {
-          // Phase 11.2 — loop bodies run inline and cannot pause part-way.
+          if (caughtChildError instanceof LoopApprovalPause) {
+            pausedAtChild = caughtChildError.pause.node.id === childNode.id;
+            // This Loop's part of the paused state: the pass, the node it stopped at and what it has gathered so far.
+            caughtChildError.frames.unshift({
+              loopNodeId: node.id,
+              items: scopedItems,
+              passIndex: loopIndex,
+              bodyNodeId: childNode.id,
+              passes: [...loopItems],
+              passOutputs: { ...iterationOutputs },
+              ...(routing
+                ? {
+                    passBranches: { skipped: [...passBranches.skipped], errorOnly: [...passBranches.errorOnly], activated: [...passBranches.activated] },
+                    lastRan: Object.fromEntries(lastRan)
+                  }
+                : {}),
+              ...(passLabels.length > 0 ? { passLabels: [...passLabels] } : {})
+            });
+            throw caughtChildError;
+          }
+          // A rejection: decided on this resume, or answered from a recording in a replay (with the recorded decision).
+          const rejection =
+            caughtChildError instanceof LoopApprovalRejection
+              ? caughtChildError
+              : childNode.type === "human_approval" && caughtChildError instanceof ReplayedNodeError && isRecordValue(caughtChildError.recordedOutput)
+                ? new LoopApprovalRejection(caughtChildError.recordedMessage, caughtChildError.recordedOutput)
+                : undefined;
+          // Phase 11.2 — an approval hand-off (a gate in a sub-workflow, an agent's tool gate) cannot pause a pass.
           const pauseAsked = isApprovalHandoffSignal(caughtChildError);
           const childError = pauseAsked
             ? WorkflowError.nodeConfig(
@@ -10016,14 +10200,20 @@ async function executeWorkflowRun(
             : caughtChildError;
           const childErrorMessage = childError instanceof Error ? childError.message : "Loop iteration failed";
           // Branch routing: the body node's own On Error applies, as at the top level (a stop, a cancellation, a run
-          // timeout, a nested Loop's failure or an approval still fail the Loop).
-          // An approval node never continues or branches past itself here: nobody could decide in a pass.
+          // timeout, a nested Loop's failure or an approval hand-off still fail the Loop).
+          // An approval node never continues past itself (that would run the next step with nobody asked); a Human
+          // Approval's rejection goes to its Error output when one is connected, as at the top level (an Approval Gate,
+          // refused in a body, still stops the Loop).
           const isApprovalNode = childNode.type === "human_approval" || childNode.type === "approval_gate";
           const childOnError =
-            routing && !pauseAsked && !isApprovalNode && childNode.type !== "loop_node" && !isCancellationError(caughtChildError) && !dependencies.abortSignal?.aborted
-              ? nodeErrorConfigOf(childNode)?.continueOnFail === true
-                ? "continue"
-                : getOnError(toRecord(childNode.config))
+            routing && !pauseAsked && childNode.type !== "loop_node" && !isCancellationError(caughtChildError) && !dependencies.abortSignal?.aborted
+              ? isApprovalNode
+                ? childNode.type === "human_approval" && getOnError(toRecord(childNode.config)) === "branch"
+                  ? "branch"
+                  : "stop"
+                : nodeErrorConfigOf(childNode)?.continueOnFail === true
+                  ? "continue"
+                  : getOnError(toRecord(childNode.config))
               : "stop";
           const handledOnError =
             childOnError === "continue" || (childOnError === "branch" && (branchTargets.get(childNode.id)?.get(ERROR_OUTPUT_HANDLE)?.length ?? 0) > 0);
@@ -10036,22 +10226,30 @@ async function executeWorkflowRun(
             completedAt: nowIso(),
             durationMs: Date.now() - childStarted,
             input: childInput,
+            ...(rejection ? { output: rejection.decisionPayload } : {}),
             error: childErrorMessage,
-            ...(handledOnError ? { errorCategory } : {})
+            ...(handledOnError ? { errorCategory } : {}),
+            ...(childNode.type === "human_approval" ? { loopPass } : {})
           });
-          await dependencies.onNodeComplete?.({
-            nodeId: childNode.id,
-            nodeType: childNode.type,
-            status: "error",
-            completedAt: nowIso(),
-            durationMs: Date.now() - childStarted,
-            input: childInput,
-            error: childErrorMessage
-          });
+          if (!decided) {
+            await dependencies.onNodeComplete?.({
+              nodeId: childNode.id,
+              nodeType: childNode.type,
+              status: "error",
+              completedAt: nowIso(),
+              durationMs: Date.now() - childStarted,
+              input: childInput,
+              error: childErrorMessage
+            });
+          }
           if (handledOnError) {
             hadContinuedErrors = true;
             if (childOnError === "continue") {
               recordPassOutput({ error: childErrorMessage }, childLabelScope.pendingLabels());
+            } else if (rejection) {
+              routeFailureToErrorOutput(childNode.id, {}, passBranches);
+              // A rejected approval's Error output carries the decision and the reason, as at the top level.
+              recordPassOutput({ ...rejection.decisionPayload, error: rejection.message }, labelState.get(childNode.id) ?? childLabelScope.inputLabels());
             } else {
               routeFailureToErrorOutput(childNode.id, {}, passBranches);
               // The Error output carries the item the node failed on and the error, as at the top level.
@@ -10069,11 +10267,21 @@ async function executeWorkflowRun(
             }
             continue;
           }
-          throw new Error(
-            `Loop node '${node.id}' failed at iteration ${loopIndex} on child '${childNode.id}': ${childErrorMessage}`
-          );
+          const loopFailure = `Loop node '${node.id}' failed at iteration ${loopIndex} on child '${childNode.id}': ${childErrorMessage}`;
+          if (rejection || caughtChildError instanceof LoopApprovalStop) {
+            // A "no" stops here: `results` holds the decision (not an earlier pass's approval), and no On Error of the
+            // Loops around it continues past it.
+            if (rejection) nodeOutputs.set(childNode.id, { ...rejection.decisionPayload, error: rejection.message });
+            throw new LoopApprovalStop(loopFailure);
+          }
+          throw new Error(loopFailure);
         } finally {
-          finishNodeSpan(childSpan, nodeResults, childNode.id);
+          // A pass that paused here: its span ends as waiting (the waiting result is recorded when the run pauses).
+          finishNodeSpan(
+            childSpan,
+            pausedAtChild ? [{ nodeId: childNode.id, status: "waiting_approval", startedAt: childStartedAt }] : nodeResults,
+            childNode.id
+          );
         }
       }
 
@@ -10192,7 +10400,32 @@ async function executeWorkflowRun(
     const handoff = request.resumeState.approvalHandoff;
     const approved = request.approvalDecision.decision === "approve";
     let handledByHandoff = false;
-    if (handoff?.kind === "gate" || handoff?.kind === "sub_workflow") {
+    const pausedLoops = request.resumeState.loopPause;
+    if (pausedLoops && !handoff) {
+      // A Human Approval in a Loop body: the run starts again at the outermost Loop, which runs from the paused pass;
+      // the approval takes the decision there (see `runLoop`).
+      if (!pausedLoops.frames?.length || nodeOrder[startIndex] !== pausedLoops.frames[0]!.loopNodeId || waitingNode.type !== "human_approval") {
+        return {
+          workflowId: workflow.id,
+          status: "error",
+          startedAt,
+          completedAt: nowIso(),
+          executionId: request.executionId,
+          nodeResults,
+          error: "Unable to resume: the paused Loop state does not match the workflow."
+        };
+      }
+      loopResume = pausedLoops;
+      loopDecision = {
+        approved,
+        payload: decisionPayload,
+        input: decisionInput,
+        rejectionError: request.approvalDecision.reason?.trim() || (timedOut ? "Human approval timed out" : "Human approval rejected"),
+        decidedAt,
+        ...(request.approvalDecision.actedBy ? { actedBy: request.approvalDecision.actedBy } : {})
+      };
+      handledByHandoff = true;
+    } else if (handoff?.kind === "gate" || handoff?.kind === "sub_workflow") {
       // Phase 11.2 — the gate (or the Execute Workflow node of a paused
       // child) runs again first and turns the decision into its output.
       pendingResumeDecision = { ...request.approvalDecision, nodeId: waitingNode.id, decidedAt, handoff };
@@ -10373,6 +10606,11 @@ async function executeWorkflowRun(
     shown?: ApprovalShown;
     /** Phase 12 coverage — model calls the node's checks made before it paused. */
     checkUsage?: readonly CheckModelUsage[];
+    /** Where the resumed run starts, when not the node after `index` (a Loop the run paused inside). */
+    nextIndex?: number;
+    /** A Human Approval in a Loop body: the pass it asks on, and the Loops' state to resume them. */
+    loopPass?: LoopPassRef;
+    loopPause?: LoopPauseState;
   }): Promise<WorkflowExecutionResult> => {
     // Phase 16 — the paused node's labels so far travel with the run, for the output it routes or decides on resume.
     if (pause.labelScope) labelState.set(pause.node.id, pause.labelScope.pendingLabels());
@@ -10389,7 +10627,8 @@ async function executeWorkflowRun(
       timeoutMinutes: pause.timeoutMinutes,
       ...(pause.handoff ? { handoff: pause.handoff.source } : {}),
       ...(pause.details ? toRecord(toJsonSafeValue(pause.details)) : {}),
-      ...(pause.checkUsage && pause.checkUsage.length > 0 ? { _childTelemetry: pause.checkUsage.map((entry) => ({ ...entry })) } : {})
+      ...(pause.checkUsage && pause.checkUsage.length > 0 ? { _childTelemetry: pause.checkUsage.map((entry) => ({ ...entry })) } : {}),
+      ...(pause.loopPass ? { loopPass: pause.loopPass } : {})
     };
     nodeResults.push({
       nodeId: pause.node.id,
@@ -10398,7 +10637,8 @@ async function executeWorkflowRun(
       completedAt: nowIso(),
       durationMs: Date.now() - pause.started,
       input: pause.nodeInput,
-      output: waitingOutput
+      output: waitingOutput,
+      ...(pause.loopPass ? { loopPass: pause.loopPass } : {})
     });
     await dependencies.onNodeComplete?.({
       nodeId: pause.node.id,
@@ -10419,7 +10659,7 @@ async function executeWorkflowRun(
       workflow,
       nodeOrder,
       // Re-run hand-offs, gates and paused sub-workflows run the node again on resume.
-      nextNodeIndex: pause.handoff && pause.handoff.kind !== "route" ? pause.index : pause.index + 1,
+      nextNodeIndex: pause.nextIndex ?? (pause.handoff && pause.handoff.kind !== "route" ? pause.index : pause.index + 1),
       waitingNodeId: pause.node.id,
       startedAt,
       globals,
@@ -10427,6 +10667,10 @@ async function executeWorkflowRun(
       nodeResults,
       skippedByBranch: [...skippedByBranch],
       ...(loopInlineExecutedNodes.size > 0 ? { loopInlineNodes: [...loopInlineExecutedNodes] } : {}),
+      // Labels are kept only on runs that keep them (see `dataLabels` below).
+      ...(pause.loopPause
+        ? { loopPause: labelState.persists ? pause.loopPause : { ...pause.loopPause, frames: pause.loopPause.frames.map(({ passLabels: _labels, ...frame }) => frame) } }
+        : {}),
       tryCatchScopes: serializeTryCatchScopes(tryCatchScopes),
       hadContinuedErrors,
       finalOutput,
@@ -10697,7 +10941,7 @@ async function executeWorkflowRun(
     // Phase 11.2 — a failed Approval Gate or Human Approval (rejected with
     // nowhere to go, or a request that could not be rendered) never continues:
     // "continue" would run the next step with nobody asked. The error branch still works.
-    const onError = (node.type === "approval_gate" || node.type === "human_approval") && requestedOnError === "continue" ? "stop" : requestedOnError;
+    let onError = (node.type === "approval_gate" || node.type === "human_approval") && requestedOnError === "continue" ? "stop" : requestedOnError;
     const parentIds = graphIndexes.incomingExecution.get(node.id) ?? [];
     const parentOutputs: Record<string, unknown> = {};
     for (const parentId of parentIds) {
@@ -10771,14 +11015,41 @@ async function executeWorkflowRun(
       }
 
       if (node.type === "loop_node") {
-        const { output, labels: loopLabels } = await runLoop({
-          node,
-          nodeConfig,
-          loopGlobals: globals,
-          templateData: { ...globals, ...merged, parent_outputs: parentOutputs },
-          labelScope,
-          span: nodeSpan
-        });
+        // A run resumed inside this Loop's body continues at the pass and node it paused at.
+        const resumeFrames = loopResume?.frames[0]?.loopNodeId === node.id ? loopResume.frames : undefined;
+        let loopRun: { output: Record<string, unknown>; labels: DataLabels };
+        try {
+          loopRun = await runLoop({
+            node,
+            nodeConfig,
+            loopGlobals: globals,
+            templateData: { ...globals, ...merged, parent_outputs: parentOutputs },
+            labelScope,
+            span: nodeSpan,
+            ...(resumeFrames ? { resumeFrames } : {})
+          });
+        } catch (error) {
+          if (!(error instanceof LoopApprovalPause)) throw error;
+          // A Human Approval in the body asked: the run pauses, and resumes by running this Loop again from that pass.
+          const pause = error.pause;
+          return await nodeSpan.enter(() =>
+            pauseForApproval({
+              node: pause.node,
+              index,
+              nextIndex: index,
+              nodeInput: pause.nodeInput,
+              startedAtNode: pause.startedAtNode,
+              started: pause.started,
+              approvalMessage: pause.approvalMessage,
+              timeoutMinutes: pause.timeoutMinutes,
+              labelScope: pause.labelScope,
+              shown: pause.shown,
+              loopPass: pause.loopPass,
+              loopPause: { frames: error.frames, ...error.routed }
+            })
+          );
+        }
+        const { output, labels: loopLabels } = loopRun;
 
         nodeOutputs.set(node.id, output);
         labelState.set(node.id, loopLabels);
@@ -10955,6 +11226,8 @@ async function executeWorkflowRun(
         };
       }
 
+      // A Loop that failed on a rejected approval in its body never continues past it (its Error output still works).
+      if (error instanceof LoopApprovalStop && onError === "continue") onError = "stop";
       const errorMessage = error instanceof Error ? error.message : "Node execution failed";
       // Surface a structured error block (category + remediation + retryable)
       // alongside the raw message so the UI can render an actionable hint

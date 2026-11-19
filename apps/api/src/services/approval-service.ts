@@ -72,6 +72,16 @@ export interface ApprovalResumeJob {
   retryTag?: string;
 }
 
+/** Two requests' Loop passes (`details.loopPass`) are the same pass, or both asked outside a Loop. */
+function sameLoopPass(a: unknown, b: unknown): boolean {
+  const key = (value: unknown) => {
+    if (!value || typeof value !== "object") return "";
+    const { loopNodeId, pass } = value as Record<string, unknown>;
+    return `${String(loopNodeId)}:${String(pass)}`;
+  };
+  return key(a) === key(b);
+}
+
 export class ApprovalDecisionError extends Error {
   constructor(
     message: string,
@@ -713,10 +723,18 @@ export class ApprovalService {
       if (this.options.isResumeActive(executionId)) continue;
       const pending = await this.store.getWorkflowExecutionState(executionId);
       const state = pending?.state as WorkflowExecutionState | null | undefined;
-      const waitingNodeId = state && typeof state === "object" && state.workflow ? resolvePendingApproval(state).nodeId : null;
-      // The decision must belong to the pause the run is in now, never to an earlier one.
+      const waitingInfo = state && typeof state === "object" && state.workflow ? resolvePendingApproval(state) : null;
+      const waitingNodeId = waitingInfo?.nodeId ?? null;
+      // The decision must belong to the pause the run is in now, never to an earlier one (a Human Approval in a Loop
+      // body pauses at the same node on every pass, so the pass must match too).
       const latest = (await this.store.listApprovalRequestsForExecution(executionId)).at(-1);
-      if (!latest || !DECIDED_STATUSES.has(latest.status) || !waitingNodeId || latest.nodeId !== waitingNodeId) {
+      if (
+        !latest ||
+        !DECIDED_STATUSES.has(latest.status) ||
+        !waitingNodeId ||
+        latest.nodeId !== waitingNodeId ||
+        !sameLoopPass(latest.details?.loopPass, waitingInfo?.details?.loopPass)
+      ) {
         await this.store.releaseWorkflowExecutionClaim(executionId);
         continue;
       }

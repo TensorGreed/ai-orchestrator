@@ -96,7 +96,7 @@ describe("Loop without branch routing (saved before the setting existed)", () =>
     expect(result.error).toContain("Loop node 'loop' failed at iteration 1 on child 'num'");
   });
 
-  it("fails the loop on a Human Approval in the body instead of going on with nobody asked", async () => {
+  it("pauses on a Human Approval in the body instead of going on with nobody asked", async () => {
     const workflow = flow(
       [
         node("src", "set_node", { assignments: [{ key: "xs", valueTemplate: "[1]", type: "json" }] }),
@@ -106,10 +106,9 @@ describe("Loop without branch routing (saved before the setting existed)", () =>
       [edge("src", "loop"), edge("loop", "ask")]
     );
     const result = await executeWorkflow({ workflow }, deps());
-    expect(result.status).toBe("error");
-    expect(result.error).toContain("Approvals cannot pause inside a Loop body: 'ask' is a Human Approval node");
-    const issue = validateWorkflowGraph(workflow).issues.find((entry) => entry.code === "human_approval_in_loop");
-    expect(issue?.severity).toBe("warning");
+    expect(result.status).toBe("waiting_approval");
+    expect(result.nodeResults.filter((entry) => entry.status === "waiting_approval").map((entry) => entry.nodeId)).toEqual(["ask"]);
+    expect(validateWorkflowGraph(workflow).issues.map((entry) => entry.code)).not.toContain("human_approval_in_loop");
   });
 
   it("is what a Loop without routeBranches does; new Loop nodes route branches", () => {
@@ -332,7 +331,7 @@ describe("Loop with branch routing", () => {
     expect(results(result, "cell_value").map((entry) => (entry.output as Record<string, unknown>).v)).toEqual([1, 2, 3]);
   });
 
-  it("does not ask for an approval on a branch no pass takes; on a taken branch the loop fails as before", async () => {
+  it("does not ask for an approval on a branch no pass takes; on a taken branch the pass pauses", async () => {
     const withGate = (xs: string) => {
       const workflow = ifFlow({ routeBranches: true }, { nodes: [node("ask", "human_approval", { approvalMessage: "ok?", timeoutMinutes: 30 })], edges: [edge("small", "ask")] });
       workflow.nodes[0] = node("src", "set_node", { assignments: [{ key: "xs", valueTemplate: xs, type: "json" }] });
@@ -345,8 +344,8 @@ describe("Loop with branch routing", () => {
     expect(untaken.status).toBe("success");
     expect(statuses(untaken, "ask")).toEqual(["skipped"]);
     const taken = await executeWorkflow({ workflow: withGate("[5,1]") }, deps());
-    expect(taken.status).toBe("error");
-    expect(taken.error).toContain("Approvals cannot pause inside a Loop body");
+    expect(taken.status).toBe("waiting_approval");
+    expect(taken.nodeResults.find((entry) => entry.status === "waiting_approval")?.loopPass).toEqual({ loopNodeId: "loop", pass: 2, of: 2 });
   });
 
   it("never continues past a Human Approval in a body, even with Continue On Fail", async () => {
@@ -359,7 +358,10 @@ describe("Loop with branch routing", () => {
       ],
       [edge("src", "loop"), edge("loop", "ask"), edge("ask", "pay")]
     );
-    const result = await executeWorkflow({ workflow }, deps());
+    const paused: WorkflowExecutionState[] = [];
+    const first = await executeWorkflow({ workflow, executionId: "exec-continue" }, { ...deps(), persistPausedExecution: async (input) => void paused.push(input.state) });
+    expect(first.status).toBe("waiting_approval");
+    const result = await resumeWorkflowExecution({ executionId: "exec-continue", state: paused[0]!, decision: "reject", actedBy: "lead" }, deps());
     expect(result.status).toBe("error");
     expect(statuses(result, "pay").filter((status) => status === "success")).toEqual([]);
   });

@@ -12,7 +12,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ApprovalEditableField, ApprovalRequestView, GateCaseRequestView, ReleaseApprovalRequestView } from "@ai-orchestrator/shared";
-import { ApiError, approveApproval, decideGateCaseRequest, decideReleaseRequest, listApprovals, rejectApproval, type ApprovalInboxItem } from "../lib/api";
+import { ApiError, approveApproval, decideGateCaseRequest, decideReleaseRequest, fetchExecutionById, listApprovals, rejectApproval, type ApprovalInboxItem } from "../lib/api";
 import {
   approvalKindLabel,
   approvalStatusLabel,
@@ -28,6 +28,7 @@ import {
   matchesFocus,
   relativeTime,
   releaseDecisionOutcome,
+  waitForNextRunRequest,
   type FieldDrafts
 } from "../lib/approvals";
 
@@ -54,6 +55,14 @@ function formatError(err: unknown): string {
   if (err instanceof ApiError) return err.message;
   if (err instanceof Error) return err.message;
   return "Unexpected error";
+}
+
+/** "Pass 2 of 3 (loop_1)" for a Human Approval that asked inside a Loop body; null otherwise. */
+export function loopPassLabel(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const { pass, of, loopNodeId } = value as Record<string, unknown>;
+  if (typeof pass !== "number" || typeof of !== "number") return null;
+  return `Pass ${pass} of ${of}${typeof loopNodeId === "string" && loopNodeId ? ` (${loopNodeId})` : ""}`;
 }
 
 function formatWhen(iso: string | null): string {
@@ -117,10 +126,32 @@ export function ApprovalsPage({ focusRequestId, focusExecutionId, onOpenRun, onP
 
   const visible = useMemo(() => items.filter((item) => matchesApprovalFilter(item, filter)), [filter, items]);
 
+  // After a decision that resumed its run on the queue, the run's next request (a Human Approval in a Loop body asks
+  // on every pass) comes in a moment later: check briefly and reload when it is in or the run ended.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const followUp = useRef(0);
   const handleDecided = useCallback(
-    (message: string) => {
+    (message: string, resumed?: { executionId: string; requestId: string }) => {
       setNotice(message);
       void load(tab);
+      if (!resumed) return;
+      const token = ++followUp.current;
+      void waitForNextRunRequest({
+        executionId: resumed.executionId,
+        decidedRequestId: resumed.requestId,
+        hasOtherPendingRequest: async (executionId, decidedRequestId) =>
+          (await listApprovals({ status: "pending", executionId })).items.some((item) => item.requestId !== decidedRequestId),
+        runStatus: async (executionId) => (await fetchExecutionById(executionId)).status ?? null,
+        stopped: () => !mounted.current || followUp.current !== token
+      }).then((outcome) => {
+        if (outcome !== "gave_up" && mounted.current && followUp.current === token) void load(tab);
+      });
     },
     [load, tab]
   );
@@ -212,7 +243,8 @@ export function ApprovalsPage({ focusRequestId, focusExecutionId, onOpenRun, onP
 interface ApprovalCardProps {
   view: ApprovalRequestView;
   focused: boolean;
-  onDecided: (message: string) => void;
+  /** `resumed` when the decision resumed the run on the queue: the page then watches for the run's next request. */
+  onDecided: (message: string, resumed?: { executionId: string; requestId: string }) => void;
   onOpenRun?: (executionId: string) => void;
 }
 
@@ -230,6 +262,7 @@ export function ApprovalCard({ view, focused, onDecided, onOpenRun }: ApprovalCa
   const toolServer = view.kind === "agent_tool" && typeof details.server === "string" ? details.server : null;
   // Phase 12.4 — the tool policy rule that asked, with the conditions the call matched.
   const policyReason = view.kind === "agent_tool" && typeof details.policyReason === "string" ? details.policyReason : null;
+  const loopPass = loopPassLabel(details.loopPass);
   const idBase = `approval-${view.requestId}`;
 
   useEffect(() => {
@@ -263,7 +296,7 @@ export function ApprovalCard({ view, focused, onDecided, onOpenRun }: ApprovalCa
               ...(Object.keys(edits).length > 0 ? { edits } : {})
             })
           : await rejectApproval(view.executionId, { requestId: view.requestId, ...(trimmed ? { reason: trimmed } : {}) });
-      onDecided(decisionOutcome(decision, response));
+      onDecided(decisionOutcome(decision, response), response.queued ? { executionId: view.executionId, requestId: view.requestId } : undefined);
     } catch (err) {
       // The decision was recorded and the run resumed, but ended in an error (400 with the run result).
       if (err instanceof ApiError && err.status === 400 && err.payload?.status === "error") {
@@ -319,6 +352,12 @@ export function ApprovalCard({ view, focused, onDecided, onOpenRun }: ApprovalCa
             <code>{view.nodeId}</code>
           </dd>
         </div>
+        {loopPass && (
+          <div>
+            <dt>Loop</dt>
+            <dd>{loopPass}</dd>
+          </div>
+        )}
         {view.path.length > 0 && (
           <div>
             <dt>Path</dt>
