@@ -12,6 +12,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { enableUser, fetchDeploymentUsers, resetUserMfa, revokeUserSessions, type DeploymentUserView } from "../lib/api";
+import { InviteUserDialog } from "./InviteUserDialog";
 
 function formatCreated(value: string): string {
   const date = new Date(value);
@@ -24,6 +25,7 @@ export function UsersAdminTab({ currentUserId }: { currentUserId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [inviting, setInviting] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -101,7 +103,13 @@ export function UsersAdminTab({ currentUserId }: { currentUserId: string }) {
 
   return (
     <div className="settings-section">
-      <h3>Users</h3>
+      <div className="settings-section-head">
+        <h3>Users</h3>
+        <button type="button" className="pg-btn primary" onClick={() => setInviting(true)}>
+          Invite user
+        </button>
+      </div>
+      {inviting && <InviteUserDialog onInvited={() => void refresh()} onClose={() => setInviting(false)} />}
       <p className="settings-help">
         Everyone with an account on this deployment. Signing a user out everywhere ends all of their live sessions.
         Reset MFA for a user who lost their authenticator; you cannot reset your own, so ask another admin or use a

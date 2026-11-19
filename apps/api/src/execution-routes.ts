@@ -41,6 +41,7 @@ import {
   normalizeSessionId,
   retryAfterSeconds
 } from "./run-helpers.js";
+import { editorRunOptionsError, editorRunOptionsRefused, savedRunLimits } from "./run-editor-options.js";
 import { startSseHeartbeat, type SseSessionWatch } from "./sse-heartbeat.js";
 import { traceUrlFor } from "./telemetry/trace-url.js";
 import { maskRunEvent, maskRunNodeData, runViewHidesNodeData } from "./response-run-view.js";
@@ -161,9 +162,16 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
   } = deps;
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/execute", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
+    // Operators (and execute shares) run the saved workflow with their input; the editor's options are checked below.
+    const user = await requireRole(request, reply, ["operator"]);
     if (!user) {
       return;
+    }
+    // The editor's options are refused before anything else is checked (budgets included).
+    const refusedOptions = editorRunOptionsRefused(user.role, request.body);
+    if (refusedOptions.length > 0) {
+      reply.code(403);
+      return editorRunOptionsError(refusedOptions);
     }
 
     const access = await runAccess.workflow(user, request.params.id, "workflow:execute");
@@ -244,17 +252,18 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       systemPrompt: executionPayload.system_prompt,
       userPrompt: executionPayload.user_prompt,
       sessionId: normalizeSessionId(executionPayload.sessionId, executionPayload.session_id),
-      executionTimeoutMs: normalizeExecutionTimeoutMs(
-        executionPayload.executionTimeoutMs,
-        executionPayload.execution_timeout_ms,
-        config.WORKFLOW_EXECUTION_TIMEOUT_MS
-      ),
       customData: executionPayload.customData,
       executionId,
       triggerType: executeTrigger,
       triggeredBy: user.email,
       captureSource,
-      captureInputOrigin: captureSource ? "user" : undefined
+      captureInputOrigin: captureSource ? "user" : undefined,
+      // Operators run the saved workflow: no pinned data, and no longer than the deployment's timeout.
+      ...savedRunLimits(
+        user.role,
+        normalizeExecutionTimeoutMs(executionPayload.executionTimeoutMs, executionPayload.execution_timeout_ms, config.WORKFLOW_EXECUTION_TIMEOUT_MS),
+        config.WORKFLOW_EXECUTION_TIMEOUT_MS
+      )
       },
       progress: { requestInput: prepared.requestInput, customData: executionPayload.customData },
       history: { requestInput: prepared.requestInput, customData: executionPayload.customData },
@@ -271,9 +280,15 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/execute/stream", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
+    const user = await requireRole(request, reply, ["operator"]);
     if (!user) {
       return;
+    }
+    // The editor's options are refused before anything else is checked (budgets included).
+    const refusedOptions = editorRunOptionsRefused(user.role, request.body);
+    if (refusedOptions.length > 0) {
+      reply.code(403);
+      return editorRunOptionsError(refusedOptions);
     }
 
     const access = await runAccess.workflow(user, request.params.id, "workflow:execute");
@@ -384,17 +399,18 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
         systemPrompt: executionPayload.system_prompt,
         userPrompt: executionPayload.user_prompt,
         sessionId: normalizeSessionId(executionPayload.sessionId, executionPayload.session_id),
-        executionTimeoutMs: normalizeExecutionTimeoutMs(
-          executionPayload.executionTimeoutMs,
-          executionPayload.execution_timeout_ms,
-          config.WORKFLOW_EXECUTION_TIMEOUT_MS
-        ),
         customData: executionPayload.customData,
         executionId,
         triggerType: executeTrigger,
         triggeredBy: user.email,
         captureSource,
-        captureInputOrigin: captureSource ? "user" : undefined
+        captureInputOrigin: captureSource ? "user" : undefined,
+        // Operators run the saved workflow: no pinned data, and no longer than the deployment's timeout.
+        ...savedRunLimits(
+          user.role,
+          normalizeExecutionTimeoutMs(executionPayload.executionTimeoutMs, executionPayload.execution_timeout_ms, config.WORKFLOW_EXECUTION_TIMEOUT_MS),
+          config.WORKFLOW_EXECUTION_TIMEOUT_MS
+        )
         },
         progress: { requestInput: prepared.requestInput, customData: executionPayload.customData },
         history: { requestInput: prepared.requestInput, customData: executionPayload.customData },

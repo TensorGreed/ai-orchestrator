@@ -70,6 +70,8 @@ export interface RunScopeDeps {
   getSecretProjectId: (secretId: string) => Promise<string | null>;
   listSecretIdsSharedToProject: (projectId: string) => Promise<string[]>;
   canUseSecretsInProject: (user: SafeUser, projectId: string) => Promise<boolean>;
+  /** v78 — may this person run the workflow through a share with them (execute, within their role)? */
+  userMayRunViaShare?: (user: SafeUser, workflow: { id: string; projectId?: string | null }) => Promise<boolean>;
   /**
    * Do default-project secrets and MCP servers count as shared with every
    * project? True in `role` isolation; in `strict` they need an explicit share.
@@ -173,6 +175,8 @@ export function createRunScope(deps: RunScopeDeps) {
     for (const share of workflow.id ? await deps.listWorkflowShares(workflow.id) : []) {
       if (share.accessLevel === "execute" && await deps.canUseSecretsInProject(actor, share.projectId)) return true;
     }
+    // v78 — an execute share with the person: they run it as its project's runs do.
+    if (workflow.id && deps.userMayRunViaShare && await deps.userMayRunViaShare(actor, { id: workflow.id, projectId: workflow.projectId })) return true;
     return false;
   };
 

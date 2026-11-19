@@ -43,6 +43,8 @@ export interface RunAccessDeps {
   listWorkflowIdsSharedToProject: (projectId: string) => Promise<string[]>;
   /** Does a project with this id exist? The default project always does. */
   projectExists: (projectId: string) => Promise<boolean>;
+  /** v78 — workflow ids shared with this person (read or execute), from one indexed read. */
+  listWorkflowIdsSharedToUser?: (userId: string) => Promise<string[]>;
 }
 
 export interface RunAccess {
@@ -115,9 +117,13 @@ export function createRunAccess(deps: RunAccessDeps): RunAccess {
       if (!await canRead(projectId)) continue;
       for (const workflowId of await deps.listWorkflowIdsSharedToProject(projectId)) shared.add(workflowId);
     }
+    // v78 — shared with the person: readable, unless an API key limits the request to other projects.
+    const sharedToUser = new Set(deps.listWorkflowIdsSharedToUser ? await deps.listWorkflowIdsSharedToUser(user.id) : []);
+    const scopeAllows = (projectId: string) => !user.projectScope || user.projectScope.includes(projectId);
     const readable: string[] = [];
     for (const workflow of await deps.listWorkflows()) {
-      if (shared.has(workflow.id) || await canRead(workflow.projectId ?? DEFAULT_PROJECT_ID)) readable.push(workflow.id);
+      const projectId = workflow.projectId ?? DEFAULT_PROJECT_ID;
+      if (shared.has(workflow.id) || (sharedToUser.has(workflow.id) && scopeAllows(projectId)) || await canRead(projectId)) readable.push(workflow.id);
     }
     return readable;
   };

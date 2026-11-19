@@ -559,14 +559,16 @@ describe("sampling and limits", () => {
     const marked = await call(context, "PUT", "/api/workflows/wf-copied/pins/hook", builder.cookie, { data: { user_prompt: "copied" }, executionId: "run-marked" });
     expect(marked.statusCode, marked.body).toBe(200);
     expect((await viaKey({ usePinnedData: true })).statusCode).toBe(200);
+    // A run that leaves usePinnedData out uses the pins too (the engine's default), so it is not captured either.
+    expect((await viaKey({})).statusCode).toBe(200);
     await settle();
     expect((await inbox(context, builder.cookie, "wf-copied")).total).toBe(0);
     const metrics = await context.app.inject({ method: "GET", url: "/metrics" });
     expect(metrics.statusCode).toBe(200);
-    expect(metrics.body).toContain('replay_captures_total{outcome="skipped_sensitive_input"} 2');
+    expect(metrics.body).toContain('replay_captures_total{outcome="skipped_sensitive_input"} 3');
 
     // The same runs from a clean run, and with marked pins left unused, are captured as before.
-    expect((await viaKey({ sourceExecutionId: "run-clean" })).statusCode).toBe(200);
+    expect((await viaKey({ sourceExecutionId: "run-clean", usePinnedData: false })).statusCode).toBe(200);
     expect((await viaKey({ usePinnedData: false })).statusCode).toBe(200);
     await waitForCaptures(context, builder.cookie, "wf-copied", 2);
     await settle();

@@ -33,6 +33,7 @@ import {
   fetchLogStreamDestinations,
   fetchMfaStatus,
   fetchProjectMembers,
+  fetchDeploymentUsers,
   fetchSecrets,
   fetchSsoMappings,
   fetchVariables,
@@ -65,6 +66,7 @@ import {
   type LogStreamDestinationType,
   type MfaStatus,
   type ProjectMembership,
+  type DeploymentUserView,
   type McpPreset,
   type SecretListItem,
   type SsoGroupMapping,
@@ -745,7 +747,9 @@ function ProjectMembersTab({
 }) {
   const [projectId, setProjectId] = useState(initialProjectId);
   const [members, setMembers] = useState<ProjectMembership[]>([]);
+  /** An email (from the picker or typed), or a user id such as a service account's. */
   const [newUserId, setNewUserId] = useState("");
+  const [knownUsers, setKnownUsers] = useState<DeploymentUserView[]>([]);
   const [newRole, setNewRole] = useState<string>("editor");
   const [newCustomRoleId, setNewCustomRoleId] = useState("");
   const [customRoles, setCustomRoles] = useState<CustomRoleRecord[]>([]);
@@ -777,6 +781,20 @@ function ProjectMembersTab({
     refresh();
   }, [refresh]);
 
+  // Admins pick people from the deployment's users; everyone else types the email.
+  useEffect(() => {
+    if (currentUserRole !== "admin") return;
+    let cancelled = false;
+    fetchDeploymentUsers()
+      .then((response) => {
+        if (!cancelled) setKnownUsers(response.users);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUserRole]);
+
   const handleAdd = async () => {
     if (!newUserId.trim()) return;
     if (newRole === "custom" && !newCustomRoleId) {
@@ -786,8 +804,9 @@ function ProjectMembersTab({
     setBusy(true);
     setError(null);
     try {
+      const target = newUserId.trim();
       await addProjectMember(projectId, {
-        userId: newUserId.trim(),
+        ...(target.includes("@") ? { email: target } : { userId: target }),
         role: newRole,
         customRoleId: newRole === "custom" ? newCustomRoleId : null
       });
@@ -847,13 +866,29 @@ function ProjectMembersTab({
       {canManage && (
         <div className="settings-card">
           <h4>Add member</h4>
-          <label htmlFor="member-user-id">User ID (e.g. usr_…)</label>
+          <label htmlFor="member-user-id">Email</label>
           <input
             id="member-user-id"
+            type="text"
+            list="member-user-options"
+            autoComplete="off"
             value={newUserId}
             onChange={(event) => setNewUserId(event.target.value)}
-            placeholder="usr_AbCdEf…"
+            placeholder="ana@example.com"
+            aria-describedby="member-user-help"
           />
+          <datalist id="member-user-options">
+            {knownUsers
+              .filter((known) => !members.some((member) => member.userId === known.id))
+              .map((known) => (
+                <option key={known.id} value={known.email}>
+                  {known.role}
+                </option>
+              ))}
+          </datalist>
+          <p className="settings-help" id="member-user-help">
+            Someone with an account here. Not here yet? An admin invites them from Settings, Users. A user id works too.
+          </p>
           <label htmlFor="member-role">Role</label>
           <select id="member-role" value={newRole} onChange={(event) => setNewRole(event.target.value)}>
             {BUILT_IN_PROJECT_ROLES.map((option) => (
@@ -899,7 +934,7 @@ function ProjectMembersTab({
             <table className="settings-table">
               <thead>
                 <tr>
-                  <th>User ID</th>
+                  <th>Member</th>
                   <th>Role</th>
                   <th>Permissions</th>
                   {canManage && <th></th>}
@@ -909,7 +944,13 @@ function ProjectMembersTab({
                 {members.map((member) => (
                   <tr key={member.userId}>
                     <td>
-                      <code>{member.userId}</code>
+                      {member.email ? (
+                        <>
+                          {member.email} <code className="settings-muted">{member.userId}</code>
+                        </>
+                      ) : (
+                        <code>{member.userId}</code>
+                      )}
                     </td>
                     <td>
                       {member.role}
@@ -930,7 +971,7 @@ function ProjectMembersTab({
                     </td>
                     {canManage && (
                       <td>
-                        <button className="mini-btn" onClick={() => handleRemove(member.userId)}>
+                        <button className="mini-btn" onClick={() => handleRemove(member.userId)} aria-label={`Remove ${member.email ?? member.userId}`}>
                           Remove
                         </button>
                       </td>

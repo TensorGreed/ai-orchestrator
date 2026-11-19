@@ -90,6 +90,19 @@ describe("node inspector: calm by default", () => {
 
   afterEach(() => setWindowWidth(originalWidth));
 
+  it("on a view-only workflow, shows the settings but does not save them, and closes without asking", async () => {
+    const onSave = vi.fn();
+    const onClose = vi.fn();
+    render(<NodeInspector {...props({ onSave, onClose, readOnlyReason: "Your viewer role can view workflows but not change them." })} />);
+    const save = screen.getByRole("button", { name: /Save changes/ });
+    expect(save).toHaveAttribute("aria-disabled", "true");
+    expect(save).toHaveAttribute("title", "Your viewer role can view workflows but not change them.");
+    await userEvent.click(save);
+    expect(onSave).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
   it("opens side by side on a wide window: one header, Input | Parameters | Output, the status shown once", () => {
     render(<NodeInspector {...props()} />);
     const dialog = screen.getByRole("dialog", { name: "Inspect Fetch orders" });

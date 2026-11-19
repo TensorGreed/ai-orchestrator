@@ -184,6 +184,8 @@ export interface NodeInspectorProps {
   onUnpinNodeOutput?: (nodeId: string) => Promise<void> | void;
   /** 12.2 — admins may set a trigger's input trust; others see it read-only (the API refuses their changes). */
   canSetTriggerTrust?: boolean;
+  /** Set when you may only view the workflow: the node's settings can be read but not saved, and this says why. */
+  readOnlyReason?: string | null;
 }
 
 type NodeConfigModalProps = NodeInspectorProps;
@@ -1448,7 +1450,8 @@ export function NodeInspector({
   onPinNodeOutput,
   onUnpinNodeOutput,
   controlRef,
-  canSetTriggerTrust = false
+  canSetTriggerTrust = false,
+  readOnlyReason = null
 }: NodeConfigModalProps) {
   const [label, setLabel] = useState(node.data.label);
   const [config, setConfig] = useState<Record<string, unknown>>(asRecord(node.data.config));
@@ -1569,13 +1572,14 @@ export function NodeInspector({
 
   const requestClose = useCallback(
     (next?: () => void) => {
-      if (!isDirtyRef.current) {
+      // A view-only workflow: nothing here can be saved, so there is nothing to confirm.
+      if (!isDirtyRef.current || readOnlyReason) {
         (next ?? closeWithTransition)();
         return;
       }
       setPendingClose({ next });
     },
-    [closeWithTransition]
+    [closeWithTransition, readOnlyReason]
   );
 
   useImperativeHandle(controlRef, () => ({ isDirty: () => isDirtyRef.current, requestClose }), [requestClose]);
@@ -10816,7 +10820,14 @@ export function NodeInspector({
         <button type="button" className="insp-btn" onClick={() => requestClose()}>
           Cancel
         </button>
-        <button type="button" className="insp-btn primary" onClick={handleSave} data-dirty={isDirty ? "true" : undefined}>
+        <button
+          type="button"
+          className="insp-btn primary"
+          onClick={readOnlyReason ? undefined : handleSave}
+          aria-disabled={readOnlyReason ? true : undefined}
+          title={readOnlyReason ?? undefined}
+          data-dirty={isDirty && !readOnlyReason ? "true" : undefined}
+        >
           Save changes
           {isDirty ? <span className="insp-dirty" aria-hidden="true" /> : null}
         </button>

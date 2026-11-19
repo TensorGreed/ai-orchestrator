@@ -86,7 +86,7 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "services/gate-admission-service.ts", match: "", kind: "not_run", why: "gate admission reads only a workflow's name and project (audit, requests, inbox views)", count: 3 },
   { file: "services/data-destination-service.ts", match: "", kind: "not_run", why: "the not-classified-yet list reads the draft and published node configs for their hosts in one query; nothing runs" },
 
-  { file: "app.ts", match: "withStoredTriggerTrust(await store.getWorkflow(workflow.id), workflow)", kind: "not_run", why: "12.2 — a builder's import reads the stored workflow's trigger trust settings to keep them; nothing runs" },
+  { file: "app.ts", match: "const stored = await store.getWorkflow(sourceId);", kind: "not_run", why: "a JSON import reads the stored workflow with the file's id: to name and diff it, and (12.2) to keep its trigger trust settings on a replace; nothing runs" },
   { file: "app.ts", match: "if (!await store.getWorkflow(workflowId)) {", kind: "not_run", why: "a tool policy rule's workflow principal must exist when the rule is saved; nothing runs" },
 
   // app.ts: production traffic.

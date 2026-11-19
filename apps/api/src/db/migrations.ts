@@ -3083,6 +3083,29 @@ export const MIGRATIONS: Migration[] = [
     down: `
       ALTER TABLE mcp_toolset_members DROP COLUMN IF EXISTS options_json;
     `
+  },
+  {
+    version: 78,
+    description: "Per-workflow user shares — a workflow shared with a person (read or execute)",
+    // workflow_user_shares: one row per workflow and person. access_level 'read' or 'execute'; a share never gives more
+    // than the person's own role allows (a viewer's execute share reads only) and never write. Removed with the
+    // workflow (deleteWorkflow) and with the user (deleteUser). shared_by is the email of whoever shared it.
+    // idx_workflow_user_shares_user_id: the workflows shared with one person, read once per workflow list.
+    up: `
+      CREATE TABLE IF NOT EXISTS workflow_user_shares (
+        workflow_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        access_level TEXT NOT NULL DEFAULT 'read',
+        shared_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (workflow_id, user_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_workflow_user_shares_user_id ON workflow_user_shares(user_id);
+    `,
+    // An older build ignores the table; dropping it removes every user share.
+    down: `
+      DROP TABLE IF EXISTS workflow_user_shares;
+    `
   }
 ];
 

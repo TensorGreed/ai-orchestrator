@@ -74,6 +74,13 @@ import {
   fetchWorkflows,
   importExternalWorkflow,
   importWorkflow,
+  previewWorkflowImport,
+  fetchWorkflowAccess,
+  fetchWorkflowsSharedWithMe,
+  fetchProjectSharedWorkflows,
+  type ProjectSharedWorkflowItem,
+  type SharedWorkflowItem,
+  type WorkflowImportPreview,
   listApprovals,
   validateStoredWorkflow,
   isMfaChallenge,
@@ -176,6 +183,8 @@ import { ErrorWorkflowDialog } from "./components/ErrorWorkflowDialog";
 import { WorkflowCardMenu } from "./components/WorkflowCardMenu";
 import { WorkflowCanvasArea, type ImportPanelBinding } from "./components/WorkflowCanvasArea";
 import { ExternalImportDialog, type ExternalImportSource } from "./components/ExternalImportDialog";
+import { ImportConflictDialog, type ImportConflictChoice } from "./components/ImportConflictDialog";
+import { editorAccess, roleMayUseEditorRunOptions, type WorkflowAccessView } from "./lib/editor-access";
 import { SecretSaveWarnings } from "./components/SecretSaveWarnings";
 import { DraftWarnings } from "./components/DraftWarnings";
 import { WebhookTestPayloadDialog } from "./components/WebhookTestPayloadDialog";
@@ -1497,7 +1506,14 @@ function StudioApp() {
     }
     return taken;
   };
-  const currentWorkflowExists = workflowList.some((item) => item.id === currentWorkflow.id);
+  /** v78 — workflows shared with you, from any project (the dashboard lists them under "Shared with you"). */
+  const [sharedWithMe, setSharedWithMe] = useState<SharedWorkflowItem[]>([]);
+  /** Workflows other projects share to the active project ("Shared with this project"). */
+  const [sharedWithProject, setSharedWithProject] = useState<ProjectSharedWorkflowItem[]>([]);
+  const currentWorkflowExists =
+    workflowList.some((item) => item.id === currentWorkflow.id) ||
+    sharedWithMe.some((item) => item.id === currentWorkflow.id) ||
+    sharedWithProject.some((item) => item.id === currentWorkflow.id);
   useEffect(() => {
     const workflowId = currentWorkflow.id;
     if (!currentWorkflowExists || savedVersionNodeIdsRef.current?.workflowId === workflowId) return;
@@ -1515,6 +1531,30 @@ function StudioApp() {
   }, [currentWorkflow.id, currentWorkflowExists]);
   const canManageWorkflows = authUser?.role === "admin" || authUser?.role === "builder";
   const canManageSecrets = authUser?.role === "admin" || authUser?.role === "builder";
+  // What you may do with the open workflow: viewers and operators open it read-only; a builder may only view a
+  // workflow shared with them (or in a project where their role is view-only). Asked for each saved workflow.
+  const [workflowAccess, setWorkflowAccess] = useState<WorkflowAccessView | null>(null);
+  useEffect(() => {
+    if (!authUser || !currentWorkflowExists || authUser.role === "viewer") {
+      setWorkflowAccess(null);
+      return;
+    }
+    let cancelled = false;
+    fetchWorkflowAccess(currentWorkflow.id)
+      .then((access) => {
+        if (!cancelled) setWorkflowAccess(access);
+      })
+      .catch(() => {
+        if (!cancelled) setWorkflowAccess(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authUser, currentWorkflow.id, currentWorkflowExists]);
+  const { editDisabledReason, runDisabledReason } = editorAccess(
+    authUser?.role,
+    workflowAccess && workflowAccess.workflowId === currentWorkflow.id ? workflowAccess : null
+  );
   // Phase 11.2 — pending approvals the user can decide, for the sidebar badge.
   const [pendingApprovalCount, setPendingApprovalCount] = useState(0);
   const [approvalFocusExecutionId, setApprovalFocusExecutionId] = useState<string | null>(null);
@@ -1699,6 +1739,8 @@ function StudioApp() {
     const handler = (event: KeyboardEvent) => {
       if (activeMode !== "editor") return;
       if (isCanvasShortcutBlocked(event.target)) return;
+      // A view-only workflow: undo, redo and duplicate would change a canvas that cannot be saved.
+      if (editDisabledReason) return;
 
       const isModifier = event.ctrlKey || event.metaKey;
       const key = event.key.toLowerCase();
@@ -1795,7 +1837,7 @@ function StudioApp() {
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [activeMode, edges, nodes, pushHistorySnapshot, redo, setEdges, setNodes, undo]);
+  }, [activeMode, editDisabledReason, edges, nodes, pushHistorySnapshot, redo, setEdges, setNodes, undo]);
 
   useEffect(() => {
     latestDebugExecutionIdRef.current = null;
@@ -2058,6 +2100,9 @@ function StudioApp() {
       if (event.key !== "Delete" && event.key !== "Backspace") {
         return;
       }
+      if (editDisabledReason) {
+        return;
+      }
 
       if (isCanvasShortcutBlocked(event.target)) {
         return;
@@ -2088,7 +2133,7 @@ function StudioApp() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [activeMode, editingNodeId, edges, nodes, pushHistorySnapshot, setEdges, setNodes]);
+  }, [activeMode, editDisabledReason, editingNodeId, edges, nodes, pushHistorySnapshot, setEdges, setNodes]);
 
   useEffect(() => {
     const handleCopyPaste = (event: KeyboardEvent) => {
@@ -2154,6 +2199,7 @@ function StudioApp() {
       }
 
       if (key === "v") {
+        if (editDisabledReason) return;
         let raw: string | null = null;
         try {
           raw = localStorage.getItem(NODE_CLIPBOARD_STORAGE_KEY);
@@ -2246,7 +2292,7 @@ function StudioApp() {
     return () => {
       window.removeEventListener("keydown", handleCopyPaste);
     };
-  }, [activeMode, edges, nodes, pushHistorySnapshot, reactFlowInstance, setEdges, setNodes]);
+  }, [activeMode, editDisabledReason, edges, nodes, pushHistorySnapshot, reactFlowInstance, setEdges, setNodes]);
 
   const handleDeleteEdgeById = useCallback(
     (edgeId: string) => {
@@ -2347,13 +2393,19 @@ function StudioApp() {
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
-      const [workflowItems, projectPayload, folderPayload] = await Promise.all([
+      const [workflowItems, projectPayload, folderPayload, sharedPayload, projectSharedPayload] = await Promise.all([
         fetchWorkflows({ projectId: activeProjectId }),
         fetchProjects().catch(() => ({ projects: [] })),
-        fetchFolders(activeProjectId).catch(() => ({ folders: [] }))
+        fetchFolders(activeProjectId).catch(() => ({ folders: [] })),
+        fetchWorkflowsSharedWithMe().catch(() => ({ workflows: [] })),
+        fetchProjectSharedWorkflows(activeProjectId).catch(() => ({ workflows: [] }))
       ]);
 
       setWorkflowList(workflowItems);
+      setSharedWithProject(projectSharedPayload.workflows);
+      // A workflow listed as shared with this project is not listed again as shared with you.
+      const projectSharedIds = new Set(projectSharedPayload.workflows.map((item) => item.id));
+      setSharedWithMe(sharedPayload.workflows.filter((item) => item.projectId !== activeProjectId && !projectSharedIds.has(item.id)));
       setProjects(projectPayload.projects ?? []);
       setFolders(folderPayload.folders ?? []);
     } catch (loadError) {
@@ -3204,12 +3256,22 @@ function StudioApp() {
     }
   }, [buildCurrentWorkflow]);
 
+  /** Before a run: save the editor's changes, or, when you may run but not change the workflow, run it as saved. */
+  const persistForRun = useCallback(
+    async (adjust?: (workflow: Workflow) => Workflow) => (editDisabledReason && currentWorkflowExists ? currentWorkflow : await persistWorkflow(adjust)),
+    [currentWorkflow, currentWorkflowExists, editDisabledReason, persistWorkflow]
+  );
+
   // The pill opens Evaluations on Release gates once; the next visit starts on Golden sets.
   useEffect(() => {
     if (activeMode !== "evaluations") setEvaluationsTab("sets");
   }, [activeMode]);
 
   const handleSave = useCallback(async () => {
+    if (editDisabledReason) {
+      setError(editDisabledReason);
+      return;
+    }
     try {
       setBusy(true);
       setError(null);
@@ -3219,7 +3281,7 @@ function StudioApp() {
     } finally {
       setBusy(false);
     }
-  }, [handleApiError, persistWorkflow]);
+  }, [editDisabledReason, handleApiError, persistWorkflow]);
 
   // The import checklist follows the workflow it belongs to, including across reloads.
   useEffect(() => {
@@ -3446,11 +3508,16 @@ function StudioApp() {
       user_prompt?: string;
       record?: boolean;
     } = {
-      sessionId,
-      usePinnedData: true
+      sessionId
     };
 
-    if (recordMcp) {
+    // Operators run the saved workflow with their input: pinned data, recording and partial runs are the editor's.
+    const editorOptions = roleMayUseEditorRunOptions(authUser?.role);
+    if (editorOptions) {
+      payload.usePinnedData = true;
+    }
+
+    if (recordMcp && editorOptions) {
       payload.record = true;
     }
 
@@ -3474,7 +3541,7 @@ function StudioApp() {
     }
 
     return payload;
-  }, [executionResult, editorPrompts.sendSystemPrompt, editorPrompts.sendUserPrompt, recordMcp, sessionId, systemPrompt, userPrompt]);
+  }, [authUser?.role, executionResult, editorPrompts.sendSystemPrompt, editorPrompts.sendUserPrompt, recordMcp, sessionId, systemPrompt, userPrompt]);
 
   const buildWebhookExecutionPayload = useCallback(() => {
     const payload: {
@@ -3520,11 +3587,20 @@ function StudioApp() {
 
   const handleExecute = useCallback(async (options?: { startNodeId?: string; runMode?: "workflow" | "single_node" }) => {
     let trace: TraceStreamHandlers | null = null;
+    if (runDisabledReason) {
+      setError(runDisabledReason);
+      return;
+    }
+    // Running one node or from a node is the editor's; operators run the whole saved workflow.
+    if ((options?.startNodeId || options?.runMode === "single_node") && !roleMayUseEditorRunOptions(authUser?.role)) {
+      setError("Running one node, or from a node, needs the builder role. Run the whole workflow instead.");
+      return;
+    }
     try {
       setBusy(true);
       setRunningExecutionId(null);
       setError(null);
-      const saved = await persistWorkflow();
+      const saved = await persistForRun();
       trace = createRunTraceHandlers(saved.id);
       const result = await executeWorkflowStream(saved.id, buildEditorExecutionPayload(options?.startNodeId, options?.runMode), {
         ...traceStreamCallbacks(trace, (event) => setError((current) => current ?? event.message)),
@@ -3565,8 +3641,10 @@ function StudioApp() {
     handleStreamExecutionStarted,
     reportStreamFailure,
     isDebugMode,
-    persistWorkflow,
+    persistForRun,
     refreshExecutionHistory,
+    runDisabledReason,
+    authUser?.role,
   ]);
 
   const handleWebhookExecute = useCallback(async (testPayload: Record<string, unknown>) => {
@@ -3577,7 +3655,7 @@ function StudioApp() {
       setError(null);
       startVisualRun();
       // The payload is kept in the workflow's settings, so the next "Webhook run" starts from it.
-      const saved = await persistWorkflow((workflow) => withTestWebhookPayload(workflow, testPayload));
+      const saved = await persistForRun((workflow) => withTestWebhookPayload(workflow, testPayload));
       trace = createRunTraceHandlers(saved.id);
       const result = await runWebhookStream({
         workflow_id: saved.id,
@@ -3621,7 +3699,7 @@ function StudioApp() {
     handleStreamExecutionStarted,
     reportStreamFailure,
     isDebugMode,
-    persistWorkflow,
+    persistForRun,
     refreshExecutionHistory,
     runWebhookStream,
     startVisualRun,
@@ -3646,7 +3724,7 @@ function StudioApp() {
     let streamedAnyDelta = false;
 
     try {
-      const savedWorkflow = await persistWorkflow();
+      const savedWorkflow = await persistForRun();
       const workflowId = savedWorkflow.id;
       activeWorkflowId = workflowId;
       const sessionForWorkflow = chatSessionsByWorkflow[workflowId] ?? createChatSessionId(workflowId);
@@ -3813,7 +3891,7 @@ function StudioApp() {
     createRunTraceHandlers,
     reportStreamFailure,
     isDebugMode,
-    persistWorkflow,
+    persistForRun,
     editorPrompts.sendSystemPrompt,
     refreshExecutionHistory,
     setChatMessageStatus,
@@ -3851,24 +3929,62 @@ function StudioApp() {
     URL.revokeObjectURL(href);
   }, [buildCurrentWorkflow]);
 
+  /** An imported file whose id is a workflow you can see: import it as new (the default) or replace that one. */
+  const [importConflict, setImportConflict] = useState<{
+    content: string;
+    fileName?: string;
+    preview: WorkflowImportPreview & { existing: NonNullable<WorkflowImportPreview["existing"]> };
+    error: string | null;
+  } | null>(null);
+
+  const commitNativeImport = useCallback(
+    async (content: string, mode: "new" | "replace") => {
+      const imported = await importWorkflow({ json: content, mode });
+      const workflows = await fetchWorkflows({ projectId: activeProjectId });
+      setWorkflowList(workflows);
+      hydrateWorkflow(imported);
+      storeLocalWipWorkflow(imported);
+      setActiveMode("editor");
+    },
+    [activeProjectId, hydrateWorkflow, setActiveMode, setWorkflowList]
+  );
+
   const importNativeText = useCallback(
-    async (content: string) => {
+    async (content: string, fileName?: string) => {
       try {
         setBusy(true);
         setError(null);
-        const imported = await importWorkflow({ json: content });
-        const workflows = await fetchWorkflows({ projectId: activeProjectId });
-        setWorkflowList(workflows);
-        hydrateWorkflow(imported);
-        storeLocalWipWorkflow(imported);
-        setActiveMode("editor");
+        // A file whose id you can see asks first; anything else is imported as a new workflow.
+        const preview = await previewWorkflowImport({ json: content });
+        if (preview.existing) {
+          setImportConflict({ content, fileName, preview: { ...preview, existing: preview.existing }, error: null });
+          return;
+        }
+        await commitNativeImport(content, "new");
       } catch (importError) {
         handleApiError(importError, "Failed to import workflow");
       } finally {
         setBusy(false);
       }
     },
-    [activeProjectId, handleApiError, hydrateWorkflow, setActiveMode, setWorkflowList]
+    [commitNativeImport, handleApiError]
+  );
+
+  const confirmImportConflict = useCallback(
+    async (choice: ImportConflictChoice) => {
+      if (!importConflict) return;
+      try {
+        setBusy(true);
+        await commitNativeImport(importConflict.content, choice);
+        setImportConflict(null);
+      } catch (importError) {
+        const message = importError instanceof Error ? importError.message : "Failed to import workflow";
+        setImportConflict((current) => (current ? { ...current, error: message } : current));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [commitNativeImport, importConflict]
   );
 
   const openExternalImport = useCallback((source: ExternalImportSource | null = null) => {
@@ -3894,7 +4010,7 @@ function StudioApp() {
         openExternalImport({ text: content, fileName: file.name });
         return;
       }
-      await importNativeText(content);
+      await importNativeText(content, file.name);
     },
     [canManageWorkflows, importNativeText, openExternalImport]
   );
@@ -3937,7 +4053,7 @@ function StudioApp() {
   const handleNativeFileInImportDialog = useCallback(
     (source: ExternalImportSource) => {
       closeExternalImport();
-      void importNativeText(source.text);
+      void importNativeText(source.text, source.fileName);
     },
     [closeExternalImport, importNativeText]
   );
@@ -5117,6 +5233,8 @@ function StudioApp() {
           }}
           onModeChange={setActiveMode}
           onSave={handleSave}
+          saveDisabledReason={editDisabledReason}
+          runDisabledReason={runDisabledReason}
           onExport={handleExport}
           onImportClick={() => importFileRef.current?.click()}
           onImportFileChange={handleImportFile}
@@ -5476,6 +5594,60 @@ function StudioApp() {
                   })}
                 </div>
               )}
+
+              {sharedWithProject.length > 0 && (
+                <section className="shared-with-me" aria-labelledby="shared-with-project-title">
+                  <h3 id="shared-with-project-title" className="shared-with-me-title">
+                    Shared with this project
+                  </h3>
+                  <ul className="shared-with-me-list">
+                    {sharedWithProject.map((item) => (
+                      <li key={item.id}>
+                        <button
+                          type="button"
+                          className="shared-with-me-item"
+                          onClick={() => {
+                            void loadWorkflowById(item.id);
+                            setActiveMode("editor");
+                          }}
+                        >
+                          <span className="shared-with-me-name">{item.name}</span>
+                          <span className="settings-chip">{item.effectiveAccess === "execute" ? "Can view and run" : "Can view"}</span>
+                          <span className="settings-muted">
+                            from {projects.find((project) => project.id === item.ownerProjectId)?.name ?? item.ownerProjectId}
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+
+              {sharedWithMe.length > 0 && (
+                <section className="shared-with-me" aria-labelledby="shared-with-me-title">
+                  <h3 id="shared-with-me-title" className="shared-with-me-title">
+                    Shared with you
+                  </h3>
+                  <ul className="shared-with-me-list">
+                    {sharedWithMe.map((item) => (
+                      <li key={item.id}>
+                        <button
+                          type="button"
+                          className="shared-with-me-item"
+                          onClick={() => {
+                            void loadWorkflowById(item.id);
+                            setActiveMode("editor");
+                          }}
+                        >
+                          <span className="shared-with-me-name">{item.name}</span>
+                          <span className="settings-chip">{item.effectiveAccess === "execute" ? "Can view and run" : "Can view"}</span>
+                          <span className="settings-muted">{projects.find((project) => project.id === item.projectId)?.name ?? item.projectId}</span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
             </section>
           )}
 
@@ -5494,11 +5666,13 @@ function StudioApp() {
                 setPaletteInsertSource(null);
               }}
               onOpenNodeDrawer={() => {
+                if (editDisabledReason) return;
                 setNodeDrawerContext(null);
                 setPaletteInsertSource(null);
                 setShowNodeDrawer(true);
               }}
               onInsertFromHandle={(nodeId, handle, position) => {
+                if (editDisabledReason) return;
                 setNodeDrawerContext(null);
                 setPaletteInsertSource({ nodeId, handle, position });
                 setShowNodeDrawer(true);
@@ -5526,7 +5700,10 @@ function StudioApp() {
               onInit={setReactFlowInstance}
               onOpenNodeConfig={openNodeConfig}
               reactFlowInstance={reactFlowInstance}
+              editDisabledReason={editDisabledReason}
+              runDisabledReason={runDisabledReason}
               onClearCanvas={() => {
+                if (editDisabledReason) return;
                 if (nodes.length === 0 && edges.length === 0) return;
                 const count = nodes.length;
                 const confirmed = window.confirm(
@@ -6168,6 +6345,20 @@ function StudioApp() {
         </main>
       </div>
 
+      {importConflict ? (
+        <ImportConflictDialog
+          fileName={importConflict.fileName}
+          importedName={importConflict.preview.workflow.name.replace(/ \(imported\)$/, "")}
+          existing={importConflict.preview.existing}
+          diff={importConflict.preview.diff}
+          canReplace={importConflict.preview.canReplace !== false}
+          busy={busy}
+          error={importConflict.error}
+          onConfirm={(choice) => void confirmImportConflict(choice)}
+          onClose={() => setImportConflict(null)}
+        />
+      ) : null}
+
       <ExternalImportDialog
         open={externalImportOpen}
         initialSource={externalImportSource}
@@ -6277,6 +6468,7 @@ function StudioApp() {
           mcpServerDefinitions={mcpServerDefinitions}
           onClose={() => setEditingNodeId(null)}
           onSave={saveNodeConfig}
+          readOnlyReason={editDisabledReason}
           onExecuteStep={() => {
             void handleExecute({ startNodeId: editingNode.id, runMode: "single_node" });
           }}

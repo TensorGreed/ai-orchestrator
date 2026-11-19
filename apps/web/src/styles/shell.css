@@ -361,12 +361,13 @@ body {
   transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 
-.hud-btn:hover {
+.hud-btn:hover:not([aria-disabled="true"]) {
   border-color: var(--line-strong);
   background: var(--bg-elev-2);
 }
 
-.hud-btn:disabled {
+.hud-btn:disabled,
+.hud-btn[aria-disabled="true"] {
   opacity: 0.5;
   cursor: not-allowed;
 }
@@ -666,12 +667,13 @@ body {
   transition: background var(--dur) var(--ease), transform var(--dur) var(--ease);
 }
 
-.hud-run:hover:not(:disabled) {
+.hud-run:hover:not(:disabled):not([aria-disabled="true"]) {
   background: var(--accent-strong);
   transform: translateY(-1px);
 }
 
-.hud-run:disabled {
+.hud-run:disabled,
+.hud-run[aria-disabled="true"] {
   opacity: 0.55;
   cursor: not-allowed;
 }

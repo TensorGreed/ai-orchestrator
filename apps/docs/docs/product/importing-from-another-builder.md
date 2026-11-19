@@ -23,7 +23,7 @@ The converter is pure: it never contacts the source system and never reads crede
    - **Tidy layout** re-flows the imported graph into stages.
    - **Validate** saves pending edits and runs graph validation, listing any issues with links to the nodes involved.
 
-The checklist stays with the workflow in your browser until you dismiss it, so you can leave for the Secrets or Variables page and come back. The Import JSON entry also recognises these exports and routes them through the same preview, while L2M's own exports import directly.
+The checklist stays with the workflow in your browser until you dismiss it, so you can leave for the Secrets or Variables page and come back. The Import JSON entry also recognises these exports and routes them through the same preview, while L2M's own exports import directly as a new workflow. When an L2M export has the id of a workflow you can see, the studio asks first: import it as a new workflow (the default), or replace that workflow, with a summary of the nodes and connections the replace adds, removes and changes.
 
 ## Endpoint
 

@@ -74,6 +74,11 @@ const PROJECT_ROLE_PERMISSIONS: Record<ProjectRole, Permission[]> = {
   viewer: ["workflow:read", "secret:read"]
 };
 
+/** v78 — whether a global role may run workflows (operator and up): the cap on an execute user share. */
+export function roleMayRunWorkflows(role: UserRole): boolean {
+  return (GLOBAL_ROLE_PERMISSIONS[role] ?? []).includes("workflow:execute");
+}
+
 // Workflow/secret/share actions the global role is allowed for legacy callers without a project assignment.
 const GLOBAL_ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   admin: ALL_PERMISSIONS,
@@ -342,9 +347,40 @@ export class RbacService {
     return map;
   }
 
+  /**
+   * v78 — what a workflow's share with this person gives them: `read`, `execute` or nothing. A share never gives more
+   * than the person's own role: an execute share runs only for a role that may run workflows (operator and up), so a
+   * viewer's execute share reads. It never gives write. A request with an API key limited to projects gets nothing
+   * from a share outside them.
+   */
+  async userShareAccess(user: SafeUser, workflow: { id: string; projectId?: string | null }): Promise<"read" | "execute" | null> {
+    if (user.projectScope && !user.projectScope.includes(workflow.projectId ?? DEFAULT_PROJECT_ID)) return null;
+    const share = await this.store.getWorkflowUserShare(workflow.id, user.id);
+    if (!share) return null;
+    return share.accessLevel === "execute" && roleMayRunWorkflows(user.role) ? "execute" : "read";
+  }
+
+  async shareWorkflowWithUser(input: { workflowId: string; userId: string; accessLevel: "read" | "execute"; sharedBy?: string | null }): Promise<boolean> {
+    return await this.store.upsertWorkflowUserShare(input);
+  }
+
+  async unshareWorkflowWithUser(workflowId: string, userId: string): Promise<boolean> {
+    return await this.store.removeWorkflowUserShare(workflowId, userId);
+  }
+
+  async listWorkflowUserShares(workflowId: string) {
+    return await this.store.listWorkflowUserShares(workflowId);
+  }
+
   async canAccessWorkflow(user: SafeUser, workflow: { id: string; projectId?: string }, permission: Permission): Promise<boolean> {
     const owningProject = workflow.projectId ?? DEFAULT_PROJECT_ID;
     if (await this.can(user, owningProject, permission)) return true;
+
+    // v78 — shared with this person: read, or run when the share and their role allow it. Never write.
+    if (permission === "workflow:read" || permission === "workflow:execute") {
+      const shared = await this.userShareAccess(user, workflow);
+      if (shared && (permission === "workflow:read" || shared === "execute")) return true;
+    }
 
     // Check if the workflow is shared to any of the user's projects. Running
     // it through an execute share needs execute in that project, not only read.

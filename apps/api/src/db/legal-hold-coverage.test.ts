@@ -114,6 +114,7 @@ const NOT_HOLDABLE: Record<string, string> = {
   deleteCustomRole: "configuration",
   deleteSsoGroupMapping: "configuration",
   removeWorkflowShare: "sharing",
+  removeWorkflowUserShare: "sharing",
   removeSecretShare: "sharing",
   deleteTemplate: "templates",
   deleteFolder: "folders",

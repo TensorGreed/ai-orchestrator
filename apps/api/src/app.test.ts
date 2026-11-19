@@ -613,7 +613,16 @@ describe("auth + rbac API", () => {
         user_prompt: "user"
       }
     });
-    expect(operatorWebhookExecute.statusCode).toBe(403);
+    // Operators run the saved workflow with their input (they have workflow:execute); a graph sent along stays a builder's.
+    expect(operatorWebhookExecute.statusCode).not.toBe(401);
+    expect(operatorWebhookExecute.statusCode).not.toBe(403);
+    const operatorWebhookGraph = await context.app.inject({
+      method: "POST",
+      url: "/api/webhooks/execute",
+      headers: { cookie: sessionCookies.operator },
+      payload: { workflow_id: "wf-builder-create", nodes: [] }
+    });
+    expect(operatorWebhookGraph.statusCode).toBe(403);
 
     const adminCreateAdmin = await context.app.inject({
       method: "POST",

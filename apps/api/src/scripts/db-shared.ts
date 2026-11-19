@@ -91,6 +91,7 @@ export const EXPORTED_TABLES = [
   "workflows",
   "workflow_versions",
   "workflow_shares",
+  "workflow_user_shares",
   "workflow_templates",
   // Secrets + sharing
   "secrets",

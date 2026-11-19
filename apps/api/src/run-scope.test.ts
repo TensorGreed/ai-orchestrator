@@ -201,6 +201,17 @@ describe("run scope: secrets", () => {
     expect(resolved).toEqual([]);
   });
 
+  it("an execute share with the person lets their run use the workflow's secrets (v78)", async () => {
+    const { scope, workflows } = scopeFixture({
+      userMayRunViaShare: async (actor, workflow) => actor.id === "u-consumer" && workflow.id === "b-1"
+    });
+    const consumer = user("builder", "u-consumer");
+    expect(await scope.canUseSecretFor(workflows["b-1"]!, consumer, "s-b")).toBe(true);
+    // Only for that workflow, and only for that person.
+    expect(await scope.canUseSecretFor(workflows["b-read-share"]!, consumer, "s-b")).toBe(false);
+    expect(await scope.canUseSecretFor(workflows["b-1"]!, user("builder", "u-no-secrets"), "s-b")).toBe(false);
+  });
+
   it("the run's user carries over to a same-project child only", async () => {
     const { scope, workflows } = scopeFixture();
     const parent = scope.dependenciesFor(workflows["a-1"]!, { actor: user("operator", "u-no-secrets") });

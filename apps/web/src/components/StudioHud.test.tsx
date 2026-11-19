@@ -70,6 +70,26 @@ function makeProps(overrides: Partial<Parameters<typeof StudioHud>[0]> = {}): Pa
 }
 
 describe("StudioHud", () => {
+  it("disables Save and Run with the reason as tooltip when you cannot use them", async () => {
+    const onSave = vi.fn();
+    const onRun = vi.fn();
+    render(
+      <StudioHud
+        {...makeProps({ onSave, onRun, saveDisabledReason: "You have the viewer role", runDisabledReason: "Running needs the builder role" })}
+      />
+    );
+    const save = screen.getByRole("button", { name: /^Save/ });
+    const run = screen.getByRole("button", { name: "Run workflow" });
+    expect(save).toHaveAttribute("aria-disabled", "true");
+    expect(save).toHaveAttribute("title", "You have the viewer role");
+    expect(run).toHaveAttribute("aria-disabled", "true");
+    expect(run).toHaveAttribute("title", "Running needs the builder role");
+    await userEvent.click(save);
+    await userEvent.click(run);
+    expect(onSave).not.toHaveBeenCalled();
+    expect(onRun).not.toHaveBeenCalled();
+  });
+
   it("renders the breadcrumb with an editable name and the workflow picker in editor mode", () => {
     render(<StudioHud {...makeProps()} />);
 
