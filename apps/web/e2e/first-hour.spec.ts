@@ -6,7 +6,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
  * still be undone; an LLM Call added with an output's + is connected and starts on Echo; a node's Error output has a
  * + that connects after it; and a draft with unfinished settings and Error output notes saves and lists both. (A
  * workflow stored with invalid error settings is covered by the API's draft-save tests and ErrorOutput.test.tsx: the
- * API refuses to store one now.)
+ * API refuses to store one now.) Undo after a run keeps the run's results on the canvas.
  * No model server is contacted (a request to a local model port fails the test). Everything it makes is removed.
  */
 
@@ -214,5 +214,47 @@ test.describe("first hour", () => {
     await expect(banner).toContainText("nothing is connected to this node's Error output");
     await expect(banner).toContainText("Unfinished draft");
     await page.screenshot({ path: path.join(SHOT_DIR, "draft-banner-error-output.png") });
+  });
+
+  test("undo after a run steps back over the edit and keeps the run's results on the canvas", async ({ page }) => {
+    await openStudio(page);
+    const id = `wf-e2e-first-hour-undo-run-${Date.now()}`;
+    made.push(id);
+    await createWorkflow(page, {
+      id,
+      name: `E2E First hour undo run ${id}`,
+      nodes: [
+        { id: "start", type: "manual_trigger", name: "Start", position: { x: 60, y: 160 }, config: {} },
+        { id: "shape", type: "set_node", name: "Shape", position: { x: 380, y: 160 }, config: { assignments: [{ key: "greeting", valueTemplate: "hi" }] } }
+      ],
+      edges: [{ id: "e1", source: "start", target: "shape" }]
+    });
+    // Debug mode on, so a run's output preview shows under each node.
+    await page.goto(`/?workflowId=${encodeURIComponent(id)}&mode=editor`);
+    await expect(page.getByLabel("Workflow name")).toBeVisible({ timeout: 60_000 });
+    const debugOff = page.getByRole("button", { name: "Debug mode: OFF" });
+    if (await debugOff.isVisible()) await debugOff.click();
+    await page.getByRole("button", { name: "Fit", exact: true }).click();
+    await page.waitForTimeout(400);
+    const shape = canvasNode(page, "Shape");
+    const start = canvasNode(page, "Start");
+    // Measured against Start: a run can open panels that shift the whole canvas on screen.
+    const offset = async () => Math.round((await shape.boundingBox())!.y - (await start.boundingBox())!.y);
+    const offsetBefore = await offset();
+    const before = (await shape.boundingBox())!;
+    // An edit (a move), then a run.
+    await page.mouse.move(before.x + 40, before.y + 20);
+    await page.mouse.down();
+    await page.mouse.move(before.x + 40, before.y + 160, { steps: 8 });
+    await page.mouse.up();
+    await expect.poll(offset).toBeGreaterThan(offsetBefore + 60);
+    await page.getByRole("banner").getByRole("button", { name: /^Run/ }).click();
+    await expect(page.locator(".hud-run-status .hud-run-label")).toContainText("last run", { timeout: 30_000 });
+    await expect(shape.getByTestId("node-run-preview")).toBeVisible({ timeout: 30_000 });
+    // Undo moves it back; the run's preview stays.
+    await page.locator(".react-flow__pane").click({ position: { x: 8, y: 8 } });
+    await page.keyboard.press("Control+z");
+    await expect.poll(offset).toBeLessThan(offsetBefore + 20);
+    await expect(shape.getByTestId("node-run-preview")).toBeVisible();
   });
 });

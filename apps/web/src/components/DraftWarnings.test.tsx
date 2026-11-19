@@ -69,4 +69,14 @@ describe("DraftWarnings", () => {
     render(<DraftWarnings issues={[issues[1]!]} nodeLabel={() => undefined} onDismiss={() => undefined} />);
     expect(screen.getByTestId("draft-warnings")).not.toHaveTextContent("Unfinished draft");
   });
+
+  it("offers to remove invalid stored error settings when the list names some, and calls back on click", async () => {
+    const onRemove = vi.fn();
+    const invalid = [{ code: "invalid_error_config", message: "Error settings have invalid values (maxRetries).", nodeId: "http-1", severity: "warning" as const }];
+    const { rerender } = render(<DraftWarnings issues={invalid} nodeLabel={() => "Call API"} onRemoveInvalidErrorConfig={onRemove} onDismiss={() => undefined} />);
+    await userEvent.click(screen.getByRole("button", { name: "Remove the invalid error settings" }));
+    expect(onRemove).toHaveBeenCalledTimes(1);
+    rerender(<DraftWarnings issues={issues} nodeLabel={() => undefined} onRemoveInvalidErrorConfig={onRemove} onDismiss={() => undefined} />);
+    expect(screen.queryByRole("button", { name: "Remove the invalid error settings" })).toBeNull();
+  });
 });

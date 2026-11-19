@@ -352,6 +352,12 @@ export type NodeExecutionStatus =
 
 export type WorkflowExecutionStatus = "success" | "error" | "partial" | "waiting_approval" | "canceled";
 
+/** A run whose called workflow's live version is unfinished (a paused trigger): a stable code for API callers. */
+export const WORKFLOW_UNFINISHED_CODE = "workflow_unfinished";
+
+/** Error codes a run passes on to API callers (`errorCode`, a webhook's `code`). Other codes stay internal. */
+export const PUBLIC_RUN_ERROR_CODES: ReadonlySet<string> = new Set([WORKFLOW_UNFINISHED_CODE]);
+
 export interface NodeExecutionResult {
   nodeId: string;
   status: NodeExecutionStatus;

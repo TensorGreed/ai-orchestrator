@@ -19,6 +19,7 @@ import {
   editorRunPrompts,
   nodeDefinitions,
   pickDefaultModelProvider,
+  repairNodeErrorConfig,
   withDefaultModelProvider,
   type Folder,
   type McpElicitationView,
@@ -1599,7 +1600,16 @@ function StudioApp() {
     (snapshot: { nodes: EditorNode[]; edges: Edge[] } | null) => {
       if (!snapshot) return;
       suppressHistoryRef.current = true;
-      setNodes(snapshot.nodes);
+      // A snapshot holds the graph, not the run: each node keeps the run status, preview and telemetry it shows now.
+      setNodes((current) => {
+        const live = new Map(current.map((node) => [node.id, node.data as EditorNodeData]));
+        return snapshot.nodes.map((node) => {
+          const now = live.get(node.id);
+          if (!now) return node;
+          const { executionStatus, executionPreview, telemetry, liveStartedAtMs, pinned, labelBadge } = now;
+          return { ...node, data: { ...node.data, executionStatus, executionPreview, telemetry, liveStartedAtMs, pinned, labelBadge } };
+        });
+      });
       setEdges(snapshot.edges);
       setTimeout(() => {
         suppressHistoryRef.current = false;
@@ -1756,6 +1766,27 @@ function StudioApp() {
 
   // What the saved workflow still lacks (a draft saves with unfinished node settings), for the editor's notice.
   const [draftIssues, setDraftIssues] = useState<{ workflowId: string; issues: WorkflowValidationIssue[]; liveTriggersPaused: boolean } | null>(null);
+  // A workflow stored before error settings were checked can hold invalid values: runs ignore them, but a save (and so
+  // the editor's Run) refuses them. One click strips them from every node, keeping each node's valid values.
+  const removeInvalidErrorConfigs = useCallback(() => {
+    pushHistorySnapshot();
+    setNodes((current) =>
+      current.map((node) => {
+        const extras = (node.data as EditorNodeData).nodeExtras;
+        const repair = repairNodeErrorConfig(extras?.errorConfig);
+        if (!extras || repair.invalidFields.length === 0) return node;
+        const { errorConfig: _invalid, ...rest } = extras;
+        const nodeExtras = repair.errorConfig ? { ...rest, errorConfig: repair.errorConfig } : rest;
+        const data = { ...(node.data as EditorNodeData) };
+        if (Object.keys(nodeExtras).length > 0) data.nodeExtras = nodeExtras;
+        else delete data.nodeExtras;
+        return { ...node, data };
+      })
+    );
+    setDraftIssues((current) =>
+      current ? { ...current, issues: current.issues.filter((issue) => issue.code !== "invalid_error_config") } : current
+    );
+  }, [pushHistorySnapshot, setNodes]);
   const draftIssuesWorkflowIdRef = useRef<string | null>(null);
   useEffect(() => {
     setDraftIssues((current) => (current && current.workflowId !== currentWorkflow.id ? null : current));
@@ -5122,6 +5153,7 @@ function StudioApp() {
               liveTriggersPaused={draftIssues.liveTriggersPaused}
               nodeLabel={(nodeId) => (nodes as EditorNode[]).find((node) => node.id === nodeId)?.data.label}
               onSelectNode={openNodeConfig}
+              onRemoveInvalidErrorConfig={removeInvalidErrorConfigs}
               onDismiss={() => setDraftIssues(null)}
             />
           ) : null}

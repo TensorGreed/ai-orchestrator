@@ -518,6 +518,8 @@
 /* Error output (On Error = Execute Fallback Branch): under a card's right edge, on a hub's right side below the main output. */
 .wf-error-output {
   position: absolute;
+  /* Above the run preview (5) and telemetry pills (4), so its handle and + stay clickable after a run. */
+  z-index: 6;
   width: 24px;
   height: 0;
   pointer-events: none;
@@ -3158,4 +3160,13 @@ button.wf-mcp-chip:focus-visible {
 }
 .run-picker-error {
   color: var(--err);
+}
+
+/* A card with an Error output: its run preview starts below the output's label and +, and its telemetry pills move
+   left of them. */
+.react-flow__node:has(.wf-error-output-card) .wf-node-debug-preview {
+  top: calc(100% + 34px);
+}
+.react-flow__node:has(.wf-error-output-card) .wf-node-telemetry {
+  right: 76px;
 }

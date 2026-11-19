@@ -8,6 +8,8 @@ interface DraftWarningsProps {
   /** The node's name on the canvas, when the issue names a node that is still there. */
   nodeLabel: (nodeId: string) => string | undefined;
   onSelectNode?: (nodeId: string) => void;
+  /** Removes stored error settings with invalid values from every node (offered when the list names some). */
+  onRemoveInvalidErrorConfig?: () => void;
   onDismiss: () => void;
 }
 
@@ -34,8 +36,9 @@ function IssueLine({ issue, nodeLabel, onSelectNode }: { issue: WorkflowValidati
  * What a saved workflow still lacks. A draft saves with unfinished node settings; each one stops a run until it is
  * fixed. Notes (such as having no Output node) do not stop a run.
  */
-export function DraftWarnings({ issues, liveTriggersPaused, nodeLabel, onSelectNode, onDismiss }: DraftWarningsProps) {
+export function DraftWarnings({ issues, liveTriggersPaused, nodeLabel, onSelectNode, onRemoveInvalidErrorConfig, onDismiss }: DraftWarningsProps) {
   const { toFix, notes } = splitDraftIssues(issues);
+  const hasInvalidErrorConfig = (issues ?? []).some((issue) => issue.code === "invalid_error_config");
   if (toFix.length === 0 && notes.length === 0 && !liveTriggersPaused) return null;
   return (
     <div className="warn-banner global-banner draft-warnings" role="status" data-testid="draft-warnings">
@@ -65,6 +68,14 @@ export function DraftWarnings({ issues, liveTriggersPaused, nodeLabel, onSelectN
             <IssueLine key={`note-${issue.code}-${issue.nodeId ?? ""}-${index}`} issue={issue} nodeLabel={nodeLabel} onSelectNode={onSelectNode} />
           ))}
         </ul>
+      ) : null}
+      {hasInvalidErrorConfig && onRemoveInvalidErrorConfig ? (
+        <p>
+          <button type="button" className="auth-link-btn" onClick={onRemoveInvalidErrorConfig}>
+            Remove the invalid error settings
+          </button>{" "}
+          (from every node listed, keeping their valid values), then save or run.
+        </p>
       ) : null}
       <button type="button" className="auth-link-btn" onClick={onDismiss}>
         Dismiss

@@ -185,7 +185,7 @@ import { NO_CODE_SANDBOX_PLAN, codeNodesDisabledError, runJavaScriptCode, runPyt
 import { runWithSandboxOwner } from "./quickjs-sandbox";
 import { ownUsage, ownUsageOf, runAsUsageOwner, withoutUsage } from "./usage-ownership";
 import { sortWorkflowNodes, validateWorkflowGraph, computeDepthLevels } from "./validation";
-import { ErrorCategory, MODEL_NOT_ALLOWED_CODE, WorkflowError, remediationForCategory } from "@ai-orchestrator/shared";
+import { ErrorCategory, MODEL_NOT_ALLOWED_CODE, PUBLIC_RUN_ERROR_CODES, WorkflowError, remediationForCategory } from "@ai-orchestrator/shared";
 import { AgentGuardInterrupt, RUNTIME_INTERNAL_TOOL_NAMES, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
 import { ApprovalHandoffSignal, approvedHandoffKeysFromState, isApprovalHandoffSignal, withoutReservedKeys, type ApprovalHandoffRequest } from "./approval-handoff";
 import { executeGuardNodeStep } from "./guard-node";
@@ -10636,7 +10636,9 @@ async function executeWorkflowRun(
       const errorRetryable =
         error instanceof WorkflowError ? error.retryable : providerError?.retryable;
       // A stable code the error carries (such as `workflow_unfinished` for a refused sub-workflow), for API callers.
-      const errorCode = error instanceof WorkflowError && typeof error.metadata?.code === "string" ? error.metadata.code : undefined;
+      // Only codes meant for callers: a network error's system code (ECONNREFUSED and the like) stays internal.
+      const metadataCode = error instanceof WorkflowError ? error.metadata?.code : undefined;
+      const errorCode = typeof metadataCode === "string" && PUBLIC_RUN_ERROR_CODES.has(metadataCode) ? metadataCode : undefined;
       const errorFields = {
         error: errorMessage,
         errorCategory: errorCategoryName,

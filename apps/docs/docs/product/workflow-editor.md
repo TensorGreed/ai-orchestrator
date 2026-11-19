@@ -230,9 +230,10 @@ While the version production would run has unfinished settings (a saved draft wi
 triggers are paused and the editor says so above the canvas: a production webhook (`/webhook/:path`, after its own
 address and authentication checks), form submission, chat message or MCP trigger call answers `409` with
 `code: "workflow_unfinished"` and starts no run (the form page and the tool's manifest still show), and a schedule or
-app trigger skips its tick. Other production runs of that version (an API key's `/execute`, a sub-workflow call, a call through the MCP gateway)
-are refused with `409` and the same `code: "workflow_unfinished"`. The audit log records the pause once per version (`workflow.triggers_paused`, "Live triggers paused:
-unfinished settings"). Webhook run and the test webhook URL (`/webhook-test/:path`) still run the draft, so you can
+app trigger skips its tick. Other production runs of that version are refused with the same code: an API key's
+`/execute` answers `409`; a sub-workflow call fails the calling run with `errorCode: "workflow_unfinished"` (a webhook
+answer carries it as `code`); a call through the MCP gateway returns a tool error with `_meta.code`. The audit log
+records the pause once per version (`workflow.triggers_paused`, "Live triggers paused: unfinished settings"). Webhook run and the test webhook URL (`/webhook-test/:path`) still run the draft, so you can
 see where it stops. Save it finished and the triggers serve again.
 
 Non-connected nodes are not executed.

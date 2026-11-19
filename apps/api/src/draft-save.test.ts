@@ -542,6 +542,12 @@ describe("a workflow stored with an invalid errorConfig", () => {
     // The valid field survives the round trip; the invalid ones are left out.
     const copy = await context.store.getWorkflow("wf-hook-copy");
     expect(copy?.nodes.find((node) => node.id === "set")?.errorConfig).toEqual({ continueOnFail: true });
+    // The same through the workflow-object form of the import.
+    const asObject = { ...stored(), id: "wf-hook-object", name: "Object import" };
+    asObject.nodes = asObject.nodes.map((node) => (node.type === "webhook_input" ? { ...node, config: { ...node.config, path: "draft-orders-object" } } : node));
+    const importedObject = await context.app.inject({ method: "POST", url: "/api/workflows/import", headers: { cookie }, payload: { workflow: asObject } });
+    expect(importedObject.statusCode, importedObject.body).toBe(200);
+    expect((await context.store.getWorkflow("wf-hook-object"))?.nodes.find((node) => node.id === "set")?.errorConfig).toEqual({ continueOnFail: true });
 
     // Saving it unchanged is still refused, naming the field; removing the invalid values saves.
     const resaved = await context.app.inject({ method: "PUT", url: "/api/workflows/wf-hook-draft", headers: { cookie }, payload: stored() });

@@ -263,6 +263,9 @@ describe("network errors", () => {
     expect(http.error).toContain("ECONNREFUSED");
     for (const secret of ["abc123", "user:pw", "frag"]) expect(http.error).not.toContain(secret);
     expect(http.errorRemediation).not.toMatch(/file an issue/i);
+    // A system error code stays internal: only codes meant for callers become the run's errorCode.
+    expect(http.errorCode).toBeUndefined();
+    expect(result.errorCode).toBeUndefined();
   });
 
   it("name the URL when the request times out", async () => {

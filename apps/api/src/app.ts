@@ -88,7 +88,7 @@ import {
   WorkflowError,
   WORKFLOW_TOOL_ADAPTER_ID
 } from "@ai-orchestrator/shared";
-import { BUDGET_SCOPE_TYPES, isBudgetScopeType, readTraceCarrier, type BudgetScopeType } from "@ai-orchestrator/shared";
+import { BUDGET_SCOPE_TYPES, isBudgetScopeType, readTraceCarrier, repairWorkflowErrorConfigs, type BudgetScopeType } from "@ai-orchestrator/shared";
 import { CREDENTIAL_EXPIRING_EVENT, credentialRotateBodySchema, KEY_ROTATION_GRACE_HOURS } from "@ai-orchestrator/shared";
 import { CREDENTIAL_EXPIRY_SWEEP_INTERVAL_MS, CredentialExpiryService } from "./services/credential-expiry-service.js";
 import {
@@ -11299,7 +11299,8 @@ export async function createApp(
     try {
       const workflow = parsed.data.json
         ? importWorkflowFromJson(parsed.data.json)
-        : workflowSchema.parse(parsed.data.workflow);
+        : // Like the JSON path: invalid stored error settings are left out (and reported by validation), not refused.
+          workflowSchema.parse(repairWorkflowErrorConfigs(parsed.data.workflow).workflow);
 
       const validation = validateWorkflowGraph(workflow);
       const blocking = saveBlockingIssues(validation);

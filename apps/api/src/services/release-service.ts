@@ -119,7 +119,8 @@ import {
   type ReleaseVerdict,
   type Workflow,
   type WorkflowRelease,
-  type WorkflowValidationIssue
+  type WorkflowValidationIssue,
+  WORKFLOW_UNFINISHED_CODE
 } from "@ai-orchestrator/shared";
 import type { EvalFixtureRecord, ReleaseApprovalRequestRecord, ReleaseGateRecord, WorkflowReleaseRecord } from "../db/database.js";
 import type { AuditActor, AuditEventInput } from "./audit-service.js";
@@ -321,7 +322,7 @@ export const PAUSED_MESSAGE =
   "Live triggers of this workflow are paused: it has unfinished settings. Finish them in the editor and save to serve production again.";
 
 /** The `code` every production refusal of an unfinished version carries, so clients can tell it from other refusals. */
-export const WORKFLOW_UNFINISHED_CODE = "workflow_unfinished";
+export { WORKFLOW_UNFINISHED_CODE };
 
 /** The `code` for a refusal `productionRefusal` gave, when it has one (only the unfinished-version refusal does). */
 export function productionRefusalCode(refusal: string | null | undefined): typeof WORKFLOW_UNFINISHED_CODE | undefined {
