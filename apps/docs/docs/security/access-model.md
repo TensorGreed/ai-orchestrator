@@ -41,9 +41,9 @@ What each kind of access gives on one workflow.
 
 **Who may edit a workflow** is one rule everywhere: a global role of builder or higher **and** `workflow:write` on the
 workflow. It decides who runs the draft (on `/execute`, the manual trigger route and a retry), who may use the editor's
-run options, who may replay a run with its recorded MCP calls, whose runs use the workflow's session memory, and who
-sees the editor's edit controls. Golden-run replays and replay jobs are testing tools: they need builder and
-`workflow:execute`. An operator with an editor membership may not edit: the role caps it.
+run options, who may replay a run with its recorded MCP calls, who may replay golden runs and start replay jobs (they
+run the draft or a candidate), whose runs use the workflow's session memory, and who sees the editor's edit controls
+(including the run tape's replay controls). An operator with an editor membership may not edit: the role caps it.
 A builder who may only run a workflow (through an execute share to their project, say) is treated like an operator
 for it.
 

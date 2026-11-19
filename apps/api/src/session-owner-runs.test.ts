@@ -553,4 +553,36 @@ describe("one rule for who may edit: a builder role and workflow:write on the wo
     const ownerHistory = await call(context, "GET", `/api/executions/${ownerManual.json<{ executionId: string }>().executionId}`, owner.cookie);
     expect(ownerHistory.body).toContain("unreleased draft stop");
   });
+
+  it("golden-run replays and replay jobs run the draft, so a builder who may only run the workflow gets 403", async () => {
+    const context = await createTestContext({ PROJECT_ISOLATION: "strict" });
+    const owner = await login(context, "builder", "owner");
+    const guest = await login(context, "builder", "guest");
+    await context.store.upsertProject({ id: "team", name: "Team" });
+    await context.store.upsertProject({ id: "ops", name: "Ops" });
+    await context.store.upsertProjectRole({ userId: owner.id, projectId: "team", role: "project_admin" });
+    await context.store.upsertProjectRole({ userId: guest.id, projectId: "ops", role: "editor" });
+    expect((await call(context, "POST", "/api/workflows", owner.cookie, released("team", "golden"))).statusCode).toBe(200);
+    await context.store.upsertWorkflowShare({ workflowId: "wf-rel", projectId: "ops", accessLevel: "execute" });
+
+    const run = await call(context, "POST", "/api/workflows/wf-rel/execute", owner.cookie, { input: {} });
+    expect(run.statusCode, run.body).toBe(200);
+    const saved = await call(context, "POST", "/api/replay/recordings", owner.cookie, { executionId: run.json<{ executionId: string }>().executionId, name: "golden" });
+    expect(saved.statusCode, saved.body).toBeLessThan(300);
+    const recordingId = saved.json<{ recording: { id: string } }>().recording.id;
+    const set = await call(context, "POST", "/api/eval/datasets", owner.cookie, { name: "Set", workflowId: "wf-rel" });
+    expect(set.statusCode, set.body).toBeLessThan(300);
+    const setId = set.json<{ dataset: { id: string } }>().dataset.id;
+    expect((await call(context, "POST", `/api/eval/datasets/${setId}/recordings`, owner.cookie, { recordingId })).statusCode).toBeLessThan(300);
+
+    const guestReplay = await call(context, "POST", `/api/replay/recordings/${recordingId}/replay`, guest.cookie, {});
+    expect(guestReplay.statusCode, guestReplay.body).toBe(403);
+    expect(guestReplay.body).toContain("workflow:write");
+    const guestJob = await call(context, "POST", "/api/replay/runs", guest.cookie, { datasetIds: [setId] });
+    expect(guestJob.statusCode, guestJob.body).toBe(403);
+    expect((await call(context, "POST", "/api/replay/estimate", guest.cookie, { datasetIds: [setId] })).statusCode).toBe(403);
+
+    expect((await call(context, "POST", `/api/replay/recordings/${recordingId}/replay`, owner.cookie, {})).statusCode).toBe(200);
+    expect((await call(context, "POST", "/api/replay/runs", owner.cookie, { datasetIds: [setId] })).statusCode).toBe(202);
+  });
 });

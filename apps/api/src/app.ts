@@ -10898,7 +10898,7 @@ export async function createApp(
     if (!access.ok) return denyRunAccess(reply, access);
     const workflow = access.workflow;
     // v78 — the people it is shared with are listed to whoever may manage its shares.
-    const manages = user.role === "admin" || (await rbacService.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite"));
+    const manages = await rbacService.mayManageWorkflowShares(user, workflow);
     return {
       shares: await rbacService.listWorkflowShares(workflow.id),
       ...(manages ? { userShares: await workflowUserShareViews(workflow.id) } : {})
@@ -10999,8 +10999,7 @@ export async function createApp(
     // project member takes: project:invite on the owning project (and the same step-up for changes).
     const access = await runAccess.workflow(user, workflowId, "workflow:read");
     if (!access.ok) return access;
-    const owningProject = access.workflow.projectId ?? DEFAULT_PROJECT_ID;
-    if (user.role !== "admin" && !(await rbacService.can(user, owningProject, "project:invite"))) {
+    if (!(await rbacService.mayManageWorkflowShares(user, access.workflow))) {
       return { ok: false, status: 403, error: "Only users who may invite members to the workflow's project can share it with people or other projects" };
     }
     return { ok: true, workflow: access.workflow };
@@ -11316,10 +11315,9 @@ export async function createApp(
     const workflow = access.workflow;
     const canWrite = await runAccess.mayEdit(user, workflow);
     const canExecute = hasRequiredRole(user, ["operator"]) && (await runAccess.workflow(user, workflow.id, "workflow:execute")).ok;
-    const owningProject = workflow.projectId ?? DEFAULT_PROJECT_ID;
     // The same check as the share routes: sharing with people or with another project takes project:invite on the
     // owning project (workflowShareManager).
-    const canShare = user.role === "admin" || (await rbacService.can(user, owningProject, "project:invite"));
+    const canShare = await rbacService.mayManageWorkflowShares(user, workflow);
     // A share with the person is all they have: they see only their own runs of it.
     const ownRunsOnly = !(await runAccess.seesAllRuns(user, workflow));
     return { workflowId: workflow.id, role: user.role, canRead: true, canEdit: canWrite, canRun: canExecute, canShare, ownRunsOnly };
@@ -12660,7 +12658,7 @@ export async function createApp(
     loadWorkflow: async (id) => await store.getWorkflow(id) ?? null,
     loadRun: async (executionId) => await store.getExecutionHistory(executionId) ?? await store.getWorkflowExecutionState(executionId) ?? null,
     runAccess,
-    canSeeProjectAccounts: async (user, workflow) => user.role === "admin" || await rbacService.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite"),
+    canSeeProjectAccounts: async (user, workflow) => rbacService.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite"),
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     dispatch: dispatchApprovalResume,
     releases: releaseService,

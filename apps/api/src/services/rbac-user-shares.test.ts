@@ -38,6 +38,13 @@ describe("user shares in RBAC", () => {
     expect(await rbac.canAccessWorkflow(user("builder"), wf, "workflow:execute")).toBe(false);
   });
 
+  it("lets only those who may invite to the owning project manage shares, an admin key limited to other projects not", async () => {
+    expect(await rbac.mayManageWorkflowShares(user("admin"), wf)).toBe(true);
+    expect(await rbac.mayManageWorkflowShares(user("admin", { projectScope: ["team"] }), wf)).toBe(true);
+    expect(await rbac.mayManageWorkflowShares(user("admin", { projectScope: ["other"] }), wf)).toBe(false);
+    expect(await rbac.mayManageWorkflowShares(user("builder"), wf)).toBe(false);
+  });
+
   it("gives nothing to an API key limited to other projects", async () => {
     expect(await rbac.userShareAccess(user("operator", { projectScope: ["other"] }), wf)).toBeNull();
     expect(await rbac.userShareAccess(user("operator", { projectScope: ["team"] }), wf)).toBe("execute");

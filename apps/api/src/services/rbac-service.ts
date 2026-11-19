@@ -357,6 +357,15 @@ export class RbacService {
   }
 
   /**
+   * Who may share a workflow with people or with other projects, list its person shares and remove them: whoever may
+   * invite members to its owning project (`project:invite`). Admins have it; an API key limited to other projects
+   * does not, whatever its role.
+   */
+  async mayManageWorkflowShares(user: SafeUser, workflow: { projectId?: string | null }): Promise<boolean> {
+    return this.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite");
+  }
+
+  /**
    * True when the person has `permission` on this workflow only through a share with them: none in its project and none
    * through a share to a project. For `workflow:execute` the person's share must be an execute share (and only execute
    * shares to projects count); such runs keep session memory to the person (run-scope.ts). For `workflow:read` any
