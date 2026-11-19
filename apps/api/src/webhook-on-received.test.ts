@@ -27,7 +27,7 @@ interface TestContext {
 
 const contexts: TestContext[] = [];
 
-async function createTestContext(): Promise<TestContext> {
+async function createTestContext(env: Record<string, string> = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-on-received-"));
   const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
@@ -39,7 +39,8 @@ async function createTestContext(): Promise<TestContext> {
     RATE_LIMIT_ENABLED: "false",
     MCP_PROBE_INTERVAL_MS: "0",
     OLLAMA_BASE_URL: "http://127.0.0.1:9",
-    GIT_SYNC_WORKDIR: path.join(tempDir, "git")
+    GIT_SYNC_WORKDIR: path.join(tempDir, "git"),
+    ...env
   });
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
   const app = await createApp(config, store, new SecretService(store, config.SECRET_MASTER_KEY_BASE64), authService);
@@ -157,7 +158,25 @@ describe("Webhook Response Mode On Received", () => {
     expect(bound.statusCode, bound.body).toBe(200);
     const response = await context.app.inject({ method: "POST", url: "/webhook/orders-in", payload: { customer: "Grace" } });
     expect(response.statusCode, response.body).toBe(422);
-    expect(response.json()).toMatchObject({ code: "content_filter", executionId: expect.any(String) });
+    expect(response.json()).toMatchObject({ code: "content_filter" });
+    // A withheld acknowledgement starts no run.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const runs = await context.store.listExecutionHistory({ workflowId: "wf-received", limit: 10 } as never);
+    expect(Array.isArray(runs) ? runs : (runs as { items: unknown[] }).items).toHaveLength(0);
+  });
+
+  it("caps runs answered on receipt per instance (DISPATCH_MAX_WAITING): the next one is refused and its key is free again", async () => {
+    const context = await createTestContext({ DISPATCH_MAX_WAITING: "1" });
+    await context.store.upsertWorkflow(onReceivedWorkflow({ idempotencyEnabled: true, idempotencyHeaderName: "idempotency-key" }));
+    const send = (key: string) => context.app.inject({ method: "POST", url: "/webhook/orders-in", headers: { "idempotency-key": key }, payload: { customer: "Grace" } });
+    const first = await send("k-a");
+    expect(first.statusCode, first.body).toBe(202);
+    const busy = await send("k-b");
+    expect(busy.statusCode, busy.body).toBe(503);
+    const firstId = first.json<{ executionId: string }>().executionId;
+    await vi.waitFor(async () => expect((await context.store.getExecutionHistory(firstId))?.status).toBe("success"), { timeout: 10_000 });
+    // The refused request's key was given back, so its retry runs instead of being "already in progress".
+    await vi.waitFor(async () => expect((await send("k-b")).statusCode).toBe(202), { timeout: 5_000 });
   });
 
   it("a used-up block budget answers 402 and starts nothing", async () => {

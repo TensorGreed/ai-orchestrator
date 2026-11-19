@@ -2285,6 +2285,8 @@ export async function createApp(
   // Phase 13.1 — where runs execute (EXECUTION_DISPATCH): inline (default) here, or queue (cluster mode only) on the
   // queue's workers with this instance relaying events and results (services/run-dispatch.ts).
   const executionDispatch = resolveExecutionDispatch(config, { clusterMode });
+  /** Webhook runs answered On Received that run in this process and have not ended (capped like waiting runs). */
+  let onReceivedInFlight = 0;
   /** Events of the runs executing in this process, for a reattach on this instance (nothing is built while nobody listens). */
   const localRunEvents = new LocalRunEvents();
   /**
@@ -3007,7 +3009,7 @@ export async function createApp(
             // Recorded like any other run (Runs, budgets, the queue), under an id the failed run's record can name.
             // It belongs to whoever owns the failed run: their own-runs view and their sessions.
             const errorExecutionId = payload.executionId ? errorWorkflowRunId(payload.executionId) : crypto.randomUUID();
-            // A dispatch refused before the run started (a budget, a full or failing queue) gives the claim back, so the
+            // A dispatch refused before the run started (a budget, a queue that failed to take it) gives the claim back, so the
             // failed run executed again tries again.
             const releaseClaim = async (reason: string) => {
               if (!payload.executionId) return;
@@ -14372,28 +14374,43 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
         // Response Mode "On Received": the caller gets 202 with the run's id at once and the run goes on in the
         // background (inline, or on the queue). Nothing of the run is in the reply, so the run carries no response
-        // boundary; the reply itself still goes through the response rules.
+        // boundary; the reply itself still goes through the response rules, and a withheld reply starts no run.
         if (match.endpoint.config.responseMode === "onReceived") {
-          if (!budgetAdmitted) {
-            await admitRunBudget({ workflow: match.workflow, triggerType, triggeredBy: "webhook" });
-            budgetAdmitted = true;
-          }
+          // The key reserved above is given back whenever nothing was started, so a retry is not refused as in progress.
+          const releaseKey = async () => {
+            if (!security.idempotencyEnabled || !idempotencyKey) return;
+            await store.releaseWebhookIdempotencyPending({ endpointKey, idempotencyKey, requestHash: computeSha256Hex(rawBody) }).catch((error: unknown) => {
+              app.log.warn({ err: secretService.redact(error instanceof Error ? error.message : String(error)) }, "Could not free a webhook idempotency key");
+              return false;
+            });
+          };
           const acknowledgement = { executionId, status: "accepted" as const };
-          const now = new Date().toISOString();
-          const ackChecked = await checkRunResponse({
-            result: { workflowId: match.workflow.id, executionId, status: "success", startedAt: now, completedAt: now, nodeResults: [], output: acknowledgement },
-            boundary: { surface: "webhook" },
-            guard: guardService.runtimeFor({ executionId, workflowId: match.workflow.id, projectId: match.workflow.projectId ?? DEFAULT_PROJECT_ID }),
-            resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
-            executionId,
-            workflowId: match.workflow.id,
-            nodeId: match.endpoint.nodeId,
-            logger: (message, metadata) => app.log.warn({ workflowId: match.workflow.id, metadata }, message)
-          });
-          const ackStatus = responseWasWithheld(ackChecked) ? RESPONSE_WITHHELD_STATUS : 202;
-          const ackBody = responseWasWithheld(ackChecked) ? contentFilterEnvelope(executionId) : (ackChecked.output ?? acknowledgement);
+          let ackBody: unknown = acknowledgement;
           let started: Awaited<ReturnType<typeof runDispatcher.start>>;
           try {
+            if (!budgetAdmitted) {
+              await admitRunBudget({ workflow: match.workflow, triggerType, triggeredBy: "webhook" });
+              budgetAdmitted = true;
+            }
+            // Runs nobody waits on are capped per instance like runs callers wait on (DISPATCH_MAX_WAITING).
+            if (onReceivedInFlight >= executionDispatch.maxWaiting) throw new DispatchBusyError(executionDispatch.maxWaiting);
+            const now = new Date().toISOString();
+            const ackChecked = await checkRunResponse({
+              result: { workflowId: match.workflow.id, executionId, status: "success", startedAt: now, completedAt: now, nodeResults: [], output: acknowledgement },
+              boundary: { surface: "webhook" },
+              guard: guardService.runtimeFor({ executionId, workflowId: match.workflow.id, projectId: match.workflow.projectId ?? DEFAULT_PROJECT_ID }),
+              resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
+              executionId,
+              workflowId: match.workflow.id,
+              nodeId: match.endpoint.nodeId,
+              logger: (message, metadata) => app.log.warn({ workflowId: match.workflow.id, metadata }, message)
+            });
+            if (responseWasWithheld(ackChecked)) {
+              await releaseKey();
+              reply.code(RESPONSE_WITHHELD_STATUS);
+              return contentFilterEnvelope(undefined);
+            }
+            ackBody = ackChecked.output ?? acknowledgement;
             started = await runDispatcher.start(
               {
                 v: DISPATCH_SPEC_VERSION,
@@ -14410,7 +14427,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
                   systemPrompt: parsedInput.systemPrompt,
                   userPrompt: parsedInput.userPrompt,
                   sessionId: parsedInput.sessionId,
-                  executionTimeoutMs: parsedInput.executionTimeoutMs,
+                  // Nobody holds a connection for this run: a time limit from the body counts only from a verified caller.
+                  executionTimeoutMs: authResult.verified ? parsedInput.executionTimeoutMs : undefined,
                   executionId,
                   triggerType,
                   triggeredBy: "webhook",
@@ -14420,34 +14438,41 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
                 progress: { requestInput: parsedInput.body },
                 history: { requestInput: parsedInput.body }
               },
-              { pool: dispatchPoolOf(match.workflow), enforceBackpressure: true, admitted: true }
+              // Recorded as running when queued, so the id answered is in Runs at once.
+              { pool: dispatchPoolOf(match.workflow), enforceBackpressure: true, admitted: true, recordQueued: true }
             );
           } catch (error) {
-            // Refused before it started (a full pool, a failed enqueue): the key is free for a retry.
-            if (security.idempotencyEnabled && idempotencyKey) {
-              await store
-                .releaseWebhookIdempotencyPending({ endpointKey, idempotencyKey, requestHash: computeSha256Hex(rawBody) })
-                .catch(() => false);
-            }
+            // Refused before it started (a budget, a full pool, a failed enqueue, a reply check that threw).
+            await releaseKey();
             throw error;
           }
           if (!started.queued) {
-            started.done.catch((error: unknown) => {
-              app.log.warn(
-                { executionId, workflowId: match.workflow.id, err: secretService.redact(error instanceof Error ? error.message : String(error)) },
-                "A webhook run answered on receipt failed"
-              );
-            });
+            onReceivedInFlight += 1;
+            started.done
+              .catch((error: unknown) => {
+                app.log.warn(
+                  { executionId, workflowId: match.workflow.id, err: secretService.redact(error instanceof Error ? error.message : String(error)) },
+                  "A webhook run answered on receipt failed"
+                );
+              })
+              .finally(() => {
+                onReceivedInFlight -= 1;
+              });
           }
           if (security.idempotencyEnabled && idempotencyKey) {
-            await store.saveWebhookIdempotencyResult({
-              endpointKey,
-              idempotencyKey,
-              status: "success",
-              result: { __webhookHttpResponse: { statusCode: ackStatus, headers: {}, body: ackBody } }
-            });
+            // The run has started: a failed write only means a retry with this key is refused as in progress.
+            await store
+              .saveWebhookIdempotencyResult({
+                endpointKey,
+                idempotencyKey,
+                status: "success",
+                result: { __webhookHttpResponse: { statusCode: 202, headers: {}, body: ackBody } }
+              })
+              .catch((error: unknown) => {
+                app.log.warn({ executionId, err: secretService.redact(error instanceof Error ? error.message : String(error)) }, "Could not save a webhook idempotency result");
+              });
           }
-          reply.code(ackStatus);
+          reply.code(202);
           return ackBody;
         }
 

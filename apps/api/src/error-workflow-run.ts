@@ -59,7 +59,7 @@ type ClaimStore = Pick<Store, "saveWebhookIdempotencyPending" | "getWebhookIdemp
  * Claims the error workflow run of a failed run: true for the first caller, false when the failed run already started
  * its error workflow (the same run executed again, as after a lost lease). A store error other than the claim being
  * taken counts as claimed, so the error workflow still runs, as it did before claims. When the error workflow's dispatch
- * is then refused (a budget, a full or failing queue), the caller gives the claim back (releaseErrorWorkflowRun), so the
+ * is then refused (a budget, a queue that failed to take it), the caller gives the claim back (releaseErrorWorkflowRun), so the
  * failed run executed again tries again.
  */
 export async function claimErrorWorkflowRun(store: ClaimStore, failedExecutionId: string, now = Date.now()): Promise<boolean> {

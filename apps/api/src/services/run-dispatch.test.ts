@@ -368,6 +368,15 @@ describe("RunDispatcher", () => {
     if (!started.queued) expect(await started.done).toEqual({ queued: false, result });
   });
 
+  it("start records a queued run as running when asked (a webhook answered at once), and ends that record when the enqueue fails", async () => {
+    const recorded = make({ queue: true });
+    expect(await recorded.dispatcher.start(spec(), { pool: "default", recordQueued: true, admitted: true })).toEqual({ queued: true, deduplicated: false });
+    expect(recorded.calls).toEqual(["recordQueued", "enqueue:-", "queued"]);
+    const failed = make({ queue: true, enqueueError: new Error("db down") });
+    await expect(failed.dispatcher.start(spec(), { pool: "default", recordQueued: true })).rejects.toThrow("db down");
+    expect(failed.calls).toEqual(["recordQueued", "enqueue:-", "recordNotQueued:The run could not be queued: db down"]);
+  });
+
   it("a duplicate fire is reported and not counted as a dispatched run", async () => {
     const { dispatcher, calls } = make({ queue: true, duplicate: true });
     expect(await dispatcher.fire(spec(), { pool: "default", queueItemId: "trig:wf:n:abc" })).toEqual({ queued: true, deduplicated: true });

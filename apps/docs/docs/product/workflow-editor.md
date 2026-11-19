@@ -156,7 +156,7 @@ off. Its runs are listed in **Runs** like any other, with the trigger `error`: t
 **Error workflow ran → run …**, and the error workflow's run says which failed run it handled. Each belongs to the
 person who started the failed run, so someone who sees only their own runs sees the error runs of their runs. An
 error workflow that fails does not start another one, and a failed run starts its error workflow once, even if it runs
-again (unless a budget or a full queue refused that error run: then it is tried again).
+again (unless a used-up budget refused that error run, or the queue failed to take it: then it is tried again).
 
 ## Running from the editor
 
@@ -290,8 +290,10 @@ sub-workflows, schedules) keep their Output node's result.
 `{"executionId": "…", "status": "accepted"}`, on the webhook's URL and on `/webhook-test/`. The run goes on in the
 background (on a worker when runs are queued) and is listed in **Runs** under that id, where its result is. Use it
 for callers that must not wait, such as a service that retries a slow reply. Content rules on responses check this
-reply too, an idempotency key answers a retry with the same `202`, and a used-up block budget or a full queue is still
-refused before anything runs. `POST /api/webhooks/execute` always waits for the run.
+reply too (a withheld reply starts no run), an idempotency key answers a retry with the same `202`, and a used-up block
+budget, a full queue or too many such runs at once on the instance (`DISPATCH_MAX_WAITING`, `503`) is refused before
+anything runs. A time limit in the request body counts only for a caller its token or signature verified.
+`POST /api/webhooks/execute` always waits for the run.
 
 ## Validation behavior
 

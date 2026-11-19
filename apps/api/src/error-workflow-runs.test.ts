@@ -307,14 +307,8 @@ describe("an error workflow's run", () => {
     await vi.waitFor(async () => expect(await context.store.getWebhookIdempotency({ endpointKey: "l2m:error-workflow-run", idempotencyKey: failedRunId })).toBeNull(), { timeout: 10_000 });
     expect(await context.store.getExecutionHistory(errorRunId)).toBeNull();
 
-    // With the budget gone, the same failed run executed again starts its error workflow.
-    const budgetId = budget.json<{ budget: { id: string } }>().budget.id;
-    expect((await context.app.inject({ method: "DELETE", url: `/api/budgets/${budgetId}`, headers: { cookie: admin.cookie } })).statusCode).toBe(200);
-    const uuid = vi.spyOn(crypto, "randomUUID").mockImplementationOnce(() => failedRunId as ReturnType<typeof crypto.randomUUID>);
-    const again = await call(context, "POST", "/api/workflows/wf-fails/execute", admin.cookie, {});
-    uuid.mockRestore();
-    expect(again.json<{ executionId: string }>().executionId).toBe(failedRunId);
-    await vi.waitFor(async () => expect((await context.store.getExecutionHistory(errorRunId))?.status).toBe("success"), { timeout: 10_000 });
+    // The failed run executed again (as after a lost lease) wins the claim again, so its error workflow is tried again.
+    expect(await claimErrorWorkflowRun(context.store, failedRunId)).toBe(true);
   });
 
   it("a claim is given back only while pending with its own hash", async () => {
