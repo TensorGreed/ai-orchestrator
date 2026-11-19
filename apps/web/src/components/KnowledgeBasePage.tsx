@@ -41,10 +41,10 @@ const EMBEDDER_OPTIONS: Array<{ value: string; label: string; hint: string }> = 
   { value: "token-embedder", label: "Token (built-in, demo only)", hint: "Zero-deps 64-d hash. Quality is poor — use only to demo the pipeline." },
   { value: "openai-embedder", label: "OpenAI (text-embedding-3-small)", hint: "Requires OPENAI_API_KEY or a key from Secrets." },
   { value: "azure-openai-embedder", label: "Azure OpenAI", hint: "Set the endpoint and deployment below." },
-  { value: "cohere-embedder", label: "Cohere (embed-english-v3.0)", hint: "Requires COHERE_API_KEY." },
-  { value: "mistral-embedder", label: "Mistral (mistral-embed)", hint: "Requires MISTRAL_API_KEY." },
-  { value: "google-vertex-embedder", label: "Google Vertex (text-embedding-004)", hint: "Requires GEMINI_API_KEY." },
-  { value: "huggingface-embedder", label: "HuggingFace (all-MiniLM-L6-v2)", hint: "Requires HUGGINGFACE_API_KEY." }
+  { value: "cohere-embedder", label: "Cohere (embed-english-v3.0)", hint: "Requires COHERE_API_KEY or a key from Secrets." },
+  { value: "mistral-embedder", label: "Mistral (mistral-embed)", hint: "Requires MISTRAL_API_KEY or a key from Secrets." },
+  { value: "google-vertex-embedder", label: "Google Vertex (text-embedding-004)", hint: "Requires GEMINI_API_KEY or a key from Secrets." },
+  { value: "huggingface-embedder", label: "HuggingFace (all-MiniLM-L6-v2)", hint: "Requires HUGGINGFACE_API_KEY or a key from Secrets." }
 ];
 
 const CHUNK_STRATEGIES: Array<{ value: ChunkStrategy; label: string; hint: string }> = [

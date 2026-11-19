@@ -47,7 +47,8 @@ const CHAT_MODEL_NODE_PROVIDERS: Record<string, string> = {
 const VECTOR_STORE_DEPENDENCIES: Record<string, { label: string; envVar?: string } | null> = {
   "in-memory": null,
   "in-memory-vector-store": null,
-  "knowledge-base": null,
+  // A knowledge base is built in, but one has to be created and filled first.
+  "knowledge-base": { label: "Knowledge base" },
   "pinecone-vector-store": { label: "Pinecone", envVar: "PINECONE_API_KEY" },
   "azure-ai-search-vector-store": { label: "Azure AI Search" },
   "qdrant-vector-store": { label: "Qdrant", envVar: "QDRANT_API_KEY" },
@@ -55,6 +56,17 @@ const VECTOR_STORE_DEPENDENCIES: Record<string, { label: string; envVar?: string
   "chroma-vector-store": { label: "Chroma" },
   "weaviate-vector-store": { label: "Weaviate" },
   "redis-vector-store": { label: "Redis Vector Search" }
+};
+
+/** Embedders a RAG node calls (`config.embedderId`); the token embedder is local. */
+const EMBEDDER_DEPENDENCIES: Record<string, { label: string; envVar?: string } | null> = {
+  "token-embedder": null,
+  "openai-embedder": { label: "OpenAI", envVar: "OPENAI_API_KEY" },
+  "azure-openai-embedder": { label: "Azure OpenAI" },
+  "cohere-embedder": { label: "Cohere", envVar: "COHERE_API_KEY" },
+  "mistral-embedder": { label: "Mistral", envVar: "MISTRAL_API_KEY" },
+  "google-vertex-embedder": { label: "Google Gemini", envVar: "GEMINI_API_KEY" },
+  "huggingface-embedder": { label: "HuggingFace", envVar: "HUGGINGFACE_API_KEY" }
 };
 
 const MCP_SERVER_DEPENDENCIES: Record<string, { label: string; envVar?: string } | null> = {
@@ -179,6 +191,22 @@ export function computeTemplateDependencies(rawWorkflow: unknown): TemplateDepen
       } else if (vsId) {
         add("vector_store", vsId);
       }
+    }
+
+    // 2b. The embedder of a RAG node (absent: the local token embedder).
+    if (type === "rag_retrieve") {
+      const embedderId = String(config.embedderId ?? "").trim();
+      if (embedderId in EMBEDDER_DEPENDENCIES) {
+        const dep = EMBEDDER_DEPENDENCIES[embedderId];
+        if (dep) add("provider", dep.label, dep.envVar);
+      } else if (embedderId) {
+        add("provider", embedderId);
+      }
+    }
+
+    // 2c. HTML-rendered PDFs need a Chromium for Playwright on the API host.
+    if (type === "pdf_output" && config.renderMode === "html") {
+      add("connector", "Chromium for PDF rendering", "PDF_CHROMIUM_EXECUTABLE_PATH");
     }
 
     // 3. MCP server adapter on mcp_tool nodes

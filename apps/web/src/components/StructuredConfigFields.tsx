@@ -17,6 +17,7 @@ import {
   settingText,
   withCaseValue,
   withOtherSettings,
+  keysEditedElsewhere,
   withSetting,
   type FormFieldRow,
   type FormFieldType,
@@ -48,6 +49,8 @@ export function SwitchCasesEditor({
   onChange: (next: SwitchCaseRow[]) => void;
 }) {
   const rows = readSwitchCases(cases);
+  // Rows from this index on were added in this edit: their output name may follow the value. Saved rows keep theirs.
+  const [newFrom, setNewFrom] = useState(rows.length);
   const duplicates = duplicateCaseLabels(rows, defaultLabel);
   const update = (index: number, row: SwitchCaseRow) => onChange(rows.map((entry, i) => (i === index ? row : entry)));
   return (
@@ -55,7 +58,7 @@ export function SwitchCasesEditor({
       <legend className="cfg-field-label">Cases</legend>
       <div className="cfg-tip">
         When the value equals a case, the run takes that case&apos;s output; otherwise the Default output. Renaming an output disconnects
-        its branch.
+        its branch; changing a value does not.
       </div>
       {rows.length > 0 ? (
         <div className="cfg-row cfg-row-head" aria-hidden="true">
@@ -66,9 +69,14 @@ export function SwitchCasesEditor({
       ) : null}
       {rows.map((row, index) => (
         <div key={index} className="cfg-row" role="group" aria-label={`Case ${index + 1}`}>
-          <input aria-label={`Case ${index + 1} value`} placeholder="complete" value={row.value} onChange={(event) => update(index, withCaseValue(row, event.target.value))} />
+          <input aria-label={`Case ${index + 1} value`} placeholder="complete" value={row.value} onChange={(event) => update(index, withCaseValue(row, event.target.value, index >= newFrom))} />
           <input aria-label={`Case ${index + 1} output`} placeholder={row.value || "output name"} value={row.label} onChange={(event) => update(index, { ...row, label: event.target.value })} />
-          <button type="button" className="mini-btn cfg-row-remove" aria-label={`Remove case ${index + 1}`} onClick={() => onChange(rows.filter((_, i) => i !== index))}>
+          <button type="button" className="mini-btn cfg-row-remove" aria-label={`Remove case ${index + 1}`}
+            onClick={() => {
+              if (index < newFrom) setNewFrom((current) => current - 1);
+              onChange(rows.filter((_, i) => i !== index));
+            }}
+          >
             ×
           </button>
         </div>
@@ -196,6 +204,9 @@ function ChoicesInput({ label, options, onChange }: { label: string; options: st
 
 export function FormFieldsEditor({ value, onChange }: { value: unknown; onChange: (next: Array<Record<string, unknown>>) => void }) {
   const rows = formFieldRowsOf(value);
+  // Fields from this index on were added in this edit: their name may follow the label. Saved fields keep their name,
+  // which the workflow reads them by.
+  const [newFrom, setNewFrom] = useState(rows.length);
   const unreadable = typeof value === "string" && value.trim() !== "" && rows.length === 0;
   const write = (next: FormFieldRow[]) => onChange(formFieldsOf(next));
   const update = (index: number, patch: Partial<FormFieldRow>) => write(rows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
@@ -221,8 +232,8 @@ export function FormFieldsEditor({ value, onChange }: { value: unknown; onChange
             value={row.label}
             onChange={(event) => {
               const label = event.target.value;
-              // The name follows the label until it is typed by hand.
-              const follows = !row.name || row.name === fieldNameFromLabel(row.label);
+              // On a new field the name follows the label until it is typed by hand.
+              const follows = index >= newFrom && (!row.name || row.name === fieldNameFromLabel(row.label));
               update(index, { label, ...(follows ? { name: fieldNameFromLabel(label) } : {}) });
             }}
           />
@@ -241,7 +252,12 @@ export function FormFieldsEditor({ value, onChange }: { value: unknown; onChange
             <label className="guard-check">
               <input type="checkbox" checked={row.required} onChange={(event) => update(index, { required: event.target.checked })} /> Required
             </label>
-            <button type="button" className="mini-btn cfg-row-remove" aria-label={`Remove field ${index + 1}`} onClick={() => write(rows.filter((_, i) => i !== index))}>
+            <button type="button" className="mini-btn cfg-row-remove" aria-label={`Remove field ${index + 1}`}
+              onClick={() => {
+                if (index < newFrom) setNewFrom((current) => current - 1);
+                write(rows.filter((_, i) => i !== index));
+              }}
+            >
               Remove
             </button>
           </div>
@@ -273,10 +289,23 @@ export function FormFieldsEditor({ value, onChange }: { value: unknown; onChange
 // ── Key/value settings ───────────────────────────────────────────────────────
 
 /** The settings the fields do not show, as JSON text to edit; committed when it parses to an object. */
-function OtherSettingsJson({ others, label, onCommit }: { others: Settings; label: string; onCommit: (next: Settings) => void }) {
+function OtherSettingsJson({
+  others,
+  label,
+  onCommit,
+  reservedKeys
+}: {
+  others: Settings;
+  label: string;
+  onCommit: (next: Settings) => void;
+  /** The keys of a parsed object this JSON cannot set (they have their own control). */
+  reservedKeys: (parsed: Settings) => string[];
+}) {
   const shown = Object.keys(others).length > 0 ? JSON.stringify(others, null, 2) : "";
   const [draft, setDraft] = useState(shown);
   const [error, setError] = useState("");
+  // Opened once when there is something to show; after that the user opens and closes it.
+  const [open, setOpen] = useState(Object.keys(others).length > 0);
   const lastCommitted = useRef(shown);
   useEffect(() => {
     if (shown !== lastCommitted.current) {
@@ -286,7 +315,7 @@ function OtherSettingsJson({ others, label, onCommit }: { others: Settings; labe
     }
   }, [shown]);
   return (
-    <details className="cfg-other-settings" open={Object.keys(others).length > 0 || undefined}>
+    <details className="cfg-other-settings" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary>{label}</summary>
       <label className="cfg-field">
         <span className="cfg-field-label">{label} (JSON)</span>
@@ -309,6 +338,11 @@ function OtherSettingsJson({ others, label, onCommit }: { others: Settings; labe
               const parsed: unknown = JSON.parse(next);
               if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
                 setError("Use a JSON object.");
+                return;
+              }
+              const reserved = reservedKeys(parsed as Settings);
+              if (reserved.length > 0) {
+                setError(`Set ${reserved.join(", ")} in ${reserved.length === 1 ? "its own field" : "their own fields"}, not here.`);
                 return;
               }
               setError("");
@@ -369,7 +403,11 @@ export function SettingsFields({
           </div>
         );
       })}
-      <OtherSettingsJson others={others} label={otherLabel} onCommit={(next) => onChange(withOtherSettings(settings, fields, next, hiddenKeys))} />
+      <OtherSettingsJson
+        others={others}
+        label={otherLabel}
+        reservedKeys={(parsed) => keysEditedElsewhere(parsed, fields, hiddenKeys)}
+        onCommit={(next) => onChange(withOtherSettings(settings, fields, next, hiddenKeys))} />
     </>
   );
 }

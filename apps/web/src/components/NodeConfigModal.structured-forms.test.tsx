@@ -57,14 +57,14 @@ describe("Switch cases form", () => {
     expect(screen.getByLabelText("Case 1 value")).toHaveValue("open");
     expect(screen.getByLabelText("Case 2 output")).toHaveValue("Finished");
 
-    // The output named after its value follows the value; a hand-written one stays.
+    // A saved case keeps its output (its branch is connected to it); a new case's output follows its value.
     fireEvent.change(screen.getByLabelText("Case 1 value"), { target: { value: "opened" } });
     fireEvent.change(screen.getByLabelText("Case 2 value"), { target: { value: "closed" } });
     await user.click(screen.getByRole("button", { name: "+ Add case" }));
     fireEvent.change(screen.getByLabelText("Case 3 value"), { target: { value: "stuck" } });
     expect(await savedConfig(onSave)).toMatchObject({
       cases: [
-        { value: "opened", label: "opened" },
+        { value: "opened", label: "open" },
         { value: "closed", label: "Finished" },
         { value: "stuck", label: "stuck" }
       ]
@@ -87,6 +87,11 @@ describe("Form Trigger fields form", () => {
     render(<NodeInspector {...propsFor("form_trigger", { path: "contact", fields: [{ name: "email", label: "Email", type: "email", required: true }] }, onSave)} />);
     expect(screen.queryByLabelText("Fields (JSON array)")).toBeNull();
     expect(screen.getByLabelText("Field 1 name")).toHaveValue("email");
+
+    // A saved field keeps its name when its label changes: the workflow reads it by that name.
+    fireEvent.change(screen.getByLabelText("Field 1 label"), { target: { value: "Email address" } });
+    expect(screen.getByLabelText("Field 1 name")).toHaveValue("email");
+    fireEvent.change(screen.getByLabelText("Field 1 label"), { target: { value: "Email" } });
 
     await user.click(screen.getByRole("button", { name: "+ Add field" }));
     fireEvent.change(screen.getByLabelText("Field 2 label"), { target: { value: "Pick a topic" } });
@@ -146,6 +151,13 @@ describe("RAG vector store settings form", () => {
     fireEvent.change(screen.getByLabelText("Model"), { target: { value: "text-embedding-3-large" } });
     fireEvent.change(screen.getByLabelText("Index name"), { target: { value: "" } });
     expect((await savedConfig(onSave)).vectorStoreConfig).toEqual({ namespace: "prod", model: "text-embedding-3-large" });
+
+    // A key with its own field is refused here with a message, not dropped silently; the panel stays open while typing.
+    const other = screen.getByLabelText("Other vector store settings (JSON)");
+    fireEvent.change(other, { target: { value: '{"namespace":"prod","indexName":"x"}' } });
+    expect(screen.getByText("Set indexName in its own field, not here.")).toBeInTheDocument();
+    fireEvent.change(other, { target: { value: "" } });
+    expect(other.closest("details")).toHaveAttribute("open");
   });
 
   it("has no fields for the built-in embedder and store", () => {

@@ -26,7 +26,10 @@ export function templateCompanions(workflowJson: string): Workflow[] {
   if (companions.length > MAX_TEMPLATE_COMPANIONS) {
     throw new Error(`A template may bring at most ${MAX_TEMPLATE_COMPANIONS} companion workflows.`);
   }
-  return companions.map((companion) => importWorkflowFromJson(JSON.stringify(companion)));
+  const workflows = companions.map((companion) => importWorkflowFromJson(JSON.stringify(companion)));
+  const ids = new Set(workflows.map((workflow) => workflow.id));
+  if (ids.size !== workflows.length) throw new Error("Each companion workflow of a template needs its own id.");
+  return workflows;
 }
 
 /** The workflow with each Execute Workflow / Workflow Tool reference found in `idMap` pointed at its new id. */

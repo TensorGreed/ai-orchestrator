@@ -32,6 +32,7 @@ describe("templateCompanions", () => {
     expect(() => templateCompanions(JSON.stringify({ ...exportOf("parent"), companions: [{ workflow: { id: "x" } }] }))).toThrow();
     const many = Array.from({ length: MAX_TEMPLATE_COMPANIONS + 1 }, (_, index) => exportOf(`c${index}`));
     expect(() => templateCompanions(JSON.stringify({ ...exportOf("parent"), companions: many }))).toThrow(/at most/);
+    expect(() => templateCompanions(JSON.stringify({ ...exportOf("parent"), companions: [exportOf("same"), exportOf("same")] }))).toThrow(/its own id/);
   });
 });
 

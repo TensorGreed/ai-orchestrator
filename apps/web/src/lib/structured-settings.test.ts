@@ -13,6 +13,7 @@ import {
   settingText,
   withCaseValue,
   withOtherSettings,
+  keysEditedElsewhere,
   withSetting
 } from "./structured-settings";
 
@@ -55,18 +56,21 @@ describe("editing settings", () => {
 
 describe("Switch cases", () => {
   it("reads objects and plain text cases", () => {
-    expect(readSwitchCases([{ value: "a", label: "A" }, "b", { value: 3 }, null])).toEqual([
+    expect(readSwitchCases([{ value: "a", label: "A" }, "b", { value: 3 }, null, { value: "c", label: "" }])).toEqual([
       { value: "a", label: "A" },
       { value: "b", label: "b" },
-      { value: "3", label: "" },
-      { value: "", label: "" }
+      // Saved without a label: drawn and routed by its value.
+      { value: "3", label: "3" },
+      { value: "", label: "" },
+      { value: "c", label: "" }
     ]);
     expect(readSwitchCases("nope")).toEqual([]);
   });
 
-  it("lets a label that matches the value follow it, and keeps a hand-written one", () => {
-    expect(withCaseValue({ value: "pos", label: "pos" }, "positive")).toEqual({ value: "positive", label: "positive" });
-    expect(withCaseValue({ value: "pos", label: "Happy" }, "positive")).toEqual({ value: "positive", label: "Happy" });
+  it("lets a new case's label follow its value, and keeps a saved case's label (its branch is connected to it)", () => {
+    expect(withCaseValue({ value: "pos", label: "pos" }, "positive", true)).toEqual({ value: "positive", label: "positive" });
+    expect(withCaseValue({ value: "pos", label: "Happy" }, "positive", true)).toEqual({ value: "positive", label: "Happy" });
+    expect(withCaseValue({ value: "pos", label: "pos" }, "positive")).toEqual({ value: "positive", label: "pos" });
   });
 
   it("finds labels used twice, the default output's included", () => {
@@ -106,5 +110,15 @@ describe("Form Trigger fields", () => {
   it("names a field after its label", () => {
     expect(fieldNameFromLabel("Your e-mail address")).toBe("your_e_mail_address");
     expect(fieldNameFromLabel("  ")).toBe("");
+  });
+});
+
+describe("keysEditedElsewhere", () => {
+  it("names the keys Other settings cannot set", () => {
+    expect(keysEditedElsewhere({ model: "x", extra: 1, secretRef: {}, knowledgeBaseId: "kb" }, [{ key: "model", label: "Model" }], ["secretRef"])).toEqual([
+      "model",
+      "secretRef",
+      "knowledgeBaseId"
+    ]);
   });
 });

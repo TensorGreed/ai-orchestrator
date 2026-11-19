@@ -32,7 +32,9 @@ The HTTP starters call the API's own sample endpoints, so they work with no netw
 | `POST /api/sample-data/notify` | `{ "delivered": true, "simulated": true, "received": <your JSON> }`: it stands in for a chat or email notification and sends nothing |
 | `GET` or `POST /api/sample-data/status/<code>` | That HTTP status, 200 to 599 |
 
-They need no sign-in, store nothing and answer the same to everyone. When the starters are loaded, their URLs get the API's own address (`http://127.0.0.1:<API_PORT>`, or `API_HOST` when the API listens on one address). If the deployment blocks private addresses for outbound requests (`OUTBOUND_DENY_PRIVATE=true`), add that address to `OUTBOUND_ALLOWLIST` or point the nodes at your own service.
+They need no sign-in, store nothing and answer the same to everyone. When the starters are loaded, their URLs get the API's own address (`http://127.0.0.1:<API_PORT>`, or `API_HOST` when the API listens on one address). If the deployment blocks private addresses for outbound requests (`OUTBOUND_DENY_PRIVATE=true`), add that address to `OUTBOUND_ALLOWLIST` or point the nodes at your own service. If `NETWORK_ALLOW_UI` limits which addresses may reach the studio, include `127.0.0.1`: the starters' requests carry no sign-in, so they are checked as studio traffic.
+
+Using the **Webhook** or **Form intake** starter makes its address live straight away, like any workflow without a release gate: anyone who can reach the API can call `/webhook/starter-reshape-…` or open `/api/forms/starter-contact-…`. Neither does anything outside the run. Delete the workflow when you are done trying it.
 
 The MCP starter uses the built-in sample MCP server (`mock-mcp`, with a calculator and a clock), and the search starter keeps its five help articles in the node and uses the local token embedder. That embedder is fine for a demo; pick a real embedder for real documents.
 

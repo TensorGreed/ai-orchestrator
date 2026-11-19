@@ -259,6 +259,40 @@ describe("starter templates", () => {
     const second = await useStarter("Call a sub-workflow");
     expect(first.companions[0]!.workflowId).not.toBe(second.companions[0]!.workflowId);
   });
+
+  it("removes the sub-workflow it made when saving the main workflow fails", async () => {
+    const { store } = context!;
+    const companions = async () => (await store.listWorkflows()).filter((workflow) => workflow.name === "Format a greeting (sub-workflow)").length;
+    const before = await companions();
+    const original = store.upsertWorkflow.bind(store);
+    store.upsertWorkflow = (async (workflow: Parameters<Store["upsertWorkflow"]>[0], options?: Parameters<Store["upsertWorkflow"]>[1]) => {
+      // The companion is saved first; the main workflow is the next save.
+      if (workflow.name !== "Format a greeting (sub-workflow)") throw new Error("disk full");
+      return original(workflow, options);
+    }) as Store["upsertWorkflow"];
+    try {
+      const template = (await starterTemplates()).find((entry) => entry.name === "Call a sub-workflow")!;
+      const used = await call("POST", `/api/templates/${template.id}/use`, {});
+      expect(used.statusCode).toBe(500);
+    } finally {
+      store.upsertWorkflow = original;
+    }
+    expect(await companions()).toBe(before);
+  });
+
+  it("seeding again leaves a user's own template with a starter's name alone", async () => {
+    const { store, baseUrl } = context!;
+    // The user's template is the only one with that name (as when it was made before the starters shipped).
+    const builtIn = (await store.listTemplates()).find((template) => template.name === "Call an MCP tool")!;
+    await store.deleteTemplate(builtIn.id);
+    const workflowJson = JSON.stringify({ id: "mine", name: "Call an MCP tool", nodes: [], edges: [] });
+    await store.upsertTemplate({ id: "user-own-template", name: "Call an MCP tool", description: "mine", category: "Mine", tags: [], author: "someone", workflowJson, nodeCount: 0 });
+    await seedTemplatesIfEmpty(store, workspaceRoot, { apiBaseUrl: baseUrl });
+    const own = await store.getTemplate("user-own-template");
+    expect(own?.category).toBe("Mine");
+    expect(own?.workflowJson).toBe(workflowJson);
+    expect((await store.getTemplate(builtIn.id))?.category).toBe(STARTER_TEMPLATE_CATEGORY);
+  });
 });
 
 describe("sample data routes", () => {

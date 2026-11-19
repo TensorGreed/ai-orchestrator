@@ -194,9 +194,23 @@ describe("the built-in templates and their model", () => {
     ]);
   });
 
-  it("does not count the built-in vector stores (in-memory, knowledge base) as a dependency", () => {
-    expect(computeTemplateDependencies(wf([{ type: "rag_retrieve", config: { vectorStoreId: "in-memory-vector-store" } }]))).toEqual([]);
-    expect(computeTemplateDependencies(wf([{ type: "rag_retrieve", config: { vectorStoreId: "knowledge-base" } }]))).toEqual([]);
+  it("does not count the in-memory store or the token embedder, but counts a knowledge base, a remote embedder and HTML PDFs", () => {
+    expect(computeTemplateDependencies(wf([{ type: "rag_retrieve", config: { vectorStoreId: "in-memory-vector-store", embedderId: "token-embedder" } }]))).toEqual([]);
+    expect(computeTemplateDependencies(wf([{ type: "rag_retrieve", config: { vectorStoreId: "knowledge-base" } }]))).toEqual([
+      { kind: "vector_store", label: "Knowledge base", envVar: undefined }
+    ]);
+    expect(computeTemplateDependencies(wf([{ type: "rag_retrieve", config: { embedderId: "cohere-embedder" } }]))).toEqual([
+      { kind: "provider", label: "Cohere", envVar: "COHERE_API_KEY" }
+    ]);
+    expect(computeTemplateDependencies(wf([{ type: "pdf_output", config: { renderMode: "html" } }]))).toEqual([
+      { kind: "connector", label: "Chromium for PDF rendering", envVar: "PDF_CHROMIUM_EXECUTABLE_PATH" }
+    ]);
+    expect(computeTemplateDependencies(wf([{ type: "pdf_output", config: { renderMode: "text" } }]))).toEqual([]);
+  });
+
+  it("lists the knowledge-base and HTML-PDF samples as needing setup", () => {
+    expect(sampleDependencies("rag-knowledge-base-flow.json").length).toBeGreaterThan(0);
+    expect(sampleDependencies("report-with-charts-flow.json").length).toBeGreaterThan(0);
   });
 
   it("counts the dependencies of the companion workflows a template brings", () => {

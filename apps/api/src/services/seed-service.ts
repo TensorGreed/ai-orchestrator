@@ -127,8 +127,9 @@ export async function seedTemplatesIfEmpty(store: Store, workspaceRoot: string, 
     for (const fileName of files) {
       const raw = fs.readFileSync(path.join(starterDir, fileName), "utf8").split(STARTER_API_BASE_TOKEN).join(apiBaseUrl);
       const workflow = importWorkflowFromJson(raw);
+      // Matched by its built-in id only, so a user's own template with the same name is never overwritten.
       await store.upsertTemplate({
-        id: existingTemplatesByName.get(workflow.name) ?? builtInTemplateId(fileName),
+        id: builtInTemplateId(fileName),
         name: workflow.name,
         description: workflow.description ?? "",
         category: STARTER_TEMPLATE_CATEGORY,

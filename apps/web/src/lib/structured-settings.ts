@@ -112,6 +112,12 @@ export function withOtherSettings(settings: Settings, fields: readonly SettingFi
   return { ...kept, ...extra };
 }
 
+/** Keys of `others` that "Other settings" cannot set, because a field (or another control) edits them. */
+export function keysEditedElsewhere(others: Settings, fields: readonly SettingField[], hidden: readonly string[] = []): string[] {
+  const shown = new Set([...fields.map((field) => field.key), ...hidden, ...HANDLED_ELSEWHERE]);
+  return Object.keys(others).filter((key) => shown.has(key));
+}
+
 /** A settings value as the text a field shows (a non-text value shows as JSON, so it is not lost silently). */
 export function settingText(settings: Settings, key: string): string {
   const value = settings[key];
@@ -134,17 +140,18 @@ export function readSwitchCases(value: unknown): SwitchCaseRow[] {
     const record = entry && typeof entry === "object" ? (entry as Record<string, unknown>) : {};
     return {
       value: record.value === undefined || record.value === null ? "" : String(record.value),
-      label: record.label === undefined || record.label === null ? "" : String(record.label)
+      // A case saved without a label is drawn (and routed) by its value, so it reads as its own label.
+      label: record.label === undefined || record.label === null ? (record.value === undefined || record.value === null ? "" : String(record.value)) : String(record.label)
     };
   });
 }
 
 /**
- * The case row with its value changed. A label that still reads the same as the value follows it, so a branch named
- * after its value stays that way; a label typed by hand stays.
+ * The case row with its value changed. On a case added in this edit (`isNew`) a label that still reads the same as the
+ * value follows it. On a saved case the label stays: it names the output its branch is connected to.
  */
-export function withCaseValue(row: SwitchCaseRow, value: string): SwitchCaseRow {
-  return { value, label: row.label === row.value ? value : row.label };
+export function withCaseValue(row: SwitchCaseRow, value: string, isNew = false): SwitchCaseRow {
+  return { value, label: isNew && row.label === row.value ? value : row.label };
 }
 
 /** Labels used by more than one case (their branches would share one output). */

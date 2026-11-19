@@ -17159,8 +17159,17 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const saveDenial = await workflowSaveDenial(user, workflow);
       if (saveDenial) return denyRunAccess(reply, saveDenial);
     }
-    for (const companion of preparedCompanions) await store.upsertWorkflow(companion, { createdBy: user.id });
-    await store.upsertWorkflow(imported, { createdBy: user.id });
+    const saved: string[] = [];
+    try {
+      for (const workflow of [...preparedCompanions, imported]) {
+        await store.upsertWorkflow(workflow, { createdBy: user.id });
+        saved.push(workflow.id);
+      }
+    } catch (error) {
+      // No half-made template: the workflows already written (new ids, nothing else refers to them) are removed.
+      for (const id of saved) await store.deleteWorkflow(id).catch(() => false);
+      throw error;
+    }
 
     await audit(request, user, {
       category: "workflow",
