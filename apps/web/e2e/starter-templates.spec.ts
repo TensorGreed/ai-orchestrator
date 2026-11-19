@@ -164,7 +164,7 @@ test("the document search starter runs on the local embedder and shows typed vec
   const inspector = await inspect("Search the articles");
   await inspector.getByTestId("advanced-fields").locator("summary").first().click();
   await inspector.getByLabel("Embedder").selectOption("openai-embedder");
-  await expect(inspector.getByLabel("Model")).toBeVisible();
+  await expect(inspector.getByRole("textbox", { name: "Model", exact: true })).toBeVisible();
   await expect(inspector.getByLabel("Vector Store Extra Config (JSON)")).toHaveCount(0);
   await page.screenshot({ path: path.join(SHOT_DIR, "after-08-vector-store-settings.png") });
   await inspector.getByRole("button", { name: "Close inspector" }).click();
