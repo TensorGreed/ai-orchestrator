@@ -50,7 +50,7 @@ describe("typed Set fields and sandbox failures", () => {
       thrown = error;
     }
     expect(isExpressionSandboxFailure(thrown)).toBe(true);
-    expect(renderTemplateValue("{{ (1).nope() }}", {})).toEqual({ single: true, value: undefined });
+    expect(renderTemplateValue("{{ (1).nope() }}", {})).toEqual({ single: true, value: undefined, missing: [{ body: "(1).nope()", reason: "expression_failed" }] });
   });
 
   it.each(["auto", "number", "json"])("a %s field fails the node on a sandbox failure", async (type) => {
