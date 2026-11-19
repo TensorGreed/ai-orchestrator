@@ -156,3 +156,30 @@ describe("inserting after a node's Error output", () => {
     expect(chooseSourceHandle({ ...card, data: { ...card.data, config: { onError: "branch" } } }, [])).toBeNull();
   });
 });
+
+describe("Filter outputs", () => {
+  it("has Pass (or Kept) and Stopped (or Rejected) outputs in both modes", () => {
+    expect(sourceHandleIds(node("f", "filter_node", 0, 0))).toEqual(["pass", "filtered"]);
+    expect(sourceHandleIds(node("f", "filter_node", 0, 0, { mode: "items" }))).toEqual(["pass", "filtered"]);
+  });
+
+  it("counts an edge saved without a handle as the first output (where the canvas draws it)", () => {
+    const filter = node("f", "filter_node", 0, 0);
+    expect(chooseSourceHandle(filter, [{ source: "f", target: "x" }])).toBe("filtered");
+    expect(chooseSourceHandle(filter, [])).toBe("pass");
+  });
+
+  it("offers neither output once an unlabeled edge and a Rejected edge are both there", () => {
+    const filter = node("f", "filter_node", 0, 0, { mode: "items" });
+    const edges = [
+      { source: "f", target: "x" },
+      { source: "f", target: "y", sourceHandle: "filtered" }
+    ];
+    expect(chooseSourceHandle(filter, edges)).toBe("pass");
+    expect(chooseSourceHandle(filter, [{ source: "f", target: "y", sourceHandle: "filtered" }])).toBe("pass");
+  });
+
+  it("leaves other branching nodes' unlabeled edges alone", () => {
+    expect(chooseSourceHandle(node("i", "if_node", 0, 0), [{ source: "i", target: "x" }])).toBe("true");
+  });
+});

@@ -218,11 +218,11 @@ describe("external workflow import — webhook, HTTP request and field assignmen
     const set = nodeById(conversion, "edit_fields");
     expect(set.type).toBe("set_node");
     expect(set.config.assignments).toEqual([
-      { key: "email", valueTemplate: "{{results.webhook.body.email}}" },
-      { key: "company", valueTemplate: "{{results.http_request.company.name}}" },
-      { key: "enrichedAt", valueTemplate: "{{ $now.toISOString() }}" },
-      { key: "score", valueTemplate: "42" },
-      { key: "source", valueTemplate: "webhook" }
+      { key: "email", valueTemplate: "{{results.webhook.body.email}}", type: "string" },
+      { key: "company", valueTemplate: "{{results.http_request.company.name}}", type: "string" },
+      { key: "enrichedAt", valueTemplate: "{{ $now.toISOString() }}", type: "string" },
+      { key: "score", valueTemplate: "42", type: "number" },
+      { key: "source", valueTemplate: "webhook", type: "string" }
     ]);
   });
 
@@ -542,7 +542,9 @@ describe("external workflow import — unsupported nodes and odd expressions", (
   it("keeps Python code verbatim and maps the filter", () => {
     const python = nodeById(conversion, "python");
     expect(python.config).toMatchObject({ language: "python", code: "for item in _input.all():\n    item.json['seen'] = True\nreturn _input.all()" });
+    // An imported node's output is one item: the Filter passes or filters it out (and keeps its fields for later nodes).
     expect(nodeById(conversion, "top_ratings").config).toEqual({
+      mode: "gate",
       conditions: [{ field: "results.summarise.Rating", operator: "eq", value: "3" }],
       combineWith: "AND",
       passMode: "pass"
@@ -818,12 +820,12 @@ describe("external workflow import — additional node variants", () => {
     );
     expect(nodeById(conversion, "start").config).toMatchObject({ method: "GET", authMode: "bearer_token", authHeaderName: "authorization", secretRef: { secretId: "import-httpheaderauth-inbound_key" } });
     expect(nodeById(conversion, "raw_set").config.assignments).toEqual([
-      { key: "a", valueTemplate: "1" },
-      { key: "b", valueTemplate: "two" }
+      { key: "a", valueTemplate: "1", type: "json" },
+      { key: "b", valueTemplate: "two", type: "string" }
     ]);
     expect(nodeById(conversion, "legacy_set").config.assignments).toEqual([
-      { key: "s", valueTemplate: "{{results.raw_set.a}}" },
-      { key: "n", valueTemplate: "3" }
+      { key: "s", valueTemplate: "{{results.raw_set.a}}", type: "string" },
+      { key: "n", valueTemplate: "3", type: "number" }
     ]);
     expect(reportFor(conversion, "Legacy set").reason).toContain("Keep only set fields");
     expect(nodeById(conversion, "webhook_wait").config).toMatchObject({ resumeMode: "webhook", resumeWebhookPath: "resume-here" });
@@ -1337,5 +1339,77 @@ describe("external workflow import — execution of a converted flow", () => {
     expect(statusById).toMatchObject({ check: "success", approve: "success", reject: "skipped", stamp: "success", import_output: "success" });
     const stamp = result.nodeResults.find((entry) => entry.nodeId === "stamp")?.output as Record<string, unknown>;
     expect(stamp.route).toBe("true-active");
+  });
+});
+
+describe("external workflow import — Filter and Set item semantics", () => {
+  it("an imported Filter passes or filters its one item, and later nodes still read its fields", async () => {
+    const build = (amount: number) =>
+      convertExternalWorkflow(
+        exportWith(
+          [
+            { name: "Start", type: "n8n-nodes-base.manualTrigger" },
+            { name: "Order", type: "n8n-nodes-base.set", parameters: { assignments: { assignments: [{ name: "amount", value: amount, type: "number" }, { name: "tags", value: "[1]", type: "array" }] } } },
+            {
+              name: "Big",
+              type: "n8n-nodes-base.filter",
+              parameters: { conditions: { combinator: "and", conditions: [{ leftValue: "={{ $json.amount }}", rightValue: 100, operator: { type: "number", operation: "gt" } }] } }
+            },
+            { name: "Stamp", type: "n8n-nodes-base.set", parameters: { assignments: { assignments: [{ name: "seen", value: "={{ $json.amount }}", type: "number" }] } } }
+          ],
+          { Start: { main: [[{ node: "Order" }]] }, Order: { main: [[{ node: "Big" }]] }, Big: { main: [[{ node: "Stamp" }]] } }
+        )
+      );
+    const conversion = build(250);
+    expect(nodeById(conversion, "big").config).toMatchObject({ mode: "gate" });
+    const passed = await executeWorkflow({ workflow: conversion.workflow }, executionDependencies());
+    expect(passed.status).toBe("success");
+    expect(passed.nodeResults.find((entry) => entry.nodeId === "stamp")?.output).toEqual({ seen: 250 });
+    const stopped = await executeWorkflow({ workflow: build(5).workflow }, executionDependencies());
+    expect(stopped.nodeResults.find((entry) => entry.nodeId === "stamp")?.status).toBe("skipped");
+  });
+
+  it("maps the source Filter's kept and discarded outputs onto Pass and Stopped", async () => {
+    const build = (amount: number) =>
+      convertExternalWorkflow(
+        exportWith(
+          [
+            { name: "Start", type: "n8n-nodes-base.manualTrigger" },
+            { name: "Order", type: "n8n-nodes-base.set", parameters: { assignments: { assignments: [{ name: "amount", value: amount, type: "number" }] } } },
+            {
+              name: "Big",
+              type: "n8n-nodes-base.filter",
+              parameters: { conditions: { combinator: "and", conditions: [{ leftValue: "={{ $json.amount }}", rightValue: 100, operator: { type: "number", operation: "gt" } }] }, options: {} }
+            },
+            { name: "Kept", type: "n8n-nodes-base.noOp" },
+            { name: "Discarded", type: "n8n-nodes-base.noOp" }
+          ],
+          { Start: { main: [[{ node: "Order" }]] }, Order: { main: [[{ node: "Big" }]] }, Big: { main: [[{ node: "Kept" }], [{ node: "Discarded" }]] } }
+        )
+      );
+    const conversion = build(5);
+    const handles = conversion.workflow.edges.filter((edge) => edge.source === "big").map((edge) => [edge.target, edge.sourceHandle]);
+    expect(handles).toEqual(expect.arrayContaining([["kept", "pass"], ["discarded", "filtered"]]));
+    const small = await executeWorkflow({ workflow: conversion.workflow }, executionDependencies());
+    const status = (result: typeof small, id: string) => result.nodeResults.find((entry) => entry.nodeId === id)?.status;
+    expect([status(small, "kept"), status(small, "discarded")]).toEqual(["skipped", "success"]);
+    const big = await executeWorkflow({ workflow: build(500).workflow }, executionDependencies());
+    expect([status(big, "kept"), status(big, "discarded")]).toEqual(["success", "skipped"]);
+  });
+
+  it("keeps a value that does not fit its type when the source ignores conversion errors", () => {
+    const conversion = convertExternalWorkflow(
+      exportWith([
+        {
+          name: "Lenient",
+          type: "n8n-nodes-base.set",
+          parameters: { assignments: { assignments: [{ name: "n", value: "={{ $json.n }}", type: "number" }, { name: "s", value: "x", type: "string" }] }, options: { ignoreConversionErrors: true } }
+        }
+      ])
+    );
+    expect(nodeById(conversion, "lenient").config.assignments).toEqual([
+      { key: "n", valueTemplate: "{{ $json.n }}", type: "auto" },
+      { key: "s", valueTemplate: "x", type: "string" }
+    ]);
   });
 });

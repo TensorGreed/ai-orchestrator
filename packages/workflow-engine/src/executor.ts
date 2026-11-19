@@ -164,6 +164,7 @@ import {
   type OutboundGuardConfig
 } from "./outbound-url-guard";
 import { bindCheckedRenderings, evaluateConditionTemplate, renderTemplate, tryParseJson, type TemplatePiece } from "./template";
+import { buildSetOutput, filterOutputForHandles, findFirstList, isRecordValue, loopPassResult, loopPassesOf, normalizeItemsFrom, singleInputItem } from "./item-nodes";
 import {
   createMcpElicitationHandler,
   createMcpSamplingHandler,
@@ -185,7 +186,7 @@ import { NO_CODE_SANDBOX_PLAN, codeNodesDisabledError, runJavaScriptCode, runPyt
 import { runWithSandboxOwner } from "./quickjs-sandbox";
 import { ownUsage, ownUsageOf, runAsUsageOwner, withoutUsage } from "./usage-ownership";
 import { sortWorkflowNodes, validateWorkflowGraph, computeDepthLevels } from "./validation";
-import { ErrorCategory, MODEL_NOT_ALLOWED_CODE, PUBLIC_RUN_ERROR_CODES, WorkflowError, remediationForCategory } from "@ai-orchestrator/shared";
+import { ErrorCategory, MODEL_NOT_ALLOWED_CODE, PUBLIC_RUN_ERROR_CODES, WorkflowError, filterModeOf, isMergeMode, loopCollectsResults, remediationForCategory } from "@ai-orchestrator/shared";
 import { AgentGuardInterrupt, RUNTIME_INTERNAL_TOOL_NAMES, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
 import { ApprovalHandoffSignal, approvedHandoffKeysFromState, isApprovalHandoffSignal, withoutReservedKeys, type ApprovalHandoffRequest } from "./approval-handoff";
 import { executeGuardNodeStep } from "./guard-node";
@@ -2111,6 +2112,22 @@ function mergeParentOutputs(parentOutputs: Record<string, unknown>): Record<stri
 
   return merged;
 }
+
+/** Template roots a Filter item never shadows, and the only paths a Filter condition in items mode reads outside its item. */
+const FILTER_ITEM_RESERVED_ROOTS: ReadonlySet<string> = new Set([
+  "results",
+  "parent_outputs",
+  "vars",
+  "$vars",
+  "webhook",
+  "workflow",
+  "$workflow",
+  "execution",
+  "$execution",
+  "item",
+  "_item_index",
+  "_loop_index"
+]);
 
 function looksLikeJson(input: string): boolean {
   const trimmed = input.trim();
@@ -4887,11 +4904,31 @@ async function executeNodeHandler(
     }
 
     case "merge_node": {
-      const mode =
-        config.mode === "append" || config.mode === "combine_by_key" || config.mode === "choose_branch"
-          ? config.mode
-          : "append";
+      const mode = isMergeMode(config.mode) ? config.mode : "append";
       const entries = Object.entries(context.parentOutputs);
+
+      if (mode === "collect_loop_passes") {
+        // Every pass of a Loop body node connected into the Merge (read from its Loop's output, so a resumed run
+        // sees the same); a parent outside a loop body adds its output once.
+        const collected: unknown[] = [];
+        for (const [parentId, parentOutput] of entries) {
+          const loopIds = (context.workflow.edges ?? [])
+            .filter((edge) => edge.target === parentId && isExecutionEdge(edge) && context.nodeById.get(edge.source)?.type === "loop_node")
+            .map((edge) => edge.source);
+          let passes: unknown[] | undefined;
+          for (const loopId of loopIds) {
+            passes = loopPassesOf(context.nodeOutputs?.get(loopId), parentId);
+            if (passes) {
+              // Phase 16 — every pass's data, so the labels of all of them (the Loop's output carries their union).
+              context.labelScope?.readPath(`results.${loopId}`);
+              break;
+            }
+          }
+          if (passes) collected.push(...passes);
+          else collected.push(parentOutput);
+        }
+        return { items: collected, count: collected.length };
+      }
 
       if (mode === "append") {
         const mergedOutput: Record<string, unknown> = {};
@@ -4978,14 +5015,28 @@ async function executeNodeHandler(
       const combineWith = config.combineWith === "OR" ? "OR" : "AND";
       const passMode = config.passMode === "reject" ? "reject" : "pass";
 
-      function evaluateFilterCondition(cond: Record<string, unknown>): boolean {
+      // `scope` is what a condition reads: the node's input (gate), or one item over it (items mode).
+      function evaluateFilterCondition(cond: Record<string, unknown>, scope: Record<string, unknown>, item?: { value: unknown }): boolean {
         const field = typeof cond.field === "string" ? cond.field : "";
         const operator = typeof cond.operator === "string" ? cond.operator : "eq";
         const expectedRaw =
-          typeof cond.value === "string" ? renderTemplate(String(cond.value), templateData) : cond.value;
+          typeof cond.value === "string" ? renderTemplate(String(cond.value), scope) : cond.value;
 
-        let actual: unknown = readData(templateData, field);
-        if (actual === undefined) actual = getValueByPath(templateData, field);
+        let actual: unknown;
+        if (item) {
+          // An item's field (`price`), or a path from the item (`item.price`, `$json.price`). Only a path that starts at
+          // a template root (`results.`, `vars.`, `webhook.`…) or a run value (a Loop's item variable) reads outside the
+          // item: a field the item lacks is missing, never a same-named field of an upstream node's output.
+          const trimmedField = field.trim();
+          const head = trimmedField.split(".")[0] ?? "";
+          if (/^(?:item|\$json)$/.test(trimmedField)) actual = item.value;
+          else if (/^(?:item|\$json)\./.test(trimmedField)) actual = isRecordValue(item.value) ? getValueByPath(item.value, trimmedField.replace(/^(?:item|\$json)\./, "")) : undefined;
+          else if (isRecordValue(item.value) && Object.prototype.hasOwnProperty.call(item.value, head)) actual = getValueByPath(item.value, trimmedField);
+          else if (FILTER_ITEM_RESERVED_ROOTS.has(head) || Object.prototype.hasOwnProperty.call(context.globals, head)) actual = getValueByPath(scope, trimmedField);
+        } else {
+          actual = readData(templateData, field);
+          if (actual === undefined) actual = getValueByPath(templateData, field);
+        }
 
         const actualStr = actual == null ? "" : String(actual);
         const expectedStr = expectedRaw == null ? "" : String(expectedRaw);
@@ -5012,15 +5063,56 @@ async function executeNodeHandler(
         }
       }
 
-      const results = conditions.map((c: unknown) => evaluateFilterCondition(toRecord(c)));
-      const passed = combineWith === "OR" ? results.some(Boolean) : results.every(Boolean);
-      const shouldPass = passMode === "pass" ? passed : !passed;
+      const matches = (scope: Record<string, unknown>, item?: { value: unknown }): boolean => {
+        const results = conditions.map((c: unknown) => evaluateFilterCondition(toRecord(c), scope, item));
+        const passed = combineWith === "OR" ? results.some(Boolean) : results.every(Boolean);
+        return passMode === "pass" ? passed : !passed;
+      };
 
+      if (filterModeOf(config) === "gate") {
+        const shouldPass = matches(templateData);
+        return {
+          _branchHandle: shouldPass ? "pass" : "filtered",
+          passed: shouldPass,
+          input: { ...context.merged },
+          ...context.merged
+        };
+      }
+
+      // Items mode: keep the items of a list that match. Items from names the list; empty means the first list in
+      // the node's input (`products`, `body.items`), or, when the input has no list, the input itself as one item.
+      const configuredPath = normalizeItemsFrom(config.itemsFrom);
+      const itemsPath = configuredPath || findFirstList(context.merged) || "";
+      let list: unknown[];
+      if (itemsPath) {
+        let found = readData(templateData, itemsPath);
+        if (found === undefined) found = getValueByPath(templateData, itemsPath);
+        if (!Array.isArray(found)) {
+          throw WorkflowError.nodeConfig(`Filter Items from '${itemsPath}' is not a list in this run's input.`);
+        }
+        list = found;
+      } else {
+        list = [singleInputItem(context.parentOutputs, context.merged)];
+      }
+      const kept: unknown[] = [];
+      const rejected: unknown[] = [];
+      for (const [index, value] of list.entries()) {
+        // The item's fields are in scope for condition values, without replacing a template root (`results`, `vars`…).
+        const itemFields = isRecordValue(value) ? Object.fromEntries(Object.entries(value).filter(([key]) => !FILTER_ITEM_RESERVED_ROOTS.has(key))) : {};
+        const scope = { ...templateData, ...itemFields, item: value, _item_index: index };
+        (matches(scope, { value }) ? kept : rejected).push(value);
+      }
       return {
-        _branchHandle: shouldPass ? "pass" : "filtered",
-        passed: shouldPass,
-        input: { ...context.merged },
-        ...context.merged
+        // Kept (`pass`) runs when an item matched, Rejected (`filtered`) when an item did not: both can run. An empty
+        // list runs neither. Edges without a handle always run.
+        _branchHandle: kept.length > 0 ? "pass" : rejected.length > 0 ? "filtered" : "none",
+        ...(kept.length > 0 && rejected.length > 0 ? { _branchHandleFallback: "filtered" } : {}),
+        items: kept,
+        count: kept.length,
+        rejected,
+        rejected_count: rejected.length,
+        total: list.length,
+        items_from: itemsPath
       };
     }
 
@@ -5069,20 +5161,7 @@ async function executeNodeHandler(
     }
 
     case "set_node": {
-      const assignments = Array.isArray(config.assignments) ? config.assignments.map((entry) => toRecord(entry)) : [];
-      const output: Record<string, unknown> = {};
-
-      for (const assignment of assignments) {
-        const key = typeof assignment.key === "string" ? assignment.key.trim() : "";
-        const valueTemplate = typeof assignment.valueTemplate === "string" ? assignment.valueTemplate : "";
-        if (!key) {
-          continue;
-        }
-        const rendered = renderTemplate(valueTemplate, templateData);
-        output[key] = parseTemplateValue(rendered);
-      }
-
-      return output;
+      return buildSetOutput(Array.isArray(config.assignments) ? config.assignments : [], templateData);
     }
 
     case "workflow_tool":
@@ -9512,6 +9591,23 @@ async function executeWorkflowRun(
     handleMap.set(edge.sourceHandle, targets);
   }
 
+  // The handles each execution edge leaves its source by, per source and target (a Filter's Rejected output passes on
+  // its rejected items).
+  const edgeHandles = new Map<string, Set<string | null>>();
+  for (const edge of workflow.edges) {
+    if (!isExecutionEdge(edge)) continue;
+    const key = `${edge.source}\u0000${edge.target}`;
+    const handles = edgeHandles.get(key) ?? new Set<string | null>();
+    handles.add(edge.sourceHandle ?? null);
+    edgeHandles.set(key, handles);
+  }
+  const parentOutputForEdge = (parentId: string, childId: string): unknown => {
+    const output = nodeOutputs.get(parentId);
+    const parent = graphIndexes.nodeById.get(parentId);
+    if (parent?.type !== "filter_node" || filterModeOf(toRecord(parent.config)) !== "items") return output;
+    return filterOutputForHandles(output, edgeHandles.get(`${parentId}\u0000${childId}`) ?? new Set());
+  };
+
   const applySuccessfulNodeRouting = (node: WorkflowNode, output: unknown) => {
     const outputRecord = toRecord(output);
     const activeBranch = typeof outputRecord._branchHandle === "string" ? outputRecord._branchHandle : undefined;
@@ -9529,6 +9625,13 @@ async function executeWorkflowRun(
       for (const takenHandle of takenHandles) {
         for (const target of handleMap.get(takenHandle) ?? []) {
           takenTargets.add(target);
+        }
+      }
+      if (node.type === "filter_node") {
+        // A Filter's edge saved without a handle (from before it had two outputs) always runs, and so does what it
+        // reaches.
+        for (const edge of workflow.edges) {
+          if (edge.source === node.id && !edge.sourceHandle && isExecutionEdge(edge)) takenTargets.add(edge.target);
         }
       }
       const protectedNodes = descendantCache.getReachableFromRoots(takenTargets);
@@ -10178,7 +10281,7 @@ async function executeWorkflowRun(
     const parentOutputs: Record<string, unknown> = {};
     for (const parentId of parentIds) {
       if (nodeOutputs.has(parentId)) {
-        parentOutputs[parentId] = nodeOutputs.get(parentId);
+        parentOutputs[parentId] = parentOutputForEdge(parentId, node.id);
       }
     }
     const merged = mergeParentOutputs(parentOutputs);
@@ -10318,7 +10421,7 @@ async function executeWorkflowRun(
               }
 
               if (nodeOutputs.has(parentId)) {
-                childParentOutputs[parentId] = nodeOutputs.get(parentId);
+                childParentOutputs[parentId] = parentOutputForEdge(parentId, childNode.id);
               }
             }
 
@@ -10441,10 +10544,14 @@ async function executeWorkflowRun(
           });
         }
 
-        const output = {
+        const output: Record<string, unknown> = {
           items: loopItems,
           count: loopItems.length
         };
+        // Collect results: `collected`, one entry per pass (the body node's output, or the pass's outputs by body node id).
+        if (loopCollectsResults(nodeConfig)) {
+          output.collected = loopItems.map((pass) => loopPassResult(pass.outputs, downstreamNodeIds));
+        }
 
         nodeOutputs.set(node.id, output);
         labelState.set(node.id, labelState.finalize(unionLabels([itemLabels, ...passLabels]), output));

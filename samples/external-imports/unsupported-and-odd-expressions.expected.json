@@ -99,43 +99,53 @@
           "assignments": [
             {
               "key": "attachment",
-              "valueTemplate": "{{ $binary.data.fileName }}"
+              "valueTemplate": "{{ $binary.data.fileName }}",
+              "type": "string"
             },
             {
               "key": "year",
-              "valueTemplate": "{{ $now.toFormat('yyyy') }}"
+              "valueTemplate": "{{ $now.toFormat('yyyy') }}",
+              "type": "string"
             },
             {
               "key": "missing",
-              "valueTemplate": "{{ $('Nope').item.json.value }}"
+              "valueTemplate": "{{ $('Nope').item.json.value }}",
+              "type": "string"
             },
             {
               "key": "apiBase",
-              "valueTemplate": "{{vars.API_BASE}}"
+              "valueTemplate": "{{vars.API_BASE}}",
+              "type": "string"
             },
             {
               "key": "region",
-              "valueTemplate": "{{vars.region}}"
+              "valueTemplate": "{{vars.region}}",
+              "type": "string"
             },
             {
               "key": "meta",
-              "valueTemplate": "{{workflow.name}} / {{execution.id}}"
+              "valueTemplate": "{{workflow.name}} / {{execution.id}}",
+              "type": "string"
             },
             {
               "key": "day",
-              "valueTemplate": "{{ $today.toISOString().slice(0, 10) }}"
+              "valueTemplate": "{{ $today.toISOString().slice(0, 10) }}",
+              "type": "string"
             },
             {
               "key": "stamp",
-              "valueTemplate": "{{ $now.toISOString() }}"
+              "valueTemplate": "{{ $now.toISOString() }}",
+              "type": "string"
             },
             {
               "key": "fallback",
-              "valueTemplate": "{{ $ifEmpty(results.google_sheets.Rating, 'n/a') }}"
+              "valueTemplate": "{{ $ifEmpty(results.google_sheets.Rating, 'n/a') }}",
+              "type": "string"
             },
             {
               "key": "runs",
-              "valueTemplate": "{{ $runIndex }}"
+              "valueTemplate": "{{ $runIndex }}",
+              "type": "number"
             }
           ]
         }
@@ -283,6 +293,7 @@
           "y": 0
         },
         "config": {
+          "mode": "gate",
           "conditions": [
             {
               "field": "results.summarise.Rating",

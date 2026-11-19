@@ -25,6 +25,7 @@ import {
   type McpElicitationView,
   type Project,
   type ImportReport,
+  type NodeExecutionResult,
   type Workflow,
   type WorkflowExecutionResult,
   type WorkflowValidationIssue
@@ -115,7 +116,7 @@ import {
 } from "./lib/run-trace";
 import { ORBIT, attachedNodeIds, computeAttachmentSlots, orbitPositions } from "./lib/stages";
 import { chooseSourceHandle, findFreePosition, insertPositionAfter, planInsertConnection } from "./lib/canvas-insert";
-import { canvasRunPreview, hasTestData } from "./lib/run-data";
+import { canvasRunPreview, hasTestData, loopPassResults } from "./lib/run-data";
 import { newNodeConfig } from "./lib/trigger-paths";
 import {
   deleteTabWipWorkflow,
@@ -1393,9 +1394,17 @@ function StudioApp() {
       return map;
     }
     const labelFor = (nodeId: string) => nodeLabelById.get(nodeId) ?? nodeId;
+    // A Loop body node has one result per pass; its card counts them all.
+    const passesByNodeId = new Map<string, NodeExecutionResult[]>();
+    for (const nodeResult of executionResult.nodeResults) {
+      if (!passesByNodeId.has(nodeResult.nodeId)) passesByNodeId.set(nodeResult.nodeId, loopPassResults(executionResult.nodeResults, nodeResult.nodeId));
+    }
     for (const nodeResult of executionResult.nodeResults) {
       const liveText = nodeResult.status === "running" ? (nodeResult as LiveNodeResult).liveText : undefined;
-      const run = canvasRunPreview(nodeResult, labelFor, { hasOwnTestData: nodesWithTestData.has(nodeResult.nodeId) });
+      const run = canvasRunPreview(nodeResult, labelFor, {
+        hasOwnTestData: nodesWithTestData.has(nodeResult.nodeId),
+        passes: passesByNodeId.get(nodeResult.nodeId)
+      });
       map.set(nodeResult.nodeId, {
         meta: run.meta,
         input: run.input,

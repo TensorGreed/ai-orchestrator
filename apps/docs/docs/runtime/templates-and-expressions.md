@@ -56,6 +56,13 @@ The nodes connected straight after a **Loop / ForEach** node run once per item. 
 
 After the loop, a loop body node's result is its **last pass**: `{{results.<bodyId>.field}}`, and the nodes after it, see that pass only. To use every pass, read the Loop node's output: `{{results.<loopId>.items}}` is a list with one entry per pass, each with `index`, `item` and `outputs.<bodyId>`; `{{results.<loopId>.count}}` is the number of passes.
 
+Two shorter ways to get every pass:
+
+- Turn on **Collect results** on the Loop (new Loops have it on). Its output then also has `collected`: one entry per pass, the body node's output (with several body nodes, each pass's outputs by body node id). `{{results.<loopId>.collected}}` is that list.
+- Connect the body node into a **Merge / Join** node in **Collect loop passes** mode. Its output is `items`, every pass of that node in order, and `count`.
+
+On the canvas, a body node's card counts its passes and the items of all of them ("success · 25 passes · 25 items"); its Run data shows the last pass.
+
 ```text
 {{ results.loop.items.map(pass => pass.outputs.summarize.text).join('\n') }}
 ```
