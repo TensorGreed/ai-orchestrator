@@ -43,8 +43,8 @@ function node(id: string, type: string, config: Record<string, unknown> = {}): W
   return { id, type, name: id, position: { x: 0, y: 0 }, config } as WorkflowNode;
 }
 
-function set(id: string, key: string, template: string): WorkflowNode {
-  return node(id, "set_node", { assignments: [{ key, valueTemplate: template, type: "auto" }] });
+function set(id: string, key: string, template: string, why?: string): WorkflowNode {
+  return node(id, "set_node", { assignments: [{ key, valueTemplate: template, type: "auto" }, ...(why ? [{ key: "why", valueTemplate: why, type: "auto" }] : [])] });
 }
 
 function ask(id = "ask", extra: Record<string, unknown> = {}): WorkflowNode {
@@ -100,7 +100,7 @@ function payFlow(loopConfig: Record<string, unknown>, xs = "[1,2,3]", askConfig:
       set("prep", "amount", "{{x}}"),
       ask("ask", askConfig),
       set("pay", "paid", "{{results.prep.amount}}"),
-      set("refused", "refused", "{{x}}"),
+      set("refused", "refused", "{{x}}", "{{results.ask.rejected}}|{{results.ask.error}}"),
       set("after", "done", "{{results.loop.count}}")
     ],
     [
@@ -253,6 +253,57 @@ describe("Human Approval in a Loop body that routes branches", () => {
   });
 });
 
+describe("a rejection in a Loop body is never passed by", () => {
+  it("stops the run even when the Loop itself continues on error, and later nodes do not read an earlier approval", async () => {
+    const workflow = flow(
+      [
+        node("src", "set_node", { assignments: [{ key: "xs", valueTemplate: "[1,2,3]", type: "json" }] }),
+        node("loop", "loop_node", { inputKey: "xs", itemVariable: "x", onError: "continue" }),
+        ask(),
+        set("pay", "paid", "{{results.ask.approved}}")
+      ],
+      [edge("src", "loop"), edge("loop", "ask"), edge("ask", "pay")]
+    );
+    const { result } = await runWithDecisions(workflow, ["approve", "reject"]);
+    expect(result.status).toBe("error");
+    expect(statuses(result, "pay").filter((status) => status === "success")).toEqual([]);
+    expect(statuses(result, "loop")).toEqual(["error"]);
+  });
+
+  it("stops a Loop around a Loop whose approval was rejected, whatever the outer Loop's On Error", async () => {
+    const workflow = flow(
+      [
+        node("src", "set_node", { assignments: [{ key: "rows", valueTemplate: "[[1],[2]]", type: "json" }] }),
+        { ...node("outer", "loop_node", { inputKey: "rows", itemVariable: "row" }), errorConfig: { continueOnFail: true } } as WorkflowNode,
+        node("inner", "loop_node", { inputKey: "row", itemVariable: "x" }),
+        ask(),
+        set("after", "done", "yes")
+      ],
+      [edge("src", "outer"), edge("outer", "inner"), edge("inner", "ask"), edge("ask", "after")]
+    );
+    const { result } = await runWithDecisions(workflow, ["reject"]);
+    expect(result.status).toBe("error");
+    expect(statuses(result, "after").filter((status) => status === "success")).toEqual([]);
+  });
+
+  it("an approval vouches only for the pass it was given on", async () => {
+    const paused: WorkflowExecutionState[] = [];
+    const workflow = payFlow({ routeBranches: true });
+    let result = await executeWorkflow({ workflow, executionId: "exec-endorse" }, deps(paused));
+    result = await resumeWorkflowExecution({ executionId: "exec-endorse", state: paused.at(-1)!, decision: "approve", actedBy: "lead@example.com" }, deps(paused));
+    // Paused at pass 2: pass 1's approval is no longer active.
+    expect(result.status).toBe("waiting_approval");
+    expect(paused.at(-1)!.dataLabels?.endorsements ?? []).toEqual([]);
+    result = await resumeWorkflowExecution({ executionId: "exec-endorse", state: paused.at(-1)!, decision: "reject", actedBy: "lead@example.com" }, deps(paused));
+    expect(result.status).toBe("waiting_approval");
+    expect(paused.at(-1)!.dataLabels?.endorsements ?? []).toEqual([]);
+    result = await resumeWorkflowExecution({ executionId: "exec-endorse", state: paused.at(-1)!, decision: "approve", actedBy: "lead@example.com" }, deps(paused));
+    expect(result.status).toBe("partial");
+    // Each approved pass recorded who approved it.
+    expect(results(result, "ask").map((entry) => entry.endorsement?.approvedBy ?? null)).toEqual(["lead@example.com", null, "lead@example.com"]);
+  });
+});
+
 describe("Human Approval in a Loop body without branch routing", () => {
   it("pauses once per pass; approvals let every pass run", async () => {
     const workflow = flow(
@@ -302,6 +353,9 @@ describe("replay of a run that asked inside a Loop", () => {
     expect(statuses(replayed, "ask")).toEqual(["success", "error", "success"]);
     expect(results(replayed, "pay").filter((entry) => entry.status === "success").map((entry) => (entry.output as Record<string, unknown>).paid)).toEqual([1, 3]);
     expect(results(replayed, "refused").filter((entry) => entry.status === "success").map((entry) => (entry.output as Record<string, unknown>).refused)).toEqual([2]);
+    expect((results(live, "refused").find((entry) => entry.status === "success")?.output as Record<string, unknown>).why).toBe("true|Not this one");
+    // The Error output gets the recorded decision, as in the live run.
+    expect(results(replayed, "refused").find((entry) => entry.status === "success")?.output).toEqual(results(live, "refused").find((entry) => entry.status === "success")?.output);
   });
 });
 

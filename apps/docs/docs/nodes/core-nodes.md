@@ -181,7 +181,8 @@ request after another.
 - **Approve**: the pass goes on to the nodes after the approval.
 - **Reject** or a timeout: in a Loop whose branches route, an approval whose On Error is **Execute Fallback Branch**
   sends that pass to its Error output, and the loop goes on with the next item. Otherwise the run stops, as it does
-  for a rejection outside a Loop. **Continue Anyway** never continues past an approval.
+  for a rejection outside a Loop. **Continue Anyway** never continues past an approval, set on the approval or on
+  the Loop.
 - A Loop inside a Loop body pauses and resumes the same way.
 
 An Approval Gate in a body is refused when you save. An approval an agent's tool gate or a sub-workflow asks for

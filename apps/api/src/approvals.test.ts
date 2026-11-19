@@ -697,8 +697,7 @@ describe("a Human Approval inside a Loop body", () => {
       expect(pending.nodeId).toBe("ask");
       asked.push({ message: pending.message, pass: pending.details?.loopPass });
       const response = await call(context, "POST", `/api/approvals/${executionId}/${decision}`, builder.cookie, decision === "reject" ? { reason: "Not this one" } : {});
-      expect(response.statusCode, response.body).toBeLessThan(queued ? 300 : 500);
-      if (queued) expect(response.statusCode).toBe(202);
+      expect(response.statusCode, response.body).toBe(queued ? 202 : 200);
       // The next pass's request is in once the resume paused again (or the run ended).
       await waitFor(async () => {
         const history = await context.store.getExecutionHistory(executionId);
@@ -725,6 +724,29 @@ describe("a Human Approval inside a Loop body", () => {
     expect(requests.map((request) => request.status)).toEqual(["approved", "rejected", "approved"]);
     expect(await context.store.getWorkflowExecutionState(executionId)).toBeNull();
   };
+
+  it("recovery never applies an earlier pass's decision to the pass the run is paused at now", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-approvals-loop-pass-"));
+    const first = await createTestContext({ tempDir });
+    const builder = await login(first, "builder");
+    const run = await startRun(first, loopApprovalWorkflow("wf-loop-stale"), builder.cookie);
+    const approved = await call(first, "POST", `/api/approvals/${run.executionId}/approve`, builder.cookie, {});
+    expect(approved.json<RunResult>().status).toBe("waiting_approval");
+    await closeContext(first);
+    await whileStopped(tempDir, async (sql) => {
+      // Pass 2's request is gone, so pass 1's approval (same node) is the latest decided one; the run looks interrupted.
+      await sql.run("DELETE FROM approval_requests WHERE execution_id = ? AND status = 'pending'", run.executionId);
+      await sql.run("UPDATE workflow_executions SET status = 'resuming', updated_at = ? WHERE id = ?", new Date(Date.now() - 86_400_000).toISOString(), run.executionId);
+    });
+    const second = await createTestContext({ tempDir });
+    await waitFor(async () => (await second.store.getWorkflowExecutionState(run.executionId!))?.status === "waiting_approval");
+    // Pass 2 was not decided with pass 1's approval: the run still waits at pass 2.
+    const paused = (await second.store.getWorkflowExecutionState(run.executionId!))!.state as { nodeResults: Array<{ nodeId: string; status: string; loopPass?: { pass: number } }> };
+    expect(paused.nodeResults.filter((entry) => entry.nodeId === "ask").map((entry) => [entry.status, entry.loopPass?.pass])).toEqual([
+      ["success", 1],
+      ["waiting_approval", 2]
+    ]);
+  });
 
   it("asks once per pass and resumes at that pass: approve, reject, approve", async () => {
     await decideEachPass(await createTestContext(), false);

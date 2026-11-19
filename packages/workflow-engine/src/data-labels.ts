@@ -566,6 +566,13 @@ export class RunLabelState {
     this.recorded.add(nodeId);
   }
 
+  /** A Human Approval in a Loop body asks again on the next pass: what it approved on an earlier pass no longer counts. */
+  withdrawEndorsements(nodeId: string): void {
+    for (let index = this.endorsements.length - 1; index >= 0; index -= 1) {
+      if (this.endorsements[index]!.nodeId === nodeId) this.endorsements.splice(index, 1);
+    }
+  }
+
   /** 12.2 — this node's labels go on its result even when the run does not track labels. */
   record(nodeId: string): void {
     this.recorded.add(nodeId);
