@@ -6954,7 +6954,12 @@ export function NodeInspector({
               >
                 {timingFields}
               </AdvancedFields>
-              <HttpErrorStatusFields config={config} errorConfig={nodeErrorConfig} setConfig={setConfig} />
+              <HttpErrorStatusFields
+                config={config}
+                errorConfig={nodeErrorConfig}
+                setConfig={setConfig}
+                showSwitch={switchesAtOpen.includes("http_fail")}
+              />
             </>
           );
         }
