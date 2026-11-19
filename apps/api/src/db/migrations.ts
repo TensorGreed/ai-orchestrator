@@ -3151,10 +3151,11 @@ export const MIGRATIONS: Migration[] = [
             ORDER BY id LIMIT 5000
           ) b;
           EXIT WHEN batch_ids IS NULL;
+          -- Three equality joins (by the request's user id, by id, by email) instead of one join on OR, so each is a
+          -- hash join: the OR form compared every run of a batch with every account.
           UPDATE execution_history eh SET triggered_by_user_id = m.user_id
           FROM (
-            SELECT s.id, MIN(u.id) AS user_id
-            FROM (
+            WITH s AS (
               SELECT h.id, h.started_at,
                 fr.requested_by_user_id AS ref_id,
                 CASE WHEN fr.execution_id IS NOT NULL THEN fr.requested_by
@@ -3166,11 +3167,16 @@ export const MIGRATIONS: Migration[] = [
                 WHERE a.execution_id = h.id ORDER BY a.created_at, a.id LIMIT 1
               ) fr ON TRUE
               WHERE h.id = ANY(batch_ids)
-            ) s
-            JOIN users u ON (s.ref_id IS NOT NULL AND u.id = s.ref_id)
-              OR (s.ref_id IS NULL AND (u.id = s.ref OR (LOWER(u.email) = LOWER(s.ref) AND u.created_at <= s.started_at)))
-            GROUP BY s.id
-            HAVING COUNT(*) = 1
+            ),
+            c AS (
+              SELECT s.id, u.id AS user_id FROM s JOIN users u ON u.id = s.ref_id
+              UNION
+              SELECT s.id, u.id FROM s JOIN users u ON u.id = s.ref WHERE s.ref_id IS NULL
+              UNION
+              SELECT s.id, u.id FROM s JOIN users u ON LOWER(u.email) = LOWER(s.ref)
+              WHERE s.ref_id IS NULL AND u.created_at <= s.started_at
+            )
+            SELECT c.id, MIN(c.user_id) AS user_id FROM c GROUP BY c.id HAVING COUNT(*) = 1
           ) m
           WHERE eh.id = m.id;
           GET DIAGNOSTICS step = ROW_COUNT;

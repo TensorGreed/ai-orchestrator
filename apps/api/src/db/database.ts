@@ -4682,10 +4682,11 @@ export class SqliteStore implements Store {
         const firstRequest = (column: string) =>
           `(SELECT a.${column} FROM approval_requests a WHERE a.execution_id = h.id ORDER BY a.created_at, a.id LIMIT 1)`;
         this.exec(
+          // Three equality joins (by the request's user id, by id, by email) instead of one join on OR, which compared
+          // every run of a batch with every account.
           `UPDATE execution_history SET triggered_by_user_id = m.user_id
            FROM (
-             SELECT s.id, CASE WHEN COUNT(u.id) = 1 THEN MIN(u.id) END AS user_id
-             FROM (
+             WITH s AS MATERIALIZED (
                SELECT h.id, h.started_at,
                  ${firstRequest("requested_by_user_id")} AS ref_id,
                  CASE WHEN EXISTS (SELECT 1 FROM approval_requests a WHERE a.execution_id = h.id) THEN ${firstRequest("requested_by")}
@@ -4693,12 +4694,21 @@ export class SqliteStore implements Store {
                       ELSE h.triggered_by END AS ref
                FROM execution_history h
                WHERE h.rowid BETWEEN ? AND ? AND h.triggered_by_user_id IS NULL
-             ) s
-             JOIN users u ON (s.ref_id IS NOT NULL AND u.id = s.ref_id)
-               OR (s.ref_id IS NULL AND (u.id = s.ref OR (LOWER(u.email) = LOWER(s.ref) AND julianday(u.created_at) <= julianday(s.started_at))))
-             GROUP BY s.id
+             ),
+             -- Plain columns on both sides, so SQLite can index the join on the fly.
+             r AS MATERIALIZED (SELECT s.*, LOWER(s.ref) AS ref_lower FROM s),
+             accounts AS MATERIALIZED (SELECT id, LOWER(email) AS email_lower, julianday(created_at) AS created_day FROM users),
+             c AS (
+               SELECT r.id, u.id AS user_id FROM r JOIN users u ON u.id = r.ref_id
+               UNION
+               SELECT r.id, u.id FROM r JOIN users u ON u.id = r.ref WHERE r.ref_id IS NULL
+               UNION
+               SELECT r.id, u.id FROM r JOIN accounts u ON u.email_lower = r.ref_lower
+               WHERE r.ref_id IS NULL AND u.created_day <= julianday(r.started_at)
+             )
+             SELECT c.id, MIN(c.user_id) AS user_id FROM c GROUP BY c.id HAVING COUNT(*) = 1
            ) m
-           WHERE execution_history.id = m.id AND m.user_id IS NOT NULL`,
+           WHERE execution_history.id = m.id`,
           [first, last]
         );
         lastRowid = last;
