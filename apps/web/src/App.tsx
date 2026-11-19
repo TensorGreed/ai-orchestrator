@@ -109,7 +109,8 @@ import {
   type LiveNodeResult,
   type TraceStreamHandlers
 } from "./lib/run-trace";
-import { computeAttachmentSlots, orbitPositions } from "./lib/stages";
+import { ORBIT, attachedNodeIds, computeAttachmentSlots, orbitPositions } from "./lib/stages";
+import { chooseSourceHandle, findFreePosition, insertPositionAfter, planInsertConnection } from "./lib/canvas-insert";
 import { canvasRunPreview, hasTestData } from "./lib/run-data";
 import { newNodeConfig } from "./lib/trigger-paths";
 import {
@@ -183,6 +184,8 @@ import { MfaGateCard } from "./components/MfaGateCard";
 import { StepUpPrompt } from "./components/StepUpPrompt";
 import { isPaletteDefinition, withAgentToolPresets } from "./lib/agent-tool-presets";
 import { paletteKey } from "./components/NodePalette";
+import { GraphHistory, movedNodeIds } from "./lib/graph-history";
+import { AUXILIARY_HANDLES, CHAT_MODEL_NODE_TYPES, validateConnection } from "./lib/connection-rules";
 import { BreakGlassBanner } from "./components/BreakGlassBanner";
 import { BreakGlassConfirmCard } from "./components/BreakGlassConfirmCard";
 import { breakGlassLinkFromHash, stripBreakGlassFragment, type BreakGlassLink } from "./lib/break-glass";
@@ -198,6 +201,13 @@ interface DefinitionNode {
 }
 
 type AgentAttachmentHandle = "chat_model" | "memory" | "tool" | "worker" | "guard" | "protection";
+
+/** The output a node added from the palette connects after, and where to put it when a connection was dropped. */
+interface PaletteInsertSource {
+  nodeId: string;
+  handle: string | null;
+  position?: { x: number; y: number };
+}
 
 interface NodeDrawerContext {
   title: string;
@@ -310,19 +320,9 @@ const statusColors: Record<string, string> = {
   waiting_approval: "#a154f2",
   canceled: "#8a5a44"
 };
-const auxiliaryHandles = new Set(["chat_model", "memory", "tool", "worker", "guard", "protection"]);
-const chatModelNodeTypes: EditorNodeData["nodeType"][] = [
-  "openai_chat_model",
-  "anthropic_chat_model",
-  "ollama_chat_model",
-  "openai_compatible_chat_model",
-  "ai_gateway_chat_model",
-  "azure_openai_chat_model",
-  "google_gemini_chat_model",
-  "llm_call"
-];
+const auxiliaryHandles = AUXILIARY_HANDLES;
+const chatModelNodeTypes = CHAT_MODEL_NODE_TYPES;
 const chatModelDrawerNodeTypes = chatModelNodeTypes.filter((type) => type !== "llm_call");
-const agentPrimaryInputNodeTypes = new Set<EditorNodeData["nodeType"]>(["webhook_input", "text_input", "user_prompt"]);
 
 function buildAgentAttachmentDrawerContext(sourceNodeId: string, sourceHandle: AgentAttachmentHandle): NodeDrawerContext {
   if (sourceHandle === "chat_model") {
@@ -1241,6 +1241,8 @@ function StudioApp() {
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [showNodeDrawer, setShowNodeDrawer] = useState(false);
   const [nodeDrawerContext, setNodeDrawerContext] = useState<NodeDrawerContext | null>(null);
+  // The output a node picked in the palette is connected after (its `+`, or a connection dropped on the canvas).
+  const [paletteInsertSource, setPaletteInsertSource] = useState<PaletteInsertSource | null>(null);
   const [showShortcutsPanel, setShowShortcutsPanel] = useState(false);
   const [navDrawerOpen, setNavDrawerOpen] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">(() => {
@@ -1579,55 +1581,59 @@ function StudioApp() {
     }
   }, [theme]);
 
-  // Undo/redo history stack. Snapshot is (nodes, edges) pairs. We push on
-  // meaningful mutations (add/delete/duplicate/paste/config-update) via
-  // pushHistorySnapshot() from callsites; positional drag changes are NOT
-  // pushed on every frame (too noisy) — they're pushed once per drag end.
-  const historyStackRef = useRef<Array<{ nodes: EditorNode[]; edges: Edge[] }>>([]);
-  const redoStackRef = useRef<Array<{ nodes: EditorNode[]; edges: Edge[] }>>([]);
+  // One undo/redo history for every graph change (add, delete, move, connect, disconnect, Clear, paste, duplicate,
+  // config edits, Tidy): each call site pushes the graph as it was just before its change. A drag is one step,
+  // recorded when it ends and only when something moved.
+  const historyRef = useRef(new GraphHistory<EditorNode, Edge>(HISTORY_STACK_LIMIT));
   const suppressHistoryRef = useRef(false);
+  const dragStartSnapshotRef = useRef<{ nodes: EditorNode[]; edges: Edge[] } | null>(null);
 
   const pushHistorySnapshot = useCallback(() => {
     if (suppressHistoryRef.current) return;
-    historyStackRef.current.push({
-      nodes: cloneJson(nodes as EditorNode[]),
-      edges: cloneJson(edges as Edge[])
-    });
-    if (historyStackRef.current.length > HISTORY_STACK_LIMIT) {
-      historyStackRef.current.shift();
-    }
-    redoStackRef.current = [];
+    historyRef.current.push({ nodes: nodes as EditorNode[], edges: edges as Edge[] });
   }, [edges, nodes]);
 
+  const restoreHistorySnapshot = useCallback(
+    (snapshot: { nodes: EditorNode[]; edges: Edge[] } | null) => {
+      if (!snapshot) return;
+      suppressHistoryRef.current = true;
+      setNodes(snapshot.nodes);
+      setEdges(snapshot.edges);
+      setTimeout(() => {
+        suppressHistoryRef.current = false;
+      }, 0);
+    },
+    [setEdges, setNodes]
+  );
+
   const undo = useCallback(() => {
-    const prev = historyStackRef.current.pop();
-    if (!prev) return;
-    redoStackRef.current.push({
-      nodes: cloneJson(nodes as EditorNode[]),
-      edges: cloneJson(edges as Edge[])
-    });
-    suppressHistoryRef.current = true;
-    setNodes(prev.nodes);
-    setEdges(prev.edges);
-    setTimeout(() => {
-      suppressHistoryRef.current = false;
-    }, 0);
-  }, [edges, nodes, setEdges, setNodes]);
+    restoreHistorySnapshot(historyRef.current.undo({ nodes: nodes as EditorNode[], edges: edges as Edge[] }));
+  }, [edges, nodes, restoreHistorySnapshot]);
 
   const redo = useCallback(() => {
-    const next = redoStackRef.current.pop();
-    if (!next) return;
-    historyStackRef.current.push({
-      nodes: cloneJson(nodes as EditorNode[]),
-      edges: cloneJson(edges as Edge[])
-    });
-    suppressHistoryRef.current = true;
-    setNodes(next.nodes);
-    setEdges(next.edges);
-    setTimeout(() => {
-      suppressHistoryRef.current = false;
-    }, 0);
-  }, [edges, nodes, setEdges, setNodes]);
+    restoreHistorySnapshot(historyRef.current.redo({ nodes: nodes as EditorNode[], edges: edges as Edge[] }));
+  }, [edges, nodes, restoreHistorySnapshot]);
+
+  // Undo never crosses into another workflow; reloading the same one (after a save) keeps its history.
+  useEffect(() => {
+    historyRef.current.clear();
+    dragStartSnapshotRef.current = null;
+  }, [currentWorkflow.id]);
+
+  const handleNodeDragStart = useCallback(() => {
+    if (dragStartSnapshotRef.current) return;
+    dragStartSnapshotRef.current = cloneJson({ nodes: nodes as EditorNode[], edges: edges as Edge[] });
+  }, [edges, nodes]);
+
+  const handleNodeDragStop = useCallback((draggedNodes: Array<Pick<EditorNode, "id" | "position">>) => {
+    const before = dragStartSnapshotRef.current;
+    dragStartSnapshotRef.current = null;
+    if (!before || suppressHistoryRef.current) return;
+    // A node on an agent's port snaps back onto its orbit, so dragging one changes nothing.
+    const attached = attachedNodeIds(computeAttachmentSlots(before.nodes, before.edges));
+    const moved = movedNodeIds(before.nodes, draggedNodes).filter((id) => !attached.has(id));
+    if (moved.length > 0) historyRef.current.push(before);
+  }, []);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -2124,10 +2130,12 @@ function StudioApp() {
 
   const handleDeleteEdgeById = useCallback(
     (edgeId: string) => {
+      if (!edges.some((edge) => edge.id === edgeId)) return;
+      pushHistorySnapshot();
       setEdges((currentEdges) => currentEdges.filter((edge) => edge.id !== edgeId));
       setError(null);
     },
-    [setEdges]
+    [edges, pushHistorySnapshot, setEdges]
   );
 
   const refreshSecrets = useCallback(async () => {
@@ -2202,6 +2210,9 @@ function StudioApp() {
       const editor = workflowToEditor(workflow);
       const decoratedEdges = editor.edges.map((edge) => decorateEdge(edge, editor.nodes as EditorNode[]));
 
+      // The graph is replaced from the server: undo must not bring back the graph from before.
+      historyRef.current.clear();
+      dragStartSnapshotRef.current = null;
       setCurrentWorkflow(workflow);
       setNodes(editor.nodes as EditorNode[]);
       setEdges(decoratedEdges);
@@ -4335,12 +4346,62 @@ function StudioApp() {
     setShowNodeDrawer(true);
   }, []);
 
+  /** Pans the canvas, keeping the zoom, so a node placed at `position` is in view. */
+  const revealCanvasPosition = useCallback(
+    (position: { x: number; y: number }) => {
+      const bounds = flowWrapperRef.current?.getBoundingClientRect();
+      if (!reactFlowInstance || !bounds || bounds.width === 0 || bounds.height === 0) return;
+      const { x: panX, y: panY, zoom } = reactFlowInstance.getViewport();
+      const left = position.x * zoom + panX;
+      const top = position.y * zoom + panY;
+      const right = left + ORBIT.cardWidth * zoom;
+      const bottom = top + ORBIT.cardHeight * zoom;
+      const margin = 24;
+      if (left >= margin && top >= margin && right <= bounds.width - margin && bottom <= bounds.height - margin) return;
+      reactFlowInstance.setCenter(position.x + ORBIT.cardWidth / 2, position.y + ORBIT.cardHeight / 2, { zoom, duration: 240 });
+    },
+    [reactFlowInstance]
+  );
+
+  /**
+   * The node a new palette node connects after: the output whose `+` was used, else the one selected node (not a
+   * node on an agent's port, not a sticky note). Null when there is none.
+   */
+  const resolveInsertSource = useCallback(
+    (explicit: PaletteInsertSource | null): { node: EditorNode; handle: string | null; position?: { x: number; y: number } } | null => {
+      const attached = attachedNodeIds(computeAttachmentSlots(nodes as EditorNode[], edges));
+      if (explicit) {
+        const node = (nodes as EditorNode[]).find((candidate) => candidate.id === explicit.nodeId);
+        return node && !attached.has(node.id) ? { node, handle: explicit.handle, position: explicit.position } : null;
+      }
+      const selected = (nodes as EditorNode[]).filter((node) => node.selected);
+      if (selected.length !== 1) return null;
+      const node = selected[0]!;
+      if (node.data.nodeType === "sticky_note") return null;
+      if (attached.has(node.id)) return null;
+      return { node, handle: chooseSourceHandle(node, edges) };
+    },
+    [edges, nodes]
+  );
+
   const createNodeFromDefinition = useCallback(
-    (definition: DefinitionNode, position?: { x: number; y: number }, attachContext?: NodeDrawerContext | null) => {
+    (
+      definition: DefinitionNode,
+      position?: { x: number; y: number },
+      attachContext?: NodeDrawerContext | null,
+      insertSource?: PaletteInsertSource | null
+    ) => {
       const id = createNodeId(definition.type as EditorNodeData["nodeType"]);
-      const fallbackPosition = reactFlowInstance
-        ? reactFlowInstance.project({ x: window.innerWidth / 2 - 120, y: 180 })
-        : { x: 160, y: 120 };
+      const bounds = flowWrapperRef.current?.getBoundingClientRect();
+      const fallbackPosition = findFreePosition(
+        reactFlowInstance
+          ? reactFlowInstance.project({
+              x: (bounds ? bounds.width : window.innerWidth) / 2 - ORBIT.cardWidth / 2,
+              y: (bounds ? bounds.height : window.innerHeight) / 2 - ORBIT.cardHeight / 2
+            })
+          : { x: 160, y: 120 },
+        nodes as EditorNode[]
+      );
       const sourceNode = attachContext?.sourceNodeId
         ? nodes.find((node) => node.id === attachContext.sourceNodeId)
         : undefined;
@@ -4356,10 +4417,29 @@ function StudioApp() {
         return orbitPositions(sourceNode.id, slots, sourceNode.position)[id];
       })();
 
+      // A step node (not an agent attachment, not a drop) goes after the selected node or the output whose `+` was used.
+      const insertAfter = attachContext?.sourceHandle || (position && !insertSource) ? null : resolveInsertSource(insertSource ?? null);
+      const insertPosition = insertAfter
+        ? insertAfter.position ?? insertPositionAfter(insertAfter.node, insertAfter.handle, nodes as EditorNode[])
+        : undefined;
+      // The same rules as dragging a connection: a refused edge leaves the node placed but unconnected, with the notice.
+      const connectPlan = insertAfter
+        ? planInsertConnection(
+            insertAfter.node,
+            insertAfter.handle,
+            { id, data: { nodeType: definition.type, label: definition.label } },
+            nodes as EditorNode[],
+            edges
+          )
+        : null;
+      const connectAfter = insertAfter && connectPlan?.kind === "connect" ? { node: insertAfter.node, handle: connectPlan.sourceHandle } : null;
+
       const newNode: Node<EditorNodeData> = {
         id,
         type: definition.type === "sticky_note" ? "stickyNote" : "workflowNode",
-        position: position ?? attachmentPosition ?? fallbackPosition,
+        position: position ?? attachmentPosition ?? insertPosition ?? fallbackPosition,
+        // A step node starts selected, so the next one added connects after it.
+        selected: !attachContext?.sourceHandle,
         data: {
           label: definition.label,
           nodeType: definition.type as EditorNodeData["nodeType"],
@@ -4368,7 +4448,10 @@ function StudioApp() {
       };
 
       pushHistorySnapshot();
-      setNodes((existing) => [...existing, newNode]);
+      setNodes((existing) => [
+        ...(newNode.selected ? existing.map((node) => (node.selected ? { ...node, selected: false } : node)) : existing),
+        newNode
+      ]);
       if (attachContext?.sourceNodeId && attachContext.sourceHandle) {
         const edgeNodes = [...(nodes as EditorNode[]), newNode as EditorNode];
         const edge = decorateEdge(
@@ -4393,10 +4476,23 @@ function StudioApp() {
             : existing;
           return addEdge(edge, baseEdges);
         });
+      } else if (connectAfter) {
+        const edge = decorateEdge(
+          {
+            id: createEdgeId(connectAfter.node.id, id),
+            source: connectAfter.node.id,
+            target: id,
+            sourceHandle: connectAfter.handle ?? undefined,
+            targetHandle: undefined
+          },
+          [...(nodes as EditorNode[]), newNode as EditorNode]
+        );
+        setEdges((existing) => addEdge(edge, existing.map((candidate) => (candidate.selected ? { ...candidate, selected: false } : candidate))));
       }
-      setError(null);
+      if (!attachContext?.sourceHandle) revealCanvasPosition(newNode.position);
+      setError(connectPlan?.kind === "refused" ? connectPlan.message : null);
     },
-    [edges, nodes, pushHistorySnapshot, reactFlowInstance, setEdges, setNodes]
+    [edges, nodes, pushHistorySnapshot, reactFlowInstance, resolveInsertSource, revealCanvasPosition, setEdges, setNodes]
   );
 
   const onConnect = useCallback(
@@ -4406,111 +4502,21 @@ function StudioApp() {
       }
       const source = connection.source;
       const target = connection.target;
-      const sourceNode = nodes.find((node) => node.id === source);
-      const targetNode = nodes.find((node) => node.id === target);
-      const expectedTargetType: Record<string, EditorNodeData["nodeType"] | EditorNodeData["nodeType"][]> = {
-        chat_model: chatModelNodeTypes,
-        memory: "local_memory",
-        tool: ["mcp_tool", "workflow_tool"],
-        worker: ["agent_orchestrator", "supervisor_node"],
-        guard: "guard",
-        protection: "guard_protection"
-      };
-      const expectedHandleByTargetType: Partial<Record<EditorNodeData["nodeType"], string>> = {
-        llm_call: "chat_model",
-        openai_chat_model: "chat_model",
-        anthropic_chat_model: "chat_model",
-        ollama_chat_model: "chat_model",
-        openai_compatible_chat_model: "chat_model",
-        ai_gateway_chat_model: "chat_model",
-        azure_openai_chat_model: "chat_model",
-        google_gemini_chat_model: "chat_model",
-        local_memory: "memory",
-        mcp_tool: "tool",
-        workflow_tool: "tool"
-      };
-
-      let sourceHandle = connection.sourceHandle ?? "";
-      if ((sourceNode?.data.nodeType === "agent_orchestrator" || sourceNode?.data.nodeType === "supervisor_node") && !sourceHandle && targetNode) {
-        const inferred = expectedHandleByTargetType[targetNode.data.nodeType];
-        if (inferred) {
-          sourceHandle = inferred;
-        } else if (targetNode.data.nodeType === "agent_orchestrator" || targetNode.data.nodeType === "supervisor_node") {
-          sourceHandle = "worker";
-        } else if (targetNode.data.nodeType === "guard") {
-          sourceHandle = "guard";
-        }
+      const verdict = validateConnection({ source, target, sourceHandle: connection.sourceHandle }, nodes as EditorNode[], edges);
+      if (!verdict.ok) {
+        setError(verdict.message);
+        return;
       }
-      if (sourceNode?.data.nodeType === "guard" && targetNode?.data.nodeType === "guard_protection" && (!sourceHandle || sourceHandle === "pass")) {
-        sourceHandle = "protection";
-      }
+      const sourceHandle = verdict.sourceHandle ?? "";
 
-      if ((targetNode?.data.nodeType === "agent_orchestrator" || targetNode?.data.nodeType === "supervisor_node") && sourceNode) {
-        const requiredHandle = expectedHandleByTargetType[sourceNode.data.nodeType];
-        if (requiredHandle) {
-          setError(
-            `Attach '${sourceNode.data.label}' from the Agent '${requiredHandle}' port (drag edge from Agent to node).`
-          );
-          return;
-        }
-      }
-
-      const isAgentAttachmentHandle = auxiliaryHandles.has(sourceHandle);
-
-      if (isAgentAttachmentHandle) {
-        const carrierOk =
-          sourceHandle === "protection"
-            ? sourceNode?.data.nodeType === "guard"
-            : sourceNode?.data.nodeType === "agent_orchestrator" || sourceNode?.data.nodeType === "supervisor_node";
-        if (!carrierOk) {
-          setError(
-            sourceHandle === "protection"
-              ? "The protection handle can only be used from a Content Rules node."
-              : "chat_model/memory/tool/worker/guard handles can only be used from an Agent Orchestrator or Supervisor node."
-          );
-          return;
-        }
-
-        const requiredType = expectedTargetType[sourceHandle];
-        if (requiredType) {
-          const typeMatches = Array.isArray(requiredType) 
-            ? requiredType.includes(targetNode?.data.nodeType as any)
-            : targetNode?.data.nodeType === requiredType;
-            
-          if (!typeMatches) {
-            setError(`Invalid attachment. '${sourceHandle}' must connect to a '${Array.isArray(requiredType) ? requiredType.join(" or ") : requiredType}' node.`);
-            return;
-          }
-        }
-      }
-
-      if (!isAgentAttachmentHandle && targetNode?.data.nodeType === "agent_orchestrator" && sourceNode) {
-        const incomingPrimaryInputTypes = new Set<EditorNodeData["nodeType"]>();
-
-        for (const edge of edges) {
-          const existingIsAttachment = edge.sourceHandle ? auxiliaryHandles.has(edge.sourceHandle) : false;
-          if (existingIsAttachment || edge.target !== target) {
-            continue;
-          }
-          const existingSourceNode = nodes.find((node) => node.id === edge.source);
-          const existingSourceType = existingSourceNode?.data.nodeType;
-          if (existingSourceType && agentPrimaryInputNodeTypes.has(existingSourceType)) {
-            incomingPrimaryInputTypes.add(existingSourceType);
-          }
-        }
-
-        if (agentPrimaryInputNodeTypes.has(sourceNode.data.nodeType)) {
-          incomingPrimaryInputTypes.add(sourceNode.data.nodeType);
-        }
-
-        if (incomingPrimaryInputTypes.size > 1) {
-          setError(
-            `Agent can only use one primary input type. Found: ${[...incomingPrimaryInputTypes].sort().join(", ")}.`
-          );
-          return;
-        }
-      }
-
+      const alreadyConnected = edges.some(
+        (edge) =>
+          edge.source === source &&
+          edge.target === target &&
+          (edge.sourceHandle ?? null) === (sourceHandle || null) &&
+          (edge.targetHandle ?? null) === (connection.targetHandle ?? null)
+      );
+      if (!alreadyConnected) pushHistorySnapshot();
       setEdges((existing) => {
         const edge = decorateEdge(
           {
@@ -4527,7 +4533,7 @@ function StudioApp() {
       });
       setError(null);
     },
-    [edges, nodes, setEdges]
+    [edges, nodes, pushHistorySnapshot, setEdges]
   );
 
   const onDrop = useCallback(
@@ -5273,20 +5279,33 @@ function StudioApp() {
               onCloseNodeDrawer={() => {
                 setShowNodeDrawer(false);
                 setNodeDrawerContext(null);
+                setPaletteInsertSource(null);
               }}
               onOpenNodeDrawer={() => {
                 setNodeDrawerContext(null);
+                setPaletteInsertSource(null);
                 setShowNodeDrawer(true);
               }}
+              onInsertFromHandle={(nodeId, handle, position) => {
+                setNodeDrawerContext(null);
+                setPaletteInsertSource({ nodeId, handle, position });
+                setShowNodeDrawer(true);
+              }}
+              insertAfterLabel={nodeDrawerContext ? null : resolveInsertSource(paletteInsertSource)?.node.data.label ?? null}
               groupedDefinitions={groupedDefinitions}
-              onCreateNodeFromDefinition={(definition) => createNodeFromDefinition(definition, undefined, nodeDrawerContext)}
+              onCreateNodeFromDefinition={(definition) =>
+                createNodeFromDefinition(definition, undefined, nodeDrawerContext, nodeDrawerContext ? null : paletteInsertSource)
+              }
               onOpenAgentAttachmentDrawer={handleOpenAgentAttachmentDrawer}
               nodes={nodes}
               edges={edges}
               nodeTypes={nodeTypes}
               edgeTypes={edgeTypes}
               onNodesChange={onNodesChange}
+              onNodeDragStart={handleNodeDragStart}
+              onNodeDragStop={handleNodeDragStop}
               onEdgesChange={(changes) => {
+                if (changes.some((change) => change.type === "remove")) pushHistorySnapshot();
                 onEdgesChange(changes);
                 setEdges((current) => current.map((edge) => decorateEdge(edge, nodes as EditorNode[])));
               }}
@@ -5296,6 +5315,13 @@ function StudioApp() {
               onOpenNodeConfig={openNodeConfig}
               reactFlowInstance={reactFlowInstance}
               onClearCanvas={() => {
+                if (nodes.length === 0 && edges.length === 0) return;
+                const count = nodes.length;
+                const confirmed = window.confirm(
+                  `Remove ${count === 1 ? "the 1 node" : `all ${count} nodes`} and their connections from the canvas? You can undo this with Ctrl+Z.`
+                );
+                if (!confirmed) return;
+                pushHistorySnapshot();
                 setNodes([]);
                 setEdges([]);
                 setExecutionResult(null);

@@ -35,6 +35,7 @@ import { latestResolvedFields, NodeActivityList, ResolvedFieldsTable } from "./N
 import { NodeRunInput, NodeRunOutput, RunDataView, RunStatusLine, RunStepBar, type RunNodeResult } from "./NodeRunData";
 import { DataPane, PaneSeparator, type PaneMenuItem } from "./InspectorPane";
 import { AdvancedFields, HelpHint, countSet } from "./InspectorDisclosure";
+import { runAfterPointerRelease } from "../lib/pointer-release";
 import { attachmentUse, hasTestData, runStepOrder } from "../lib/run-data";
 import type { EditorNode, EditorNodeData, NodeTelemetry } from "../lib/workflow";
 import { NodeTypeIcon } from "./node-icons";
@@ -1070,12 +1071,21 @@ function ExpressionField({
     };
   }, [mode, previewContext, value]);
 
+  // The chips and the scope tip collapse on blur. When a mouse press caused the blur, they collapse after the release,
+  // so nothing below the field moves between press and release and the click lands where the user pressed.
+  const fieldRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
   return (
     <div
+      ref={fieldRef}
       className="cfg-field expression-field"
       onFocus={() => setFocusWithin(true)}
       onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocusWithin(false);
+        if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+        runAfterPointerRelease(() => {
+          if (!fieldRef.current?.contains(document.activeElement)) setFocusWithin(false);
+        });
       }}
     >
       <div className="cfg-field-header">
@@ -1102,8 +1112,13 @@ function ExpressionField({
         aria-label={label}
         value={value}
         onChange={(event) => onChange(event.target.value)}
+        ref={textareaRef}
         onFocus={() => setEditing(true)}
-        onBlur={() => setEditing(false)}
+        onBlur={() =>
+          runAfterPointerRelease(() => {
+            if (document.activeElement !== textareaRef.current) setEditing(false);
+          })
+        }
         rows={rows}
       />
       {formatError && <div className="cfg-field-error">{formatError}</div>}
@@ -6456,12 +6471,42 @@ export function NodeInspector({
           </>
         );
       }
-      case "http_request":
+      case "http_request": {
+        const httpMethod = toStringValue(config.method, "GET").toUpperCase();
+        // A request with a body shows its headers and body up front; for GET and DELETE they stay under Advanced.
+        const sendsBody = httpMethod === "POST" || httpMethod === "PUT" || httpMethod === "PATCH";
+        const defaultHeaders = "{\n  \"Accept\": \"application/json\"\n}";
+        const headersField = (
+          <ExpressionField
+            label="Headers Template (JSON)"
+            value={toStringValue(config.headersTemplate, defaultHeaders)}
+            onChange={(next) => setConfig((current) => ({ ...current, headersTemplate: next }))}
+            rows={sendsBody ? 3 : 5}
+            mode="template"
+            previewContext={expressionPreviewContext}
+          />
+        );
+        const bodyField = (
+          <ExpressionField
+            label="Body Template"
+            value={toStringValue(config.bodyTemplate, "")}
+            onChange={(next) => setConfig((current) => ({ ...current, bodyTemplate: next }))}
+            rows={5}
+            mode="template"
+            previewContext={expressionPreviewContext}
+            help={
+              <>
+                A body that is valid JSON is sent as <code>application/json</code> unless the headers set a{" "}
+                <code>Content-Type</code>.
+              </>
+            }
+          />
+        );
         return (
           <>
             <SelectField
               label="Method"
-              value={toStringValue(config.method, "GET")}
+              value={httpMethod}
               onChange={(next) => setConfig((current) => ({ ...current, method: next }))}
               options={[
                 { value: "GET", label: "GET" },
@@ -6484,6 +6529,8 @@ export function NodeInspector({
                 </>
               }
             />
+            {sendsBody && bodyField}
+            {sendsBody && headersField}
             {renderCredentialSecretField({
               fieldKey: "http_request_secret",
               label: "Authorization Secret (Bearer)",
@@ -6498,50 +6545,41 @@ export function NodeInspector({
             })}
             <AdvancedFields
               setCount={countSet([
-                [config.headersTemplate, "{\n  \"Accept\": \"application/json\"\n}", sampleConfig.headersTemplate],
-                [config.bodyTemplate, "", sampleConfig.bodyTemplate],
+                ...(sendsBody
+                  ? []
+                  : ([
+                      [config.headersTemplate, defaultHeaders, sampleConfig.headersTemplate],
+                      [config.bodyTemplate, "", sampleConfig.bodyTemplate]
+                    ] as Array<[unknown, unknown, unknown]>)),
                 [config.responseType, "json", sampleConfig.responseType],
                 [config.timeoutMs, 15000, sampleConfig.timeoutMs]
               ])}
             >
-            <ExpressionField
-              label="Headers Template (JSON)"
-              value={toStringValue(config.headersTemplate, "{\n  \"Accept\": \"application/json\"\n}")}
-              onChange={(next) => setConfig((current) => ({ ...current, headersTemplate: next }))}
-              rows={5}
-              mode="template"
-              previewContext={expressionPreviewContext}
-            />
-            <ExpressionField
-              label="Body Template"
-              value={toStringValue(config.bodyTemplate, "")}
-              onChange={(next) => setConfig((current) => ({ ...current, bodyTemplate: next }))}
-              rows={5}
-              mode="template"
-              previewContext={expressionPreviewContext}
-            />
-            <div className="cfg-grid-2">
-              <SelectField
-                label="Response Type"
-                value={toStringValue(config.responseType, "json")}
-                onChange={(next) => setConfig((current) => ({ ...current, responseType: next }))}
-                options={[
-                  { value: "json", label: "JSON" },
-                  { value: "text", label: "Text" }
-                ]}
-              />
-              <NumberField
-                label="Timeout (ms)"
-                value={toNumberValue(config.timeoutMs, 15000)}
-                min={1}
-                step={100}
-                onChange={(next) => setConfig((current) => ({ ...current, timeoutMs: next }))}
-              />
-            </div>
+              {!sendsBody && headersField}
+              {!sendsBody && bodyField}
+              <div className="cfg-grid-2">
+                <SelectField
+                  label="Response Type"
+                  value={toStringValue(config.responseType, "json")}
+                  onChange={(next) => setConfig((current) => ({ ...current, responseType: next }))}
+                  options={[
+                    { value: "json", label: "JSON" },
+                    { value: "text", label: "Text" }
+                  ]}
+                />
+                <NumberField
+                  label="Timeout (ms)"
+                  value={toNumberValue(config.timeoutMs, 15000)}
+                  min={1}
+                  step={100}
+                  onChange={(next) => setConfig((current) => ({ ...current, timeoutMs: next }))}
+                />
+              </div>
             </AdvancedFields>
             <HttpErrorStatusFields config={config} errorConfig={nodeErrorConfig} setConfig={setConfig} />
           </>
         );
+      }
       case "set_node": {
         const assignments = Array.isArray(config.assignments)
           ? config.assignments.map((entry) => asRecord(entry))

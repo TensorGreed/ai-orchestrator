@@ -1,3 +1,4 @@
+import { useContext, type CSSProperties } from "react";
 import { Handle, Position, type NodeProps } from "reactflow";
 import type { EditorNodeData } from "../lib/workflow";
 import { runningElapsedMs } from "../lib/run-trace";
@@ -7,6 +8,7 @@ import { ORBIT, emptySlots, isHubType, ringGeometry, summarizeNode } from "../li
 import type { McpCanvasMarker, McpNavTarget } from "../lib/mcp-control-plane";
 import { NodeTypeIcon } from "./node-icons";
 import { ERROR_OUTPUT_HANDLE, showsErrorOutput } from "../lib/error-output";
+import { CanvasInsertContext } from "./canvas-insert-context";
 
 const TERMINAL_TYPES = new Set([
   "schedule_trigger",
@@ -58,20 +60,72 @@ function statusTitle(status: EditorNodeData["executionStatus"]): string {
   }
 }
 
-export function WorkflowCanvasNode({ data, selected }: NodeProps<EditorNodeData>) {
+export function WorkflowCanvasNode({ id, data, selected }: NodeProps<EditorNodeData>) {
   const nodeType = data.nodeType;
   if (isHubType(nodeType)) {
-    return <HubNode data={data} selected={selected} />;
+    return <HubNode id={id} data={data} selected={selected} />;
   }
   if (data.attachedTo && data.attachedAs) {
-    return <SatelliteNode data={data} selected={selected} />;
+    return <SatelliteNode id={id} data={data} selected={selected} />;
   }
-  return <CardNode data={data} selected={selected} />;
+  return <CardNode id={id} data={data} selected={selected} />;
 }
 
 interface VariantProps {
+  id: string;
   data: EditorNodeData;
   selected: boolean;
+}
+
+/**
+ * A step output on the right edge of a card or hub, with a `+` beside it that opens the palette to add a node
+ * connected after this output. The `+` shows on an output with no connection yet, and on hover or selection.
+ */
+function SourceHandle({
+  nodeId,
+  id,
+  className,
+  style,
+  position = Position.Right,
+  title,
+  noAdd = false
+}: {
+  nodeId: string;
+  id?: string;
+  className: string;
+  style?: CSSProperties;
+  position?: Position;
+  title?: string;
+  /** No `+`: a worker agent on a Supervisor's port has no step output. */
+  noAdd?: boolean;
+}) {
+  const insertActions = useContext(CanvasInsertContext);
+  const actions = noAdd ? null : insertActions;
+  const handle = id ?? null;
+  const connected = actions?.isConnected(nodeId, handle) ?? false;
+  return (
+    <>
+      <Handle id={id} type="source" position={position} className={className} style={style} title={title} />
+      {actions && (
+        <button
+          type="button"
+          className={`wf-handle-add nodrag nopan${connected ? " wf-handle-add-connected" : ""}`}
+          style={style?.top !== undefined ? { top: style.top } : undefined}
+          title="Add a node after this output"
+          aria-label={id ? `Add a node after the ${id} output` : "Add a node after this step"}
+          onMouseDown={(event) => event.stopPropagation()}
+          onPointerDown={(event) => event.stopPropagation()}
+          onDoubleClick={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            actions.onAddAfter(nodeId, handle);
+          }}
+        >
+          +
+        </button>
+      )}
+    </>
+  );
 }
 
 function Badges({ data }: { data: EditorNodeData }) {
@@ -191,7 +245,7 @@ function rootClass(kind: "card" | "hub" | "satellite", data: EditorNodeData, sel
   return parts.join(" ");
 }
 
-function CardNode({ data, selected }: VariantProps) {
+function CardNode({ id, data, selected }: VariantProps) {
   const nodeType = data.nodeType;
   const summary = summarizeNode({ type: nodeType, config: data.config });
   const terminal = TERMINAL_TYPES.has(nodeType);
@@ -215,8 +269,8 @@ function CardNode({ data, selected }: VariantProps) {
         {data.mcpMarker && <McpMarker marker={data.mcpMarker} onOpen={data.onOpenMcpTarget} variant="card" />}
       </div>
       <span className={`wf-status-ring wf-status-${status ?? "idle"}`} title={statusTitle(status)} aria-label={statusTitle(status)} />
-      <StructuralPorts data={data} />
-      <ErrorOutputPort data={data} placement="card" />
+      <StructuralPorts nodeId={id} data={data} />
+      <ErrorOutputPort nodeId={id} data={data} placement="card" />
       <DebugPreview data={data} />
       <RunningPill data={data} />
       <Telemetry data={data} />
@@ -229,34 +283,35 @@ function CardNode({ data, selected }: VariantProps) {
  * On Error is "Execute Fallback Branch". Cards show it under the right edge,
  * hubs on their right side below the main output.
  */
-function ErrorOutputPort({ data, placement }: { data: EditorNodeData; placement: "card" | "hub" }) {
+function ErrorOutputPort({ nodeId, data, placement }: { nodeId: string; data: EditorNodeData; placement: "card" | "hub" }) {
   if (!showsErrorOutput(data.nodeType, data.config, data.errorOutputConnected)) return null;
   return (
     <div className={`wf-error-output wf-error-output-${placement}`} data-testid="node-error-output">
       <span className="port-label">Error</span>
-      <Handle
+      <SourceHandle
+        nodeId={nodeId}
         id={ERROR_OUTPUT_HANDLE}
-        type="source"
         position={placement === "card" ? Position.Bottom : Position.Right}
         className="wf-handle wf-handle-main wf-handle-err"
         title="Error output: the failed item and its error"
+        noAdd={Boolean(data.attachedAs)}
       />
     </div>
   );
 }
 
-function StructuralPorts({ data }: { data: EditorNodeData }) {
+function StructuralPorts({ nodeId, data }: { nodeId: string; data: EditorNodeData }) {
   const nodeType = data.nodeType;
   if (nodeType === "if_node") {
     return (
       <div className="wf-structural-ports">
         <div className="wf-structural-port">
           <span className="port-label">True</span>
-          <Handle id="true" type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: "32%" }} />
+          <SourceHandle nodeId={nodeId} id="true" className="wf-handle wf-handle-main" style={{ top: "32%" }} />
         </div>
         <div className="wf-structural-port">
           <span className="port-label">False</span>
-          <Handle id="false" type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: "68%" }} />
+          <SourceHandle nodeId={nodeId} id="false" className="wf-handle wf-handle-main" style={{ top: "68%" }} />
         </div>
       </div>
     );
@@ -266,11 +321,11 @@ function StructuralPorts({ data }: { data: EditorNodeData }) {
       <div className="wf-structural-ports">
         <div className="wf-structural-port">
           <span className="port-label">Try</span>
-          <Handle id="success" type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: "32%" }} />
+          <SourceHandle nodeId={nodeId} id="success" className="wf-handle wf-handle-main" style={{ top: "32%" }} />
         </div>
         <div className="wf-structural-port">
           <span className="port-label">Catch</span>
-          <Handle id="error" type="source" position={Position.Right} className="wf-handle wf-handle-main wf-handle-err" style={{ top: "68%" }} />
+          <SourceHandle nodeId={nodeId} id="error" className="wf-handle wf-handle-main wf-handle-err" style={{ top: "68%" }} />
         </div>
       </div>
     );
@@ -290,13 +345,13 @@ function StructuralPorts({ data }: { data: EditorNodeData }) {
               <span className="port-label" title={lbl}>
                 {lbl.length > 8 ? `${lbl.substring(0, 6)}..` : lbl}
               </span>
-              <Handle id={normalizedHandleId} type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: topFor(i) }} />
+              <SourceHandle nodeId={nodeId} id={normalizedHandleId} className="wf-handle wf-handle-main" style={{ top: topFor(i) }} />
             </div>
           );
         })}
         <div className="wf-structural-port">
           <span className="port-label">Default</span>
-          <Handle id="default" type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: topFor(cases.length) }} />
+          <SourceHandle nodeId={nodeId} id="default" className="wf-handle wf-handle-main" style={{ top: topFor(cases.length) }} />
         </div>
       </div>
     );
@@ -321,7 +376,7 @@ function StructuralPorts({ data }: { data: EditorNodeData }) {
               <span className="port-label" style={{ top: port.top }}>
                 {port.label}
               </span>
-              <Handle id={port.id} type="source" position={Position.Right} className={`wf-handle wf-handle-main${port.className}`} style={{ top: port.top }} />
+              <SourceHandle nodeId={nodeId} id={port.id} className={`wf-handle wf-handle-main${port.className}`} style={{ top: port.top }} />
             </div>
           ))}
         </div>
@@ -362,7 +417,7 @@ function StructuralPorts({ data }: { data: EditorNodeData }) {
             <span className="port-label" style={{ top: port.top }}>
               {port.label}
             </span>
-            <Handle id={port.id} type="source" position={Position.Right} className={`wf-handle wf-handle-main${port.className}`} style={{ top: port.top }} />
+            <SourceHandle nodeId={nodeId} id={port.id} className={`wf-handle wf-handle-main${port.className}`} style={{ top: port.top }} />
           </div>
         ))}
       </div>
@@ -382,16 +437,16 @@ function StructuralPorts({ data }: { data: EditorNodeData }) {
             <span className="port-label" title={port.label}>
               {port.label}
             </span>
-            <Handle id={port.id} type="source" position={Position.Right} className="wf-handle wf-handle-main" style={{ top: port.top }} />
+            <SourceHandle nodeId={nodeId} id={port.id} className="wf-handle wf-handle-main" style={{ top: port.top }} />
           </div>
         ))}
       </div>
     );
   }
-  return <Handle type="source" position={Position.Right} className="wf-handle wf-handle-main" />;
+  return <SourceHandle nodeId={nodeId} className="wf-handle wf-handle-main" />;
 }
 
-function HubNode({ data, selected }: VariantProps) {
+function HubNode({ id, data, selected }: VariantProps) {
   const nodeType = data.nodeType;
   const isSupervisor = nodeType === "supervisor_node";
   const isWorker = data.attachedAs === "worker";
@@ -415,8 +470,8 @@ function HubNode({ data, selected }: VariantProps) {
       </div>
       <Badges data={data} />
       <Handle type="target" position={Position.Left} className="wf-handle wf-handle-main" />
-      <Handle type="source" position={Position.Right} className="wf-handle wf-handle-main" />
-      <ErrorOutputPort data={data} placement="hub" />
+      <SourceHandle nodeId={id} className="wf-handle wf-handle-main" noAdd={Boolean(data.attachedAs)} />
+      <ErrorOutputPort nodeId={id} data={data} placement="hub" />
       <Handle id="chat_model" type="source" position={Position.Bottom} className="wf-handle-hidden" />
       <Handle id="memory" type="source" position={Position.Bottom} className="wf-handle-hidden" />
       <Handle id="tool" type="source" position={Position.Bottom} className="wf-handle-hidden" />

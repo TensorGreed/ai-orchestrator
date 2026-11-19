@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { NodeTypeIcon, PaletteIcon, type PaletteCategoryIconKey } from "./node-icons";
+import { rankPaletteItems, scorePaletteItem } from "../lib/palette-search";
 
 export interface PaletteDefinition {
   /** Set on a preset (a node type with a ready configuration, such as a built-in tool); unique in the palette. */
@@ -42,17 +43,12 @@ interface FlatRow {
   icon: PaletteCategoryIconKey;
 }
 
-function matches(item: PaletteDefinition, query: string): boolean {
-  return (
-    item.label.toLowerCase().includes(query) ||
-    item.type.toLowerCase().includes(query) ||
-    item.description.toLowerCase().includes(query)
-  );
-}
-
 /**
  * Searchable node palette grouped by category. Filter input is focused on
  * open, Esc closes, arrow keys move the highlight and Enter adds the node.
+ * While searching, results are ranked (exact name, then name prefix, other
+ * names, then description) and the category holding the best match comes
+ * first, so Enter adds the best match.
  */
 export function NodePalette({ title, subtitle, sections, flatItems, emptyMessage, onPick, onClose, onTidy }: NodePaletteProps) {
   const [query, setQuery] = useState("");
@@ -68,15 +64,19 @@ export function NodePalette({ title, subtitle, sections, flatItems, emptyMessage
 
   const visibleSections = useMemo<PaletteSection[]>(() => {
     if (flatItems) {
-      const items = normalized ? flatItems.filter((item) => matches(item, normalized)) : flatItems;
+      const items = rankPaletteItems(flatItems, normalized);
       return items.length ? [{ key: "filtered", title, description: subtitle, icon: "ai", items }] : [];
     }
+    if (!normalized) return sections;
     return sections
-      .map((section) => ({
-        ...section,
-        items: normalized ? section.items.filter((item) => matches(item, normalized)) : section.items
-      }))
-      .filter((section) => section.items.length > 0);
+      .map((section, index) => {
+        const items = rankPaletteItems(section.items, normalized);
+        const best = items[0] ? scorePaletteItem(items[0], normalized) ?? Number.POSITIVE_INFINITY : Number.POSITIVE_INFINITY;
+        return { section: { ...section, items }, best, index };
+      })
+      .filter((entry) => entry.section.items.length > 0)
+      .sort((left, right) => left.best - right.best || left.index - right.index)
+      .map((entry) => entry.section);
   }, [flatItems, normalized, sections, subtitle, title]);
 
   const rows = useMemo<FlatRow[]>(
@@ -206,7 +206,10 @@ export function NodePalette({ title, subtitle, sections, flatItems, emptyMessage
                       <NodeTypeIcon nodeType={item.type} fallbackIcon={section.icon} />
                     </span>
                     <span className="node-palette-row-copy">
-                      <strong>{item.label}</strong>
+                      <strong>
+                        {item.label}
+                        {normalized && rowIndex === 0 ? <span className="node-palette-best">Best match</span> : null}
+                      </strong>
                       <small>{item.description || item.type}</small>
                     </span>
                     <span className="node-palette-row-type">{item.type}</span>

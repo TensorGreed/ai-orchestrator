@@ -150,6 +150,7 @@ import {
 import { renderChart } from "./chart";
 import { workerDelegateToolName } from "./agent-tool-names";
 import { browseUrl, type WebBrowseOptions } from "./web-browse";
+import { applyJsonContentType } from "./http-content-type";
 import {
   DEFAULT_OUTBOUND_GUARD,
   assertOutboundUrlAllowed,
@@ -4702,6 +4703,7 @@ async function executeNodeHandler(
 
         if (safeMethod !== "GET" && safeMethod !== "DELETE" && renderedBody.trim()) {
           requestInit.body = renderedBody;
+          applyJsonContentType(requestHeaders, renderedBody);
         }
 
         const response = await guardedFetch(renderedUrl, requestInit, {

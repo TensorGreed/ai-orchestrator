@@ -127,8 +127,16 @@ export function RadialActionRing({ node, center, onAction }: RadialActionRingPro
             style={style}
             title={item.title}
             aria-label={item.title}
+            onDoubleClick={(event) => {
+              // A double-click that ends on the ring was aimed at the node under it: open the node, as on the canvas.
+              event.stopPropagation();
+              onAction({ kind: "edit" });
+            }}
             onClick={(event) => {
               event.stopPropagation();
+              // The ring sits over the node's right side and appears when the first click of a double-click selects
+              // the node, so the second click can land on a ring button: ignore it (it once deleted the node).
+              if (event.detail > 1) return;
               if (item.id === "color") {
                 setShowColors((v) => !v);
                 return;

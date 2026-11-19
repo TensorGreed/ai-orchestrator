@@ -8,6 +8,7 @@ import { WorkflowCanvasArea } from "./WorkflowCanvasArea";
 import { WorkflowCanvasNode } from "./WorkflowCanvasNode";
 import { AttachmentSpokeEdge, WorkflowCanvasEdge } from "./WorkflowCanvasEdge";
 import type { EditorNodeData } from "../lib/workflow";
+import { CanvasInsertContext, type CanvasInsertActions } from "./canvas-insert-context";
 
 const nodeTypes = { workflowNode: WorkflowCanvasNode };
 const edgeTypes = { workflowBezier: WorkflowCanvasEdge, attachmentSpoke: AttachmentSpokeEdge };
@@ -408,5 +409,67 @@ describe("WorkflowCanvasArea", () => {
     expect(rows[1]).toHaveTextContent("Summarise");
     expect(rows[1]!.querySelector(".run-tape-llm")).toHaveStyle({ width: "75%" });
     expect(rows[2]!.querySelector(".run-tape-bar")).toHaveClass("run-tape-bar-error");
+  });
+});
+
+describe("adding a node after an output", () => {
+  function renderWithInsert(node: Node<EditorNodeData>, actions: Partial<CanvasInsertActions> = {}) {
+    const onAddAfter = vi.fn();
+    render(
+      <ReactFlowProvider>
+        <CanvasInsertContext.Provider value={{ onAddAfter, isConnected: () => false, ...actions }}>
+          <WorkflowCanvasNode {...nodeProps(node)} />
+        </CanvasInsertContext.Provider>
+      </ReactFlowProvider>
+    );
+    return onAddAfter;
+  }
+
+  it("draws a + beside a step's output that opens the palette for that output", async () => {
+    const user = userEvent.setup();
+    const onAddAfter = renderWithInsert(makeNode("fetch", "http_request", "Fetch"));
+    await user.click(screen.getByRole("button", { name: "Add a node after this step" }));
+    expect(onAddAfter).toHaveBeenCalledWith("fetch", null);
+  });
+
+  it("draws one + per branch of an IF node, each naming its output", async () => {
+    const user = userEvent.setup();
+    const onAddAfter = renderWithInsert(makeNode("check", "if_node", "Check"));
+    await user.click(screen.getByRole("button", { name: "Add a node after the false output" }));
+    expect(onAddAfter).toHaveBeenCalledWith("check", "false");
+    expect(screen.getByRole("button", { name: "Add a node after the true output" })).toBeInTheDocument();
+  });
+
+  it("marks a connected output's + so it only shows on hover", () => {
+    renderWithInsert(makeNode("fetch", "http_request", "Fetch"), { isConnected: () => true });
+    expect(screen.getByRole("button", { name: "Add a node after this step" })).toHaveClass("wf-handle-add-connected");
+  });
+
+  it("draws no + outside the editor canvas", () => {
+    render(
+      <ReactFlowProvider>
+        <WorkflowCanvasNode {...nodeProps(makeNode("fetch", "http_request", "Fetch"))} />
+      </ReactFlowProvider>
+    );
+    expect(screen.queryByRole("button", { name: "Add a node after this step" })).toBeNull();
+  });
+
+  it("names the node the palette connects after", () => {
+    render(<WorkflowCanvasArea {...makeProps({ showNodeDrawer: true, groupedDefinitions: definitions, insertAfterLabel: "Fetch orders" })} />);
+    expect(screen.getByText(/Connects after “Fetch orders”/)).toBeInTheDocument();
+  });
+});
+
+describe("adding a node after a worker agent", () => {
+  it("draws no + on a Supervisor's worker, which has no step output", () => {
+    const worker = makeNode("w", "agent_orchestrator", "Worker", { x: 0, y: 0 }, { attachedTo: "sup", attachedAs: "worker" });
+    render(
+      <ReactFlowProvider>
+        <CanvasInsertContext.Provider value={{ onAddAfter: vi.fn(), isConnected: () => false }}>
+          <WorkflowCanvasNode {...nodeProps(worker)} />
+        </CanvasInsertContext.Provider>
+      </ReactFlowProvider>
+    );
+    expect(screen.queryByRole("button", { name: "Add a node after this step" })).toBeNull();
   });
 });

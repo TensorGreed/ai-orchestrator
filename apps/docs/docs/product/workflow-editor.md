@@ -18,6 +18,35 @@ Concepts: [Workflows vs agents](/learn/agents/workflows-vs-agents) explains when
 - Execution logs pane and run-inputs pane
 - Per-node run data on the canvas and in the node inspector (see [Run data](#run-data))
 - Agent port `+` buttons that open filtered drawers for Language Models, Memory, Tools, and Workers
+- One undo history for every canvas change (see [Undo and redo](#undo-and-redo))
+
+## Adding nodes
+
+Open the palette with **Add node**, a double-click on empty canvas, or the `+` beside a node's output.
+
+- **Search** ranks what you type: an exact node name first (`output` finds **Output**, `if` finds **IF**), then names
+  that start with it, then other names a node goes by (`api` or `fetch` find **HTTP Request**, `foreach` finds
+  **Loop / ForEach**), then words in the description. The top result is marked **Best match**; **Enter** adds the
+  highlighted row and the arrow keys move the highlight.
+- **After the selected node**: with one node selected, the node you pick is placed to its right, clear of other
+  nodes, and connected from its first output that has no connection yet. The new node is selected, so adding several
+  in a row builds a chain. The palette's subtitle names the node it connects after. A trigger or input node, a sticky
+  note, and a model, memory or tool picked after an agent are placed but not connected (attach those through the
+  agent's ports). The connection follows the same rules as one you drag: when they refuse it (for example a model
+  picked before an agent), the node is placed unconnected and the editor shows why.
+- **From an output**: the `+` beside an output (shown on outputs with no connection, and on hover) opens the palette
+  connected after that output, for example an IF node's **false** branch. Dragging a connection out of an output and
+  dropping it on empty canvas does the same, and places the node where you dropped it.
+- **Drag and drop** a palette row onto the canvas to place a node at that point without connecting it.
+
+The canvas pans to show a node it adds when the node would land out of view.
+
+## Undo and redo
+
+`Ctrl+Z` undoes the last canvas change and `Ctrl+Shift+Z` or `Ctrl+Y` redoes it (`Cmd` on macOS). Every change is
+one step: adding, deleting, moving (one step per drag), connecting and removing a connection (double-click or
+right-click an edge), **Clear**, paste, duplicate, a node's settings, and **Tidy**. **Clear** asks before it removes
+the nodes, and can be undone. Opening or reloading a workflow starts a fresh history.
 
 ## Workflow settings
 
@@ -89,10 +118,12 @@ for every node, so it keeps its shape while you move between nodes; on a narrow 
   line between panes, or focus it and use the arrow keys, to resize. Both are remembered. The panes give way when the
   window is narrow, so the parameters and the Output pane stay in view. Before a node has run, its empty Input and
   Output panes start as rails so the parameters get the room.
-- **Parameters** shows the fields you set most. A node type's rarely used fields (for example an HTTP request's
-  headers, body and timeout, a model's temperature and max tokens, an agent's iteration and tool output limits, a
+- **Parameters** shows the fields you set most. A node type's rarely used fields (for example a GET request's
+  headers and an HTTP request's timeout and response type, a model's temperature and max tokens, an agent's iteration and tool output limits, a
   content rules node's approval settings) are under **Advanced**, closed by default; its title counts the fields
-  that differ from their defaults. Help for a field is behind the **?** next to its label. The expression helpers
+  that differ from their defaults. A POST, PUT or PATCH request shows its **Body** and **Headers** next to the URL; a
+  body that is valid JSON is sent as `application/json` unless the headers set a `Content-Type`. Help for a field is
+  behind the **?** next to its label. The expression helpers
   under a template field show while you edit it, and its preview shows when the result differs from what you typed
   (or the expression has an error). A code node's **Test Run** stays in view, with its test input folded under it.
 - **Settings** holds what every node has: disabled, accent colour, error handling (retries, delay, on error), input
