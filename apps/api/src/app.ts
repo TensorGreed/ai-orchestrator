@@ -5159,7 +5159,10 @@ export async function createApp(
     // Phase 15.6 — a guard policy simulation replays in projects its starter can read (models from the tape, no side effects).
     if (permission === "workflow:read") return actor && (await runAccess.workflow(actor, workflowId, "workflow:read")).ok ? actor : null;
     if (!actor || !(await runAccess.workflow(actor, workflowId, "workflow:execute")).ok) return null;
-    return permission === "workflow:execute" || (await runAccess.workflow(actor, workflowId, permission)).ok ? actor : null;
+    if (permission === "workflow:execute") return actor;
+    // Write means the one edit rule: a builder role and workflow:write (runAccess.mayEdit).
+    const workflow = await store.getWorkflow(workflowId);
+    return workflow && (await runAccess.mayEdit(actor, workflow)) ? actor : null;
   };
 
   const evalService = new EvalService(store, async (input) => {

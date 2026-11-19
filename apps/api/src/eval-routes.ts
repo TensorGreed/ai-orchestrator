@@ -499,6 +499,11 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     const datasetResult = await datasetAccess(user, await evals.getDataset(datasetId), "workflow:read");
     if (!datasetResult.ok) return denyRunAccess(reply, datasetResult);
     const dataset = datasetResult.dataset;
+    // After the dataset check (someone else's set reads as missing). An eval run runs the workflow's draft (and may record its MCP calls): builder tooling, so the one edit rule.
+    if (!(await runAccess.mayEdit(user, workflowAccess.workflow))) {
+      reply.code(403);
+      return { error: "Eval runs run this workflow's draft, so they need permission to edit the workflow (workflow:write)." };
+    }
     if (dataset.workflowId && dataset.workflowId !== workflowId) {
       reply.code(400);
       return { error: "This golden set belongs to another workflow.", code: "invalid" };

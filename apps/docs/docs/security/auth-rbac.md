@@ -359,10 +359,11 @@ on top of the global role:
 | List or read workflows, versions, pins, variables, export | `workflow:read` |
 | Create, update, import, move, duplicate, activate, restore, pin | `workflow:write` (on the workflow and on the project it lands in) |
 | Delete a workflow | `workflow:delete` |
-| Execute, stream, enqueue, manual trigger, retry, MCP replay, cancel, eval run | `workflow:execute` |
+| Execute, stream, enqueue, manual trigger, retry, cancel | `workflow:execute` (the draft, run options and MCP replay need the edit rule below) |
+| MCP replay, eval runs, golden-run replays, replay jobs and estimates (they run the draft) | a builder role and `workflow:write` (`runAccess.mayEdit`) |
 | Approve or reject a paused run | `workflow:execute` |
 | Read executions, manifests, audit bundles, rule events, eval runs, golden runs | `workflow:read` |
-| Save or delete a golden run / replay one | `workflow:write` / `workflow:execute` |
+| Save or delete a golden run | `workflow:write` |
 | Read or search a knowledge base / ingest into one | `workflow:read` / `workflow:write` in the KB's project |
 | Read MCP cassettes (list, detail, export) | `workflow:read` on the recorded workflow |
 | Answer an MCP elicitation | `workflow:execute` (seeing it needs `workflow:read`; a request from a run someone else started is shown only to that person and to users with `workflow:execute` in the workflow's project, except for queued runs, whose requests anyone who can read the workflow sees) |

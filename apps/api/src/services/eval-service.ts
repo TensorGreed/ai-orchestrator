@@ -423,7 +423,7 @@ interface ReplayJobContext {
   actorEmail: string;
   /** 13.2 — the API key that started the job: every case runs with that key's limits. */
   actorApiKeyId?: string;
-  /** Phase 15.3 — an inline or overridden candidate: every case re-checks workflow:write. */
+  /** Every replay job (not a simulation) re-checks the edit rule (builder role + workflow:write) for each case. */
   needsWrite: boolean;
   /** Phase 15.6 — a guard policy simulation's job (see `runSimulationCase`). */
   simulation?: {
@@ -758,7 +758,8 @@ export class EvalService {
       actorUserId: context.actor.id,
       actorEmail: context.actor.email,
       ...(context.actor.apiKeyId ? { actorApiKeyId: context.actor.apiKeyId } : {}),
-      needsWrite: candidate.kind === "inline" || Boolean(candidate.overrides),
+      // A replay job runs the draft or a candidate, so every case needs the right to edit the workflow (runAccess.mayEdit).
+      needsWrite: true,
       candidate,
       options,
       scorers: prepared.scorers
@@ -1763,7 +1764,7 @@ export class EvalService {
         status: "error",
         recordingId,
         error: job.needsWrite
-          ? `The user who started this job (${job.actorEmail}) can no longer edit this workflow (workflow:write), which a job with a workflow file or overrides needs for every case.`
+          ? `The user who started this job (${job.actorEmail}) can no longer edit this workflow (a builder role and workflow:write), which a replay job needs for every case.`
           : `The user who started this job (${job.actorEmail}) can no longer run this workflow.`
       };
     }

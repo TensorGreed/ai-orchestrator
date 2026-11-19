@@ -180,7 +180,7 @@ describe("version pill and Publish dialog", () => {
     vi.mocked(api.fetchWorkflowVersions).mockResolvedValue(versions());
     vi.mocked(api.fetchPublishPreview).mockResolvedValue({ preview: preview({ verdict: "blocked", reasons: [], stats: null, replayRunId: null, detailsHidden: true }) });
     render(<ReleasePill workflowId="wf-1" canPublish={false} isAdmin={false} />);
-    await user.click(await screen.findByRole("button", { name: /Release:/ }));
+    await user.click(await screen.findByRole("button", { name: /Release: Live:/ }));
     const dialog = await screen.findByRole("dialog");
     expect(await within(dialog).findByText("Blocked")).toBeInTheDocument();
     expect(within(dialog).getByText(/come from other people's runs/)).toBeInTheDocument();

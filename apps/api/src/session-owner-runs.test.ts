@@ -554,7 +554,7 @@ describe("one rule for who may edit: a builder role and workflow:write on the wo
     expect(ownerHistory.body).toContain("unreleased draft stop");
   });
 
-  it("golden-run replays and replay jobs run the draft, so a builder who may only run the workflow gets 403", async () => {
+  it("golden-run replays, replay jobs and eval runs run the draft, so a builder who may only run the workflow gets 403", async () => {
     const context = await createTestContext({ PROJECT_ISOLATION: "strict" });
     const owner = await login(context, "builder", "owner");
     const guest = await login(context, "builder", "guest");
@@ -578,6 +578,8 @@ describe("one rule for who may edit: a builder role and workflow:write on the wo
     const guestReplay = await call(context, "POST", `/api/replay/recordings/${recordingId}/replay`, guest.cookie, {});
     expect(guestReplay.statusCode, guestReplay.body).toBe(403);
     expect(guestReplay.body).toContain("workflow:write");
+    const guestEval = await call(context, "POST", "/api/eval/runs", guest.cookie, { datasetId: setId, workflowId: "wf-rel" });
+    expect(guestEval.statusCode, guestEval.body).toBe(403);
     const guestJob = await call(context, "POST", "/api/replay/runs", guest.cookie, { datasetIds: [setId] });
     expect(guestJob.statusCode, guestJob.body).toBe(403);
     expect((await call(context, "POST", "/api/replay/estimate", guest.cookie, { datasetIds: [setId] })).statusCode).toBe(403);

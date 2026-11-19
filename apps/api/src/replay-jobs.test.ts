@@ -819,7 +819,7 @@ describe("project authorization on golden sets, replay jobs and eval runs", () =
 });
 
 describe("authorization review fixes", () => {
-  type Loss = "locked out of the project" | "demoted to viewer" | "deleted" | "replaced by a new account with the same email";
+  type Loss = "demoted to operator" | "locked out of the project" | "demoted to viewer" | "deleted" | "replaced by a new account with the same email";
 
   const lose = async (context: TestContext, userId: string, email: string, loss: Loss) => {
     if (loss === "locked out of the project") {
@@ -827,6 +827,9 @@ describe("authorization review fixes", () => {
       await context.store.upsertProjectRole({ userId, projectId: "default", role: "custom", customRoleId: "none-default" });
     } else if (loss === "demoted to viewer") {
       await context.store.updateUserRole(userId, "viewer");
+    } else if (loss === "demoted to operator") {
+      // Still runs the workflow, but may no longer edit it: a replay job (it runs the draft) stops; an eval run goes on.
+      await context.store.updateUserRole(userId, "operator");
     } else {
       await context.store.deleteUser(userId);
       if (loss === "replaced by a new account with the same email") {
@@ -835,10 +838,10 @@ describe("authorization review fixes", () => {
     }
   };
 
-  const losses: Loss[] = ["locked out of the project", "demoted to viewer", "deleted", "replaced by a new account with the same email"];
+  const losses: Loss[] = ["locked out of the project", "demoted to viewer", "demoted to operator", "deleted", "replaced by a new account with the same email"];
 
   for (const loss of losses) {
-    for (const kind of ["replay job", "eval run"] as const) {
+    for (const kind of loss === "demoted to operator" ? (["replay job"] as const) : (["replay job", "eval run"] as const)) {
       it(`${kind}: the user ${loss} while it is queued or running; the remaining cases fail and nothing more runs`, async () => {
         // One case at a time and a slow model: the first case is in flight when access changes.
         const model = await startModel("hello", 400);
@@ -871,7 +874,7 @@ describe("authorization review fixes", () => {
 
         const finished = await (kind === "replay job" ? waitForJob(context, admin.cookie, runId) : waitForEvalRunAs(context, admin.cookie, runId));
         expect(finished.results).toHaveLength(3);
-        const refused = finished.results.filter((result) => result.error?.includes("can no longer run this workflow"));
+        const refused = finished.results.filter((result) => /can no longer (run|edit) this workflow/.test(result.error ?? ""));
         expect(refused).toHaveLength(2);
         expect(refused.every((result) => result.status === "error")).toBe(true);
         // Only the case that was already running reached the model; the other two never executed.
@@ -942,7 +945,7 @@ describe("authorization review fixes", () => {
     expect(judge.auth).toHaveLength(0);
   }, 30_000);
 
-  it("strict: a judge may use a secret of the project a workflow is shared from when it is shared with execute", async () => {
+  it("strict: an execute share does not let a builder start an eval run (it runs the draft), so no judge runs", async () => {
     const judge = await startModel('{"score": 1}');
     const context = await createTestContext({ PROJECT_ISOLATION: "strict", EVAL_JUDGE_ENABLED: "true", EVAL_JUDGE_BASE_URL: judge.baseUrl });
     const builder = await login(context, "builder");
@@ -956,11 +959,11 @@ describe("authorization review fixes", () => {
     await call(context, "POST", `/api/eval/datasets/${dataset.id}/fixtures`, builder.cookie, { name: "a", input: {} });
     const scorers = [{ type: "llm_judge", rubric: "r", providerId: "openai", secretRef: { secretId: key } }];
     await context.store.upsertWorkflowShare({ workflowId: "wf-a", projectId: "pb", accessLevel: "execute" });
+    // An execute share lets the builder run the workflow, not edit it; eval runs run its draft, so they follow the
+    // edit rule and nothing runs (no judge call).
     const started = await call(context, "POST", "/api/eval/runs", builder.cookie, { datasetId: dataset.id, workflowId: "wf-a", scorers });
-    expect(started.statusCode, started.body).toBe(202);
-    const finished = await waitForEvalRunAs(context, builder.cookie, started.json<{ runId: string }>().runId);
-    expect(finished.summary).toMatchObject({ total: 1, error: 0 });
-    expect(judge.auth).toEqual([`Bearer ${JUDGE_KEY}`]);
+    expect(started.statusCode, started.body).toBe(403);
+    expect(judge.auth).toEqual([]);
   }, 30_000);
 
   it("strict: datasets without a project belong to the default project, for reads too", async () => {

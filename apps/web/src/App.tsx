@@ -1611,7 +1611,7 @@ function StudioApp() {
   const openWorkflowAccess = workflowAccess && workflowAccess.workflowId === currentWorkflow.id ? workflowAccess : null;
   // The run list's replay controls run the draft: shown only for the workflows you may edit.
   const runListWorkflowIds = useMemo(() => executionHistoryItems.map((item) => item.workflowId), [executionHistoryItems]);
-  const mayEditRunWorkflow = useEditableWorkflows(authUser?.role, activeMode === "executions" ? runListWorkflowIds : []);
+  const mayEditRunWorkflow = useEditableWorkflows(authUser?.role, authUser?.id, activeMode === "executions" ? runListWorkflowIds : []);
   const { editDisabledReason, runDisabledReason } = editorAccess(authUser?.role, openWorkflowAccess);
   // The editor's run options (pinned data, recording, one node or from a node): for someone who may edit this workflow.
   const editorRunOptions = mayUseEditorRunOptions(authUser?.role, openWorkflowAccess);
