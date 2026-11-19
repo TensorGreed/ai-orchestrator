@@ -21,6 +21,7 @@ import {
   BUILT_IN_TOOLS_ADAPTER_ID,
   DEFAULT_HTTP_RETRY_ON_STATUS,
   DEFAULT_RETRY_MAX_DELAY_MS,
+  HOSTED_MODEL_DEFAULTS,
   MODEL_PROVIDER_CHOICES,
   PROVIDER_CONFIG_NODE_TYPES,
   SET_VALUE_TYPES,
@@ -383,7 +384,8 @@ export function withOpenDefaults(
 
 /**
  * A node's `config.provider` after the Provider picker changes to `next`. Echo needs no endpoint or key, so those go
- * and the model becomes "echo"; leaving Echo clears that placeholder model. Other switches keep the rest as it was.
+ * and the model becomes "echo"; leaving Echo replaces its placeholder model ("echo", "demo"...) with the new provider's
+ * default model (OpenAI, Anthropic, Gemini), or clears it. Other switches keep the rest as it was.
  */
 export function switchedModelProvider(current: Record<string, unknown>, next: string): Record<string, unknown> | undefined {
   // "Not set": a chain node then uses the model of an upstream model node.
@@ -396,7 +398,7 @@ export function switchedModelProvider(current: Record<string, unknown>, next: st
     return { ...rest, providerId: "echo", model: "echo" };
   }
   const switched: Record<string, unknown> = { ...current, providerId: next };
-  if (current.providerId === "echo" && current.model === "echo") switched.model = "";
+  if (current.providerId === "echo") switched.model = HOSTED_MODEL_DEFAULTS.find((entry) => entry.providerId === next)?.model ?? "";
   return switched;
 }
 

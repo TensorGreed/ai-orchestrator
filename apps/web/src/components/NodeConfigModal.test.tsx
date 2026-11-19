@@ -616,7 +616,10 @@ describe("switchedModelProvider", () => {
   });
 
   it("clears Echo's placeholder model when leaving it, and keeps the rest for other switches", () => {
-    expect(switchedModelProvider({ providerId: "echo", model: "echo" }, "openai")).toEqual({ providerId: "openai", model: "" });
+    // Leaving Echo: the new provider's default model in place of Echo's placeholder ("echo", or "demo" in templates).
+    expect(switchedModelProvider({ providerId: "echo", model: "echo" }, "openai")).toEqual({ providerId: "openai", model: "gpt-4o-mini" });
+    expect(switchedModelProvider({ providerId: "echo", model: "demo" }, "anthropic")).toMatchObject({ providerId: "anthropic", model: "claude-sonnet-5-5" });
+    expect(switchedModelProvider({ providerId: "echo", model: "demo" }, "openai_compatible")).toEqual({ providerId: "openai_compatible", model: "" });
     expect(switchedModelProvider({ providerId: "openai", model: "gpt-4o", baseUrl: "https://x/v1" }, "anthropic")).toEqual({
       providerId: "anthropic",
       model: "gpt-4o",
