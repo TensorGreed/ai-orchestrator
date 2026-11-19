@@ -173,8 +173,19 @@ nodes after every one of its outputs run once, after the loop, and a body node's
 fails the Loop). Turn the option on to make that Loop route; check what its later nodes read first, since the nodes
 on the branching node's outputs then run once per item.
 
-A pass cannot pause for a person. An Approval Gate in a body is refused when you save, and a Human Approval node in a
-body fails the Loop when a pass reaches it (the editor warns). On a branch no pass takes, neither runs.
+A **Human Approval** node in a body asks once per pass that reaches it. The run pauses, and the request shows the
+item's message and the pass (**Pass 2 of 3**). After the decision, the run goes on in that pass at that node, then
+with the later passes; nothing that ran before the approval runs again. A Loop of 3 items can ask 3 times, one
+request after another.
+
+- **Approve**: the pass goes on to the nodes after the approval.
+- **Reject** or a timeout: in a Loop whose branches route, an approval whose On Error is **Execute Fallback Branch**
+  sends that pass to its Error output, and the loop goes on with the next item. Otherwise the run stops, as it does
+  for a rejection outside a Loop. **Continue Anyway** never continues past an approval.
+- A Loop inside a Loop body pauses and resumes the same way.
+
+An Approval Gate in a body is refused when you save. An approval an agent's tool gate or a sub-workflow asks for
+inside a body fails the Loop. To ask once for all the items, put the approval before or after the Loop.
 
 ## Errors and retries
 

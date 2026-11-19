@@ -32,6 +32,8 @@ export interface TapeLane {
   now?: string;
   /** Phase 12.1 — a guard blocked, held for review or rewrote content in this step. */
   guard?: GuardMarker;
+  /** A Human Approval in a Loop body: "pass 2 of 3". */
+  pass?: string;
 }
 
 /** 0..100 when the server sent a total, else null. */
@@ -105,6 +107,7 @@ export function buildTapeLanes(executionResult: WorkflowExecutionResult | null, 
         : {}),
       ...(result.progress ? { progress: result.progress } : {}),
       ...(current ? { now: describeActivity(current) } : {}),
+      ...(result.loopPass ? { pass: `pass ${result.loopPass.pass} of ${result.loopPass.of}` } : {}),
       ...guardLane(result)
     };
   });
@@ -158,7 +161,7 @@ export function RunTape({ executionResult, nodeMetaById, onSelectNode }: RunTape
           const width = Math.max((lane.durationMs / denominator) * 100, 0.6);
           const llmWidth = lane.llmMs !== null && lane.durationMs > 0 ? Math.min((lane.llmMs / lane.durationMs) * 100, 100) : 0;
           const title = [
-            `${lane.label} (${lane.nodeId})`,
+            `${lane.label} (${lane.nodeId})${lane.pass ? ` · ${lane.pass}` : ""}`,
             `${lane.status} · ${formatLatency(lane.durationMs)}`,
             lane.llmMs !== null ? `LLM ${formatLatency(lane.llmMs)}` : null,
             lane.error ? `error: ${lane.error}` : null,
@@ -182,7 +185,10 @@ export function RunTape({ executionResult, nodeMetaById, onSelectNode }: RunTape
             >
               <span className="run-tape-label" role="cell">
                 <b>{lane.label}</b>
-                <small>{lane.type || lane.nodeId}</small>
+                <small>
+                  {lane.type || lane.nodeId}
+                  {lane.pass ? ` · ${lane.pass}` : ""}
+                </small>
                 {lane.guard && (
                   <em className={`run-tape-guard run-tape-guard-${lane.guard.kind}`} title={lane.guard.title}>
                     {lane.guard.label}

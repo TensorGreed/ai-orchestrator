@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApprovalRequestView } from "@ai-orchestrator/shared";
 import * as api from "../lib/api";
-import { ApprovalsPage } from "./ApprovalsPage";
+import { ApprovalsPage, loopPassLabel } from "./ApprovalsPage";
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
@@ -171,5 +171,15 @@ describe("ApprovalsPage", () => {
     expect(card.closest("article")).toHaveClass("is-focused");
     expect(screen.getByRole("tab", { name: "Decided" })).toHaveAttribute("aria-selected", "true");
     expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+  });
+
+  it("shows the Loop pass a Human Approval asked on", async () => {
+    vi.mocked(api.listApprovals).mockResolvedValue({
+      items: [view({ kind: "human_approval", nodeId: "ask", nodeType: "human_approval", editableFields: [], details: { message: "Pay 2?", loopPass: { loopNodeId: "loop", pass: 2, of: 3 } } })]
+    } as never);
+    render(<ApprovalsPage />);
+    expect(await screen.findByText("Pass 2 of 3 (loop)")).toBeInTheDocument();
+    expect(loopPassLabel(undefined)).toBeNull();
+    expect(loopPassLabel({ pass: "2" })).toBeNull();
   });
 });

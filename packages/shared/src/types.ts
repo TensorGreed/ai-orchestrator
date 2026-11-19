@@ -407,6 +407,47 @@ export interface NodeExecutionResult {
    * reads those labels as the input's even after the node was retyped or deleted.
    */
   nodeType?: string;
+  /** On a Human Approval's results inside a Loop body: the pass it asked on (the innermost Loop's). */
+  loopPass?: LoopPassRef;
+}
+
+/** A pass of a Loop node: `pass` counts from 1, `of` is the number of items the Loop runs. */
+export interface LoopPassRef {
+  loopNodeId: string;
+  pass: number;
+  of: number;
+}
+
+/**
+ * One Loop of a run that paused inside a Loop body (outermost first in `LoopPauseState.frames`): the pass it was on,
+ * the body node that pass stopped at (the Human Approval, or the Loop inside the body that paused), and what the Loop
+ * had gathered so far. JSON only.
+ */
+export interface LoopPauseFrame {
+  loopNodeId: string;
+  /** The items the Loop runs (after its item limit). */
+  items: unknown[];
+  /** The pass the run paused in, from 0. */
+  passIndex: number;
+  bodyNodeId: string;
+  /** Passes finished before it. */
+  passes: Array<{ index: number; item: unknown; outputs: Record<string, unknown> }>;
+  /** The paused pass's body outputs so far. */
+  passOutputs: Record<string, unknown>;
+  /** Branch routing: what the paused pass's branching nodes skipped. */
+  passBranches?: { skipped: string[]; errorOnly: string[]; activated: string[] };
+  /** Branch routing: each body node's output on the last pass that ran it. */
+  lastRan?: Record<string, unknown>;
+  /** Phase 16 — the labels of the body nodes that finished so far, in order (only on runs that keep labels). */
+  passLabels?: unknown[];
+}
+
+/** A run paused inside a Loop body: its Loops, outermost first, plus the run's branch routing state for them. */
+export interface LoopPauseState {
+  frames: LoopPauseFrame[];
+  routedBodyRan?: Record<string, unknown>;
+  routedBodyNodes?: Record<string, string>;
+  routedLoopsWithPasses?: string[];
 }
 
 /** Most activity entries kept per node; older ones are dropped. */
@@ -550,6 +591,11 @@ export interface WorkflowExecutionState {
   skippedByBranch: string[];
   /** Loop body nodes their Loop already ran: the resumed run passes them (absent on states saved before it existed). */
   loopInlineNodes?: string[];
+  /**
+   * Set when a Human Approval in a Loop body paused the run: the resume runs the Loop again from that pass and node
+   * (`nextNodeIndex` is the outermost Loop's position).
+   */
+  loopPause?: LoopPauseState;
   tryCatchScopes: Array<{
     nodeId: string;
     errorTargets: string[];

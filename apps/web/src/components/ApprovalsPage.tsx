@@ -56,6 +56,14 @@ function formatError(err: unknown): string {
   return "Unexpected error";
 }
 
+/** "Pass 2 of 3 (loop_1)" for a Human Approval that asked inside a Loop body; null otherwise. */
+export function loopPassLabel(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const { pass, of, loopNodeId } = value as Record<string, unknown>;
+  if (typeof pass !== "number" || typeof of !== "number") return null;
+  return `Pass ${pass} of ${of}${typeof loopNodeId === "string" && loopNodeId ? ` (${loopNodeId})` : ""}`;
+}
+
 function formatWhen(iso: string | null): string {
   if (!iso) return "";
   const date = new Date(iso);
@@ -230,6 +238,7 @@ export function ApprovalCard({ view, focused, onDecided, onOpenRun }: ApprovalCa
   const toolServer = view.kind === "agent_tool" && typeof details.server === "string" ? details.server : null;
   // Phase 12.4 — the tool policy rule that asked, with the conditions the call matched.
   const policyReason = view.kind === "agent_tool" && typeof details.policyReason === "string" ? details.policyReason : null;
+  const loopPass = loopPassLabel(details.loopPass);
   const idBase = `approval-${view.requestId}`;
 
   useEffect(() => {
@@ -319,6 +328,12 @@ export function ApprovalCard({ view, focused, onDecided, onOpenRun }: ApprovalCa
             <code>{view.nodeId}</code>
           </dd>
         </div>
+        {loopPass && (
+          <div>
+            <dt>Loop</dt>
+            <dd>{loopPass}</dd>
+          </div>
+        )}
         {view.path.length > 0 && (
           <div>
             <dt>Path</dt>

@@ -782,16 +782,6 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       }
     }
 
-    // A Loop body cannot pause for a person: a Human Approval there fails the Loop when it is reached.
-    if (node.type === "human_approval" && owningLoopsOf(workflow, node.id).length > 0) {
-      issues.push({
-        code: "human_approval_in_loop",
-        message: "A Human Approval node cannot run inside a Loop body: a pass cannot pause, so the Loop fails when it is reached. Ask before or after the Loop instead.",
-        nodeId: node.id,
-        severity: "warning"
-      });
-    }
-
     if (node.type === "approval_gate") {
       const parsed = approvalGateConfigSchema.safeParse(node.config ?? {});
       if (!parsed.success) {
