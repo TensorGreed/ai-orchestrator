@@ -68,7 +68,7 @@ export class ExecutionStarterFillService {
 
   /** Starts the fill in the background (nothing is awaited); retries until it is done. */
   start(): void {
-    if (this.stopped || this.finished || this.timer || this.running) return;
+    if (this.stopped || this.finished || this.timer !== null || this.running !== null) return;
     this.schedule(0);
   }
 
