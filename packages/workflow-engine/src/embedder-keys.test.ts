@@ -30,6 +30,17 @@ describe("embedders that need a key", () => {
     expect(called).toBe(0);
   });
 
+  it("call a node's own embeddings endpoint without a key (a self-hosted server may need none)", async () => {
+    let called = 0;
+    const fetcher = async () => {
+      called += 1;
+      return new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2] }] }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const local = new OpenAIEmbeddingAdapter({ apiKey: "", baseUrl: "http://embeddings.internal/v1", fetcher });
+    expect(await local.embed("hello")).toEqual([0.1, 0.2]);
+    expect(called).toBe(1);
+  });
+
   it("report a refused key in a plain sentence, without the provider's raw body", async () => {
     const openai = new OpenAIEmbeddingAdapter({ apiKey: "sk-wrong", fetcher: async () => new Response(RAW_401, { status: 401, statusText: "Unauthorized" }) });
     const error = (await openai.embed("hello").catch((caught: unknown) => caught)) as Error;

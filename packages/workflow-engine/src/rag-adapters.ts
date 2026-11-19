@@ -221,7 +221,8 @@ export class OpenAIEmbeddingAdapter implements EmbeddingAdapter {
   }
 
   async embedDetailed(text: string): Promise<EmbeddedText> {
-    requireEmbeddingKey(this.config.apiKey, "OpenAI", "OPENAI_API_KEY");
+    // A node's own endpoint (a self-hosted embeddings server) may need no key; OpenAI's own always does.
+    if (!this.config.baseUrl?.trim()) requireEmbeddingKey(this.config.apiKey, "OpenAI", "OPENAI_API_KEY");
     const baseUrl = this.config.baseUrl || "https://api.openai.com/v1";
     const model = this.config.model || "text-embedding-3-small";
     
