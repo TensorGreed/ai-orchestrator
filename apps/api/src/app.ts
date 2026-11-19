@@ -289,6 +289,7 @@ import type { SensitiveValuesMarker } from "@ai-orchestrator/shared";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { registerUserInviteRoutes } from "./user-invite-routes.js";
+import { registerWorkflowBuilderRoutes } from "./workflow-builder-routes.js";
 import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { envModelProviders } from "@ai-orchestrator/shared";
 import {
@@ -11164,6 +11165,8 @@ export async function createApp(
       providers: providerRegistry.listDefinitions(),
       connectors: connectorRegistry.listDefinitions(),
       mcpServers: mcpRegistry.listDefinitions(),
+      // Whether builders get "Describe it" (WORKFLOW_BUILDER_ENABLED).
+      ...(hasRequiredRole(user, ["builder"]) ? { workflowBuilder: { enabled: config.WORKFLOW_BUILDER_ENABLED !== false } } : {}),
       // The hosted providers whose API key the server's environment sets, so a new model node a builder adds starts
       // on one of them instead of the built-in Echo provider. Provider ids only, never a key; builders only.
       ...(hasRequiredRole(user, ["builder"]) ? { envModelProviders: envModelProviders(process.env) } : {})
@@ -16814,6 +16817,35 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     audit: async (request, user, event) => await audit(request, user, event),
     webBaseUrl: config.APP_PUBLIC_URL || ssoPostLoginUrl(config.WEB_ORIGIN),
     sendEmail: async (message) => await notificationService.sendDirectEmail(message)
+  });
+
+  // Describe-it builder: a description in, a workflow draft preview out. The studio saves it as a new workflow.
+  registerWorkflowBuilderRoutes({
+    app,
+    enabled: config.WORKFLOW_BUILDER_ENABLED !== false,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    audit: async (request, user, event) => await audit(request, user, event),
+    canCreateIn: async (user, projectId) => {
+      const access = await runAccess.project(user, projectId, "workflow:write");
+      return access.ok ? { ok: true } : { ok: false, status: access.status, error: access.error };
+    },
+    usableSecrets: async (user) =>
+      await filterAsync(await secretService.listSecrets(), (secret) => userCanUseSecret(user, secret)),
+    canUseSecret: async (user, secretId) => {
+      const row = await store.getSecret(secretId);
+      return Boolean(row) && await userCanUseSecret(user, row!);
+    },
+    resolveSecretForUser,
+    providerRegistryFor: (projectId) => modelAllowlistService.registry(baseProviderRegistry, { projectId, source: "workflow_builder" }),
+    listTemplates: async () =>
+      (await store.listTemplates()).map((template) => ({ ...template, featured: FEATURED_TEMPLATE_IDS.has(template.id) })),
+    prepareDraft: async (workflow) => {
+      // Like a duplicate or a template: trigger paths nobody uses, and no setting only an admin may make.
+      const withPaths = withUniqueTriggerPaths(workflow, await releaseService.usedRoutingKeys());
+      return { ...workflow, nodes: withoutTriggerTrust(withPaths).nodes };
+    },
+    isModelNotAllowed: (error) => isModelNotAllowedError(error),
+    redact: (text) => String(secretService.redact(text))
   });
 
   app.get("/api/users", async (request, reply) => {

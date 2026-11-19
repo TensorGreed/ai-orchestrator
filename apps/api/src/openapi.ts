@@ -986,6 +986,46 @@ export const openApiSpec = {
         responses: { "200": { description: "Duplicated workflow" } }
       }
     },
+    "/api/workflow-builder/build": {
+      post: {
+        tags: ["Workflows"],
+        summary:
+          "Describe a workflow in words and get a draft preview (builder role). Nothing is saved: save the returned workflow with POST /api/workflows. The model is the request's, else the default model; on Echo no model is called and the three closest templates come back. The model's answer is checked against the workflow schema (up to 3 submissions) and never run. Off when WORKFLOW_BUILDER_ENABLED=false.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["prompt"],
+                properties: {
+                  prompt: { type: "string", maxLength: 2000 },
+                  projectId: { type: "string" },
+                  model: {
+                    type: "object",
+                    required: ["providerId", "model"],
+                    properties: {
+                      providerId: { type: "string" },
+                      model: { type: "string" },
+                      baseUrl: { type: "string" },
+                      secretRef: { type: "object", properties: { secretId: { type: "string" } } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "{ status: ready, workflow, preview, attempts, model } | { status: needs_model, message, templates } | { status: question, question } | { status: failed, message, issues, attempts }" },
+          "400": { description: "Invalid request or unknown provider" },
+          "403": { description: "Not a builder, no write access to the project, a secret you may not use, a model the allowlist refuses, or the builder is turned off (code workflow_builder_disabled)" },
+          "409": { description: "A build of yours is already running" },
+          "502": { description: "The model call failed" },
+          "504": { description: "The model took too long" }
+        }
+      }
+    },
     "/api/workflows/import": {
       post: {
         tags: ["Workflows"],

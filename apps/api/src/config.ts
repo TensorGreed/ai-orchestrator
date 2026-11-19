@@ -169,6 +169,9 @@ const envSchema = z.object({
   SESSION_MAX_PER_USER: z.string().optional(),
   COOKIE_SECURE: booleanFromEnv.default(false),
   AUTH_ALLOW_PUBLIC_REGISTER: booleanFromEnv.default(false),
+  // Describe-it builder: builders describe a workflow in words and a model drafts it (previewed, then saved as a new
+  // draft). On unless false (unset counts as on); false hides it and refuses its route.
+  WORKFLOW_BUILDER_ENABLED: booleanFromEnv.optional(),
   // How a non-admin with no membership in a project is treated there:
   // `role` falls back to their global role (the historical behaviour),
   // `strict` gives them no access, so they only see projects they belong to.
