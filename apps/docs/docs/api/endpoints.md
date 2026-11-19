@@ -59,7 +59,7 @@ the envelope `GET /api/executions` uses:
 - `GET /api/workflows`
 - `GET /api/workflows/:id`
 - `POST /api/workflows`
-- `PUT /api/workflows/:id`
+- `PUT /api/workflows/:id` (both, and `POST /api/workflows/import`, save a draft: `400` only for a broken graph or a trigger, authentication, approval, content-rule or attachment setting; unfinished node settings save and `POST /api/workflows/:id/validate` lists them. The `400`'s `error` and `validation.issues` list only what blocks the save)
 - `DELETE /api/workflows/:id` (while the workflow's release gate is on and enforced, only an admin: others get `403`, audited as `release.workflow_delete.refused`)
 - `POST /api/workflows/:id/duplicate`
 - `POST /api/workflows/import`
@@ -362,8 +362,8 @@ See [Approval gates](../product/approvals.md). Release requests (Phase 15.4) app
 
 ## Webhooks
 
-- `POST /api/webhooks/execute`
-- `ANY /webhook/:path`
+- `POST /api/webhooks/execute` and `POST /api/webhooks/execute/stream` (builder; `{ workflow_id?, webhook_path?, session_id?, system_prompt?, user_prompt?, variables?, customData?, payload? }`). `payload` is the request body the run's webhook receives (what <span v-pre>`{{webhook.<field>}}`</span> reads), with the prompt fields on top of it, as a call to `/webhook/:path` gets them; without it the body holds the prompt fields only.
+- `ANY /webhook/:path` (production: answers `409` with `code: "workflow_unfinished"`, and starts no run, while the version production would run has unfinished node settings)
 - `ANY /webhook-test/:path`
 
 ### Content rules on responses (`content_filter`)

@@ -616,6 +616,37 @@
   gap: 14px;
 }
 
+/* "Webhook run" test payload */
+.webhook-test-payload {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  resize: vertical;
+  min-height: 160px;
+}
+
+.webhook-test-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* What a saved draft still lacks (editor notice) */
+.draft-warnings ul {
+  margin: 4px 0 6px;
+  padding-left: 18px;
+}
+
+.draft-warnings-node {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 /* Idle sign-out warning (Phase 13.2): above every other modal. */
 .idle-warning-backdrop {
   z-index: 1200;

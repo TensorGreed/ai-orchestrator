@@ -116,7 +116,6 @@ Formats final workflow output payload.
 
 ```json
 {
-  "responseTemplate": "{{answer}}",
   "outputKey": "result"
 }
 ```

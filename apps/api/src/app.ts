@@ -93,6 +93,7 @@ import {
   evaluateConditionTemplate,
   runWithSandboxOwner,
   validateWorkflowGraph,
+  saveBlockingIssues,
   KnowledgeBaseVectorStoreAdapter,
   TokenEmbeddingAdapter,
   OpenAIEmbeddingAdapter,
@@ -4542,7 +4543,8 @@ export async function createApp(
 
   if (schedulerService) {
     // A scheduler test double that only fires schedules has no loader.
-    schedulerService.setWorkflowLoader?.(async (workflowId) => await productionWorkflow(workflowId));
+    // Registered from an unfinished version too: its ticks are then skipped (and noted once), not lost on finishing.
+    schedulerService.setWorkflowLoader?.(async (workflowId) => await productionTriggerWorkflow(workflowId));
     // A schedule fire is its own trace: the timer would otherwise inherit the context of the request that saved it.
     schedulerService.setExecutionHandler((input) => runInstrumentation.withNewTrace(() => executeScheduledWorkflow(input)));
     app.addHook("onClose", async () => {
@@ -4620,7 +4622,7 @@ export async function createApp(
   };
 
   if (triggerService) {
-    triggerService.setWorkflowLoader(async (workflowId) => await productionWorkflow(workflowId));
+    triggerService.setWorkflowLoader(async (workflowId) => await productionTriggerWorkflow(workflowId));
     triggerService.setExecutionHandler(async (payload) => await runInstrumentation.withNewTrace(() => executeTriggeredWorkflow(payload)));
     triggerService.setSecretResolver((ref) => secretService.resolveSecret(ref));
     triggerService.setOutboundGuard(outboundGuard, nodeDnsResolver);
@@ -6023,10 +6025,14 @@ export async function createApp(
   });
   /** The workflow production traffic runs: the published version when there is one, else the draft. */
   const productionWorkflow = async (workflowId: string): Promise<Workflow | null> => await releaseService.resolveRunnableWorkflow(workflowId, "production");
+  /** What schedules and app triggers register from: production's version, unfinished or not (an unfinished one's fires are skipped). */
+  const productionTriggerWorkflow = async (workflowId: string): Promise<Workflow | null> =>
+    await releaseService.resolveRunnableWorkflow(workflowId, "production", { includeUnfinished: true });
   /** Phase 15.4 — what a production entry point answers when it has no workflow to run: why production refuses it (409), or 404. */
-  const productionMissing = async (reply: FastifyReply, workflowId: string): Promise<{ error: string }> => {
+  const productionMissing = async (reply: FastifyReply, workflowId: string): Promise<{ error: string; code?: string }> => {
     const refusal = await releaseService.productionRefusal(workflowId);
     reply.code(refusal ? 409 : 404);
+    if (refusal && (await releaseService.unfinishedProductionWorkflow(workflowId))) return { error: refusal, code: "workflow_unfinished" };
     return { error: refusal ?? "Workflow not found" };
   };
   /** Phase 15.4 — the deactivated gated workflow whose published version has a node matching `matches`, for a "deactivated" answer. */
@@ -10972,12 +10978,14 @@ export async function createApp(
       };
     }
 
+    // A draft saves with unfinished node settings (the editor shows them as warnings); a broken graph does not.
     const validation = validateWorkflowGraph(parsed.data);
-    if (!validation.valid) {
+    const blocking = saveBlockingIssues(validation);
+    if (blocking.length > 0) {
       reply.code(400);
       return {
-        error: `Workflow validation failed: ${validation.issues.map((issue) => issue.message).join("; ")}`,
-        validation
+        error: `Workflow validation failed: ${blocking.map((issue) => issue.message).join("; ")}`,
+        validation: { ...validation, issues: blocking }
       };
     }
 
@@ -11019,12 +11027,14 @@ export async function createApp(
       return { error: "Workflow ID mismatch between path and payload" };
     }
 
+    // A draft saves with unfinished node settings (the editor shows them as warnings); a broken graph does not.
     const validation = validateWorkflowGraph(parsed.data);
-    if (!validation.valid) {
+    const blocking = saveBlockingIssues(validation);
+    if (blocking.length > 0) {
       reply.code(400);
       return {
-        error: `Workflow validation failed: ${validation.issues.map((issue) => issue.message).join("; ")}`,
-        validation
+        error: `Workflow validation failed: ${blocking.map((issue) => issue.message).join("; ")}`,
+        validation: { ...validation, issues: blocking }
       };
     }
 
@@ -11243,11 +11253,12 @@ export async function createApp(
         : workflowSchema.parse(parsed.data.workflow);
 
       const validation = validateWorkflowGraph(workflow);
-      if (!validation.valid) {
+      const blocking = saveBlockingIssues(validation);
+      if (blocking.length > 0) {
         reply.code(400);
         return {
-          error: `Workflow validation failed: ${validation.issues.map((issue) => issue.message).join("; ")}`,
-          validation
+          error: `Workflow validation failed: ${blocking.map((issue) => issue.message).join("; ")}`,
+          validation: { ...validation, issues: blocking }
         };
       }
 
@@ -11338,11 +11349,12 @@ export async function createApp(
     };
 
     const validation = validateWorkflowGraph(workflow);
-    if (!validation.valid) {
+    const blocking = saveBlockingIssues(validation);
+    if (blocking.length > 0) {
       reply.code(400);
       return {
-        error: `Converted workflow failed validation: ${validation.issues.map((issue) => issue.message).join("; ")}`,
-        validation,
+        error: `Converted workflow failed validation: ${blocking.map((issue) => issue.message).join("; ")}`,
+        validation: { ...validation, issues: blocking },
         report: conversion.report
       };
     }
@@ -11404,7 +11416,10 @@ export async function createApp(
     const validation = validateWorkflowGraph(workflow);
     // 12.6 — a model the allowlist refuses is a warning: the workflow saves and validates, its runs fail at that node.
     const modelWarnings = await modelAllowlistService.warningsFor(workflow);
-    return modelWarnings.length > 0 ? { ...validation, issues: [...validation.issues, ...modelWarnings] } : validation;
+    const result = modelWarnings.length > 0 ? { ...validation, issues: [...validation.issues, ...modelWarnings] } : validation;
+    // Production's version has unfinished settings: its webhooks, schedules and app triggers do not run it.
+    const liveTriggersPaused = (await releaseService.unfinishedProductionWorkflow(workflow.id)) !== null;
+    return { ...result, liveTriggersPaused };
   });
 
   // ---------------------------------------------------------------------------
@@ -12157,6 +12172,27 @@ export async function createApp(
     requireRole: (request, reply, roles) => requireRole(request, reply, roles)
   });
 
+  /**
+   * What a webhook run started from the API receives as its webhook body: the request's `payload` (the editor's test
+   * payload) with the run's prompt fields on top, as a call to the webhook URL gets them; without one, the prompt fields only.
+   */
+  const agentWebhookRunPayload = (data: z.infer<typeof agentWebhookPayloadSchema>): Record<string, unknown> =>
+    data.payload
+      ? {
+          ...data.payload,
+          ...(data.system_prompt !== undefined ? { system_prompt: data.system_prompt } : {}),
+          ...(data.user_prompt !== undefined ? { user_prompt: data.user_prompt } : {}),
+          ...(data.session_id !== undefined ? { session_id: data.session_id } : {}),
+          ...(data.variables !== undefined ? { variables: data.variables } : {})
+        }
+      : { system_prompt: data.system_prompt, user_prompt: data.user_prompt, session_id: data.session_id, variables: data.variables };
+
+  /** The run's stored request input: the payload's fields at the top level, as a webhook call stores its body, so a replay sends them again. */
+  const agentWebhookRequestInput = (data: z.infer<typeof agentWebhookPayloadSchema>): Record<string, unknown> => {
+    const { payload, ...rest } = data;
+    return payload ? { ...payload, ...rest } : rest;
+  };
+
   app.post<{ Body: unknown }>("/api/webhooks/execute", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) {
@@ -12198,12 +12234,7 @@ export async function createApp(
           channel: "production",
           policyActor: user,
           workflow,
-          webhookPayload: {
-            system_prompt: parsed.data.system_prompt,
-            user_prompt: parsed.data.user_prompt,
-            session_id: parsed.data.session_id,
-            variables: parsed.data.variables
-          },
+          webhookPayload: agentWebhookRunPayload(parsed.data),
           variables: parsed.data.variables,
           systemPrompt: parsed.data.system_prompt,
           userPrompt: parsed.data.user_prompt,
@@ -12218,8 +12249,8 @@ export async function createApp(
           triggerType: "webhook_api",
           triggeredBy: user.email
         },
-        progress: { requestInput: parsed.data, customData: parsed.data.customData },
-        history: { requestInput: parsed.data, customData: parsed.data.customData }
+        progress: { requestInput: agentWebhookRequestInput(parsed.data), customData: parsed.data.customData },
+        history: { requestInput: agentWebhookRequestInput(parsed.data), customData: parsed.data.customData }
       },
       { pool: dispatchPoolOf(workflow) }
     );
@@ -12684,7 +12715,7 @@ export async function createApp(
     }) ?? null;
   const findFormWorkflow = async (formPath: string): Promise<{ workflow: Workflow; node: WorkflowNode } | null> => {
     for (const summary of await store.listWorkflows()) {
-      const wf = await productionWorkflow(summary.id);
+      const wf = await productionTriggerWorkflow(summary.id);
       if (!wf) continue;
       const node = formNodeFor(wf, formPath);
       if (node) return { workflow: wf, node };
@@ -12787,6 +12818,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         // Session forms are for people who can see the workflow's project.
         const access = await runAccess.workflow(user, found.workflow.id, "workflow:read", "Form");
         if (!access.ok) return denyRunAccess(reply, access);
+      }
+      // Production's version has unfinished settings: the form still shows, a submission starts no run.
+      const paused = await releaseService.pausedRefusal(found.workflow);
+      if (paused) {
+        reply.code(409);
+        return { error: paused, code: "workflow_unfinished" };
       }
       const submission = asRecord(request.body);
       const executionId = crypto.randomUUID();
@@ -12921,7 +12958,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }) ?? null;
   const findMcpServerWorkflow = async (p: string): Promise<{ workflow: Workflow; node: WorkflowNode } | null> => {
     for (const summary of await store.listWorkflows()) {
-      const wf = await productionWorkflow(summary.id);
+      const wf = await productionTriggerWorkflow(summary.id);
       if (!wf) continue;
       const node = mcpServerNodeFor(wf, p);
       if (node) return { workflow: wf, node };
@@ -12964,6 +13001,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           reply.code(401);
           return { error: "Invalid bearer token" };
         }
+      }
+      // Production's version has unfinished settings: the tool is listed, a call starts no run.
+      const paused = await releaseService.pausedRefusal(found.workflow);
+      if (paused) {
+        reply.code(409);
+        return { error: paused, code: "workflow_unfinished" };
       }
       const body = asRecord(request.body);
       const args = asRecord(body.arguments ?? body.args ?? body);
@@ -13306,12 +13349,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             channel: "production",
             policyActor: user,
             workflow,
-            webhookPayload: {
-              system_prompt: parsed.data.system_prompt,
-              user_prompt: parsed.data.user_prompt,
-              session_id: parsed.data.session_id,
-              variables: parsed.data.variables
-            },
+            webhookPayload: agentWebhookRunPayload(parsed.data),
             variables: parsed.data.variables,
             systemPrompt: parsed.data.system_prompt,
             userPrompt: parsed.data.user_prompt,
@@ -13325,8 +13363,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             triggerType: "webhook_api_stream",
             triggeredBy: user.email
           },
-          progress: { requestInput: parsed.data },
-          history: { requestInput: parsed.data }
+          progress: { requestInput: agentWebhookRequestInput(parsed.data) },
+          history: { requestInput: agentWebhookRequestInput(parsed.data) }
         },
         { pool: dispatchPoolOf(workflow), closed: clientGone, admitted: true, passthrough: {
           onNodeStart: (event) => {
@@ -13368,7 +13406,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   const registerConfiguredWebhookRoute = (routePath: "/webhook/:path" | "/webhook-test/:path") => {
     const isTestRoute = routePath.startsWith("/webhook-test");
     // Phase 15.4 — /webhook/ is production traffic (the published version when there is one); /webhook-test/ runs the draft.
-    const loadForRoute = async (id: string) => (isTestRoute ? await store.getWorkflow(id) : await productionWorkflow(id));
+    // Production matches an unfinished version too, and answers 409 for it once the caller passed the trigger's checks.
+    const loadForRoute = async (id: string) => (isTestRoute ? await store.getWorkflow(id) : await productionTriggerWorkflow(id));
     app.route<{ Params: { path: string }; Body: unknown }>({
       method: ["DELETE", "GET", "OPTIONS", "PATCH", "POST", "PUT"],
       url: routePath,
@@ -13452,6 +13491,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         if (!authResult.ok) {
           reply.code(authResult.statusCode);
           return { error: authResult.message };
+        }
+
+        // Production's version has unfinished settings: its live triggers are paused, and no run is created.
+        const paused = isTestRoute ? null : await releaseService.pausedRefusal(match.workflow);
+        if (paused) {
+          reply.code(409);
+          return { error: paused, code: "workflow_unfinished", path: request.params.path };
         }
 
         let parsedInput = parseWebhookRunInput(request.body);

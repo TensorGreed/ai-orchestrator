@@ -1440,9 +1440,11 @@ export function validateWorkflowGraph(rawWorkflow: unknown): WorkflowValidationR
 
   const outputNodes = workflow.nodes.filter((node) => node.type === "output");
   if (!outputNodes.length) {
+    // An Output node is optional: without one, a run's result is the output of the last node that ran.
     issues.push({
       code: "missing_output_node",
-      message: "Workflow must include at least one Output node."
+      message: "No Output node: the run's result is the output of the last node that runs.",
+      severity: "warning"
     });
   }
 
@@ -1461,6 +1463,66 @@ export function validateWorkflowGraph(rawWorkflow: unknown): WorkflowValidationR
     issues,
     orderedNodeIds: topology.order
   };
+}
+
+/**
+ * Issues a saved draft may carry: settings a builder has not filled in yet on nodes that do nothing until a run reaches
+ * them. Each still fails a run that reaches validation, so a draft that saves with one of these cannot run until it is
+ * fixed. Everything else (a broken graph, trigger and authentication settings, approval, content-rule and attachment
+ * rules, and any code not listed here) keeps blocking a save, because a saved workflow's triggers are live.
+ */
+const DRAFT_SAVEABLE_ISSUE_CODES = new Set([
+  "missing_template",
+  "missing_switch_value",
+  "missing_switch_cases",
+  "missing_set_node_assignments",
+  "invalid_set_node_assignment_key",
+  "invalid_set_node_assignment_template",
+  "missing_qdrant_operation",
+  "missing_output_parser_schema",
+  "missing_merge_combine_key",
+  "merge_requires_multiple_parents",
+  "missing_mcp_tool_config",
+  "missing_mcp_resource_config",
+  "missing_loop_item_variable",
+  "missing_loop_input_key",
+  "missing_llm_provider",
+  "missing_if_condition",
+  "missing_http_request_url_template",
+  "missing_gemini_model",
+  "missing_execute_workflow_id",
+  "missing_workflow_tool_id",
+  "missing_connector_id",
+  "missing_code_node_script",
+  "missing_chat_model_model",
+  "missing_chat_gateway_base_url",
+  "missing_agent_chat_model",
+  "missing_azure_openai_secret",
+  "missing_azure_openai_endpoint",
+  "missing_azure_openai_deployment",
+  "missing_azure_embedding_secret",
+  "missing_azure_embedding_config",
+  "missing_azure_storage_operation",
+  "missing_azure_monitor_operation",
+  "missing_azure_cosmos_operation",
+  "missing_azure_ai_search_operation",
+  "missing_input_validator_rules"
+]);
+
+/**
+ * The unfinished node settings a saved draft may have (each stops a run): production does not serve such a version
+ * from its live triggers.
+ */
+export function unfinishedDraftIssues(validation: WorkflowValidationResult): WorkflowValidationIssue[] {
+  return validation.issues.filter((issue) => issue.severity !== "warning" && DRAFT_SAVEABLE_ISSUE_CODES.has(issue.code));
+}
+
+/**
+ * The issues that stop a workflow from being saved: every error except the unfinished-node settings a draft may keep.
+ * Warnings never block. The editor shows the rest as warnings, and a run still refuses the workflow until they are fixed.
+ */
+export function saveBlockingIssues(validation: WorkflowValidationResult): WorkflowValidationIssue[] {
+  return validation.issues.filter((issue) => issue.severity !== "warning" && !DRAFT_SAVEABLE_ISSUE_CODES.has(issue.code));
 }
 
 export function sortWorkflowNodes(workflow: Workflow): string[] {

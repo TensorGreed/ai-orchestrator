@@ -23,7 +23,8 @@ import {
   type Project,
   type ImportReport,
   type Workflow,
-  type WorkflowExecutionResult
+  type WorkflowExecutionResult,
+  type WorkflowValidationIssue
 } from "@ai-orchestrator/shared";
 import {
   ApiError,
@@ -171,6 +172,9 @@ import { WorkflowCardMenu } from "./components/WorkflowCardMenu";
 import { WorkflowCanvasArea, type ImportPanelBinding } from "./components/WorkflowCanvasArea";
 import { ExternalImportDialog, type ExternalImportSource } from "./components/ExternalImportDialog";
 import { SecretSaveWarnings } from "./components/SecretSaveWarnings";
+import { DraftWarnings } from "./components/DraftWarnings";
+import { WebhookTestPayloadDialog } from "./components/WebhookTestPayloadDialog";
+import { apiErrorText } from "./lib/draft-validation";
 import { canvasLabelBadge, type CanvasLabelBadge } from "./lib/taint-sources";
 import {
   forgetImportReport,
@@ -515,6 +519,13 @@ function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+/** The workflow with its "Webhook run" test payload set (an empty payload removes it). */
+function withTestWebhookPayload(workflow: Workflow, payload: Record<string, unknown>): Workflow {
+  const { testWebhookPayload: _previous, ...settings } = workflow.settings ?? {};
+  if (Object.keys(payload).length > 0) return { ...workflow, settings: { ...settings, testWebhookPayload: payload } };
+  return workflow.settings ? { ...workflow, settings } : workflow;
+}
+
 function storeLocalWipWorkflow(workflow: Workflow): void {
   storeTabWipWorkflow(workflow, MAX_LOCAL_WIP_CHARS);
 }
@@ -547,21 +558,6 @@ function dateTimeLocalToIso(value: string): string | undefined {
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
-}
-
-function getValidationMessages(payload?: Record<string, unknown>): string[] {
-  const validation = asRecord(payload?.validation);
-  const issues = validation?.issues;
-  if (!Array.isArray(issues)) {
-    return [];
-  }
-
-  return issues
-    .map((issue) => {
-      const issueRecord = asRecord(issue);
-      return issueRecord && typeof issueRecord.message === "string" ? issueRecord.message : "";
-    })
-    .filter((message) => message.length > 0);
 }
 
 function toWorkflowExecutionResult(detail: ExecutionHistoryDetail): WorkflowExecutionResult {
@@ -1165,6 +1161,7 @@ function StudioApp() {
   const [writeToolDialogOpen, setWriteToolDialogOpen] = useState(false);
   const [subjectRefsDialogOpen, setSubjectRefsDialogOpen] = useState(false);
   const [errorWorkflowDialogOpen, setErrorWorkflowDialogOpen] = useState(false);
+  const [webhookPayloadDialogOpen, setWebhookPayloadDialogOpen] = useState(false);
   const [shareWorkflowTarget, setShareWorkflowTarget] = useState<{
     id: string;
     name: string;
@@ -1752,6 +1749,35 @@ function StudioApp() {
     pickRequestRef.current += 1;
   }, [currentWorkflow.id]);
 
+  // What the saved workflow still lacks (a draft saves with unfinished node settings), for the editor's notice.
+  const [draftIssues, setDraftIssues] = useState<{ workflowId: string; issues: WorkflowValidationIssue[]; liveTriggersPaused: boolean } | null>(null);
+  const draftIssuesWorkflowIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    setDraftIssues((current) => (current && current.workflowId !== currentWorkflow.id ? null : current));
+    if (!authUser || !currentWorkflowExists) return;
+    let cancelled = false;
+    const workflowId = currentWorkflow.id;
+    // On open only what stops a run is shown; after a save, notes (such as "no Output node") too.
+    const afterSave = draftIssuesWorkflowIdRef.current === workflowId;
+    draftIssuesWorkflowIdRef.current = workflowId;
+    inBackground(() => validateStoredWorkflow(workflowId))
+      .then((validation) => {
+        if (cancelled) return;
+        const issues = (validation.issues ?? []).filter((issue) => afterSave || issue.severity !== "warning");
+        setDraftIssues({ workflowId, issues, liveTriggersPaused: validation.liveTriggersPaused === true });
+      })
+      .catch(() => {
+        // The notice is a hint: without it the editor works as before, and a run still reports what is missing.
+      });
+    return () => {
+      cancelled = true;
+    };
+    // A save gives the workflow a new updatedAt, so the notice follows each save.
+  }, [authUser, currentWorkflow.id, currentWorkflow.updatedAt, currentWorkflowExists]);
+
+  /** The workflow whose latest finished run was already offered to the canvas since it was opened (once per open). */
+  const restoredRunWorkflowIdRef = useRef<string | null>(null);
+
   // Starting a run (or any other busy action) follows the newest data again.
   useEffect(() => {
     if (busy) {
@@ -1796,6 +1822,9 @@ function StudioApp() {
         }
 
         const latest = history.items[0];
+        // Opening a workflow shows its latest run once, finished or not; clearing the logs afterwards keeps them clear.
+        const restoreOnOpen = restoredRunWorkflowIdRef.current !== currentWorkflow.id;
+        restoredRunWorkflowIdRef.current = currentWorkflow.id;
         if (!latest) {
           return;
         }
@@ -1814,14 +1843,15 @@ function StudioApp() {
           return;
         }
 
-        if (!sameExecution && !isInProgressStatus) {
+        const canvasEmpty = !latestResult || latestResult.workflowId !== currentWorkflow.id;
+        if (!sameExecution && !isInProgressStatus && !(restoreOnOpen && canvasEmpty)) {
           latestDebugExecutionIdRef.current = latest.id;
           return;
         }
 
         // New external execution detected (e.g., REST client / webhook call).
         // Reset previous debug trace immediately before loading full details.
-        if (!sameExecution) {
+        if (!sameExecution && isInProgressStatus) {
           setExecutionResult(
             createPartialExecutionResult(
               latest.workflowId || currentWorkflow.id,
@@ -1838,15 +1868,19 @@ function StudioApp() {
         }
 
         latestDebugExecutionIdRef.current = latest.id;
-        setExecutionResult(toWorkflowExecutionResult(detail));
+        const loaded = toWorkflowExecutionResult(detail);
+        // Restoring a finished run on open: a run started (or picked) meanwhile wins over it.
+        const restoring = !sameExecution && !isInProgressStatus;
+        setExecutionResult((current) => (restoring && current && current.workflowId === currentWorkflowIdRef.current ? current : loaded));
       } catch {
         // Polling failures should not interrupt editor usage.
       }
     };
 
+    // A just-opened workflow loads its latest run at once; later polls follow every two seconds.
     const firstPollTimerId = window.setTimeout(() => {
       void syncLatestExecution();
-    }, 2000);
+    }, restoredRunWorkflowIdRef.current === currentWorkflow.id ? 2000 : 0);
     const timerId = window.setInterval(() => {
       void syncLatestExecution();
     }, 2000);
@@ -2510,10 +2544,8 @@ function StudioApp() {
 
     let message = apiError instanceof Error ? apiError.message : fallbackMessage;
     if (apiError instanceof ApiError) {
-      const validationMessages = getValidationMessages(apiError.payload);
-      if (validationMessages.length) {
-        message = `${message}: ${validationMessages.join("; ")}`;
-      }
+      // The issues the message does not already list (a save error names them itself).
+      message = apiErrorText(message, apiError.payload);
     }
 
     setError(message);
@@ -3011,6 +3043,11 @@ function StudioApp() {
       return;
     }
 
+    // A new workflow not saved yet stays open.
+    if (unsavedNewWorkflowRef.current?.id === currentWorkflow.id) {
+      return;
+    }
+
     // An explicit open (Home card, palette, MCP pages) is still fetching; it decides what shows.
     if (pendingWorkflowLoadIdRef.current) {
       return;
@@ -3047,16 +3084,37 @@ function StudioApp() {
     return editorToWorkflow(currentWorkflow, nodes as EditorNode[], edges as Edge[]);
   }, [currentWorkflow, edges, nodes]);
 
-  const persistWorkflow = useCallback(async () => {
-    const workflow = buildCurrentWorkflow();
-    const saved = await saveWorkflow(workflow);
-    const workflows = await fetchWorkflows({ projectId: activeProjectId });
-    setWorkflowList(workflows);
-    setCurrentWorkflow(saved);
-    storeLocalWipWorkflow(saved);
-    // Phase 15.4 — a save is a new version: the version pill reloads.
-    setReleaseRefreshKey((key) => key + 1);
-    return saved;
+  /**
+   * The save in flight. Saves run one after another, and a save of the same content as the one in flight (Save
+   * clicked while a new workflow's first-edit save runs, a run that saves first) joins it: each save is a version.
+   */
+  const saveInFlightRef = useRef<{ content: string; promise: Promise<Workflow> } | null>(null);
+
+  const persistWorkflow = useCallback(async (adjust?: (workflow: Workflow) => Workflow) => {
+    const built = buildCurrentWorkflow();
+    const workflow = adjust ? adjust(built) : built;
+    const { updatedAt: _updatedAt, ...comparable } = workflow;
+    const content = JSON.stringify(comparable);
+    const previous = saveInFlightRef.current;
+    if (previous && previous.content === content) return await previous.promise;
+    const promise = (async () => {
+      if (previous) await previous.promise.catch(() => undefined);
+      const saved = await saveWorkflow(workflow);
+      const workflows = await fetchWorkflows({ projectId: activeProjectId });
+      setWorkflowList(workflows);
+      setCurrentWorkflow(saved);
+      storeLocalWipWorkflow(saved);
+      // Phase 15.4 — a save is a new version: the version pill reloads.
+      setReleaseRefreshKey((key) => key + 1);
+      return saved;
+    })();
+    const entry = { content, promise };
+    saveInFlightRef.current = entry;
+    try {
+      return await promise;
+    } finally {
+      if (saveInFlightRef.current === entry) saveInFlightRef.current = null;
+    }
   }, [buildCurrentWorkflow]);
 
   // The pill opens Evaluations on Release gates once; the next visit starts on Golden sets.
@@ -3424,18 +3482,20 @@ function StudioApp() {
     refreshExecutionHistory,
   ]);
 
-  const handleWebhookExecute = useCallback(async () => {
+  const handleWebhookExecute = useCallback(async (testPayload: Record<string, unknown>) => {
     let trace: TraceStreamHandlers | null = null;
     try {
       setBusy(true);
       setRunningExecutionId(null);
       setError(null);
       startVisualRun();
-      const saved = await persistWorkflow();
+      // The payload is kept in the workflow's settings, so the next "Webhook run" starts from it.
+      const saved = await persistWorkflow((workflow) => withTestWebhookPayload(workflow, testPayload));
       trace = createRunTraceHandlers(saved.id);
       const result = await runWebhookStream({
         workflow_id: saved.id,
-        ...buildWebhookExecutionPayload()
+        ...buildWebhookExecutionPayload(),
+        payload: testPayload
       }, {
         ...traceStreamCallbacks(trace, (event) => setError((current) => current ?? event.message)),
         onExecutionStarted: (event) => {
@@ -3795,61 +3855,97 @@ function StudioApp() {
     [closeExternalImport, importNativeText]
   );
 
-  const handleCreateWorkflow = useCallback(async () => {
+  /**
+   * A workflow made with "New workflow" lives only in the editor until its first edit (or a save or run): then it is
+   * saved. Opening another workflow first discards it, so abandoned clicks leave no empty workflows behind.
+   */
+  const unsavedNewWorkflowRef = useRef<{ id: string; baseline: string | null; saving: boolean } | null>(null);
+
+  const handleCreateWorkflow = useCallback(() => {
     if (!canManageWorkflows) {
       setError("You do not have permission to create workflows.");
       return;
     }
 
-    try {
-      setBusy(true);
-      setError(null);
-      const draft = createBlankWorkflow();
-      const userPromptNodeId = createNodeId("user_prompt");
-      const outputNodeId = createNodeId("output");
-      const savedDraft = await saveWorkflow({
-        ...draft,
-        name: `Workflow ${workflowList.length + 1}`,
-        nodes: [
-          {
-            id: userPromptNodeId,
-            type: "user_prompt",
-            name: "User Prompt",
-            position: { x: 140, y: 180 },
-            config: {
-              text: "What should I help with?"
-            }
-          },
-          {
-            id: outputNodeId,
-            type: "output",
-            name: "Output",
-            position: { x: 420, y: 180 },
-            config: {
-              responseTemplate: "{{user_prompt}}",
-              outputKey: "result"
-            }
+    setError(null);
+    const draft = createBlankWorkflow();
+    const userPromptNodeId = createNodeId("user_prompt");
+    const outputNodeId = createNodeId("output");
+    const workflow: Workflow = {
+      ...draft,
+      name: `Workflow ${workflowList.length + 1}`,
+      nodes: [
+        {
+          id: userPromptNodeId,
+          type: "user_prompt",
+          name: "User Prompt",
+          position: { x: 140, y: 180 },
+          config: {
+            text: "What should I help with?"
           }
-        ],
-        edges: [
-          {
-            id: createEdgeId(userPromptNodeId, outputNodeId),
-            source: userPromptNodeId,
-            target: outputNodeId
+        },
+        {
+          id: outputNodeId,
+          type: "output",
+          name: "Output",
+          position: { x: 420, y: 180 },
+          config: {
+            responseTemplate: "{{user_prompt}}",
+            outputKey: "result"
           }
-        ]
-      });
-      const workflows = await fetchWorkflows({ projectId: activeProjectId });
-      setWorkflowList(workflows);
-      hydrateWorkflow(savedDraft);
-      setActiveMode("editor");
-      storeLocalWipWorkflow(savedDraft);
-    } catch (createError) {
-      handleApiError(createError, "Failed to create workflow");
-    } finally {
-      setBusy(false);
+        }
+      ],
+      edges: [
+        {
+          id: createEdgeId(userPromptNodeId, outputNodeId),
+          source: userPromptNodeId,
+          target: outputNodeId
+        }
+      ]
+    };
+    unsavedNewWorkflowRef.current = { id: workflow.id, baseline: null, saving: false };
+    // Its first save shows every note, as any save does.
+    draftIssuesWorkflowIdRef.current = workflow.id;
+    // A slower load of another workflow must not replace the new one.
+    workflowLoadSeqRef.current += 1;
+    pendingWorkflowLoadIdRef.current = null;
+    hydrateWorkflow(workflow);
+    setActiveMode("editor");
+  }, [canManageWorkflows, hydrateWorkflow, workflowList.length]);
+
+  // The first edit of a new workflow saves it.
+  useEffect(() => {
+    const pending = unsavedNewWorkflowRef.current;
+    if (!pending) return;
+    if (pending.id !== currentWorkflow.id || currentWorkflowExists) {
+      // Saved by a save or a run, or left for another workflow.
+      unsavedNewWorkflowRef.current = null;
+      return;
     }
-  }, [canManageWorkflows, handleApiError, hydrateWorkflow, workflowList.length]);
+    let signature: string;
+    try {
+      const snapshot = editorToWorkflow(currentWorkflow, nodes as EditorNode[], edges as Edge[]);
+      signature = JSON.stringify({ name: snapshot.name, nodes: snapshot.nodes, edges: snapshot.edges });
+    } catch {
+      return;
+    }
+    if (pending.baseline === null) {
+      pending.baseline = signature;
+      return;
+    }
+    if (pending.saving || signature === pending.baseline) return;
+    pending.saving = true;
+    persistWorkflow()
+      .then(() => {
+        if (unsavedNewWorkflowRef.current === pending) unsavedNewWorkflowRef.current = null;
+      })
+      .catch((saveError: unknown) => {
+        // Tried again on the next edit; the error says why it did not save.
+        pending.saving = false;
+        pending.baseline = signature;
+        handleApiError(saveError, "Failed to save workflow");
+      });
+  }, [currentWorkflow, currentWorkflowExists, edges, handleApiError, nodes, persistWorkflow]);
 
   const handleDuplicateWorkflow = useCallback(
     async (workflowId: string) => {
@@ -5007,6 +5103,15 @@ function StudioApp() {
             </div>
           )}
           {error && <div className="error-banner global-banner">{error}</div>}
+          {activeMode === "editor" && draftIssues && draftIssues.workflowId === currentWorkflow.id ? (
+            <DraftWarnings
+              issues={draftIssues.issues}
+              liveTriggersPaused={draftIssues.liveTriggersPaused}
+              nodeLabel={(nodeId) => (nodes as EditorNode[]).find((node) => node.id === nodeId)?.data.label}
+              onSelectNode={openNodeConfig}
+              onDismiss={() => setDraftIssues(null)}
+            />
+          ) : null}
           {secretMessage && <div className="info-banner global-banner">{secretMessage}</div>}
 
           {activeMode === "dashboard" && (
@@ -5042,10 +5147,10 @@ function StudioApp() {
                   )}
                   <button
                     className="pg-btn primary"
-                    onClick={() => void handleCreateWorkflow()}
+                    onClick={() => handleCreateWorkflow()}
                     disabled={busy || !canManageWorkflows}
                   >
-                    {busy ? "Creating…" : "New workflow"}
+                    New workflow
                   </button>
                 </div>
               </header>
@@ -5332,9 +5437,7 @@ function StudioApp() {
               onExecuteWorkflow={() => {
                 void handleExecute();
               }}
-              onExecuteWebhook={() => {
-                void handleWebhookExecute();
-              }}
+              onExecuteWebhook={() => setWebhookPayloadDialogOpen(true)}
               onCancelRun={() => {
                 void handleCancelActiveRun();
               }}
@@ -5989,6 +6092,18 @@ function StudioApp() {
             })
           }
           onClose={() => setSubjectRefsDialogOpen(false)}
+        />
+      )}
+
+      {webhookPayloadDialogOpen && (
+        <WebhookTestPayloadDialog
+          payload={currentWorkflow.settings?.testWebhookPayload}
+          busy={busy}
+          onRun={(payload) => {
+            setWebhookPayloadDialogOpen(false);
+            void handleWebhookExecute(payload);
+          }}
+          onClose={() => setWebhookPayloadDialogOpen(false)}
         />
       )}
 

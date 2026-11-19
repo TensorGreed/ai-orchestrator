@@ -45,6 +45,7 @@ import { ApprovalGateNodeFields } from "./ApprovalGateNodeFields";
 import { McpAnnotationChips, McpOutputSchema } from "./McpToolMeta";
 import { SecretSaveWarnings } from "./SecretSaveWarnings";
 import { ModelAllowlistWarning, useModelAllowlistWarning } from "./ModelAllowlistWarning";
+import { directApiBaseUrl } from "../lib/direct-api-url";
 import {
   TRIGGER_TRUST_OPTIONS,
   describeTriggerTrust,
@@ -1171,26 +1172,13 @@ function getSuggestedDirectApiBaseUrl(currentBaseUrl: string): string | null {
   if (typeof window === "undefined") {
     return null;
   }
-
-  const envBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim();
-  if (envBase) {
-    return null;
-  }
-
-  const hostname = window.location.hostname;
-  const isLocalhost = hostname === "localhost" || hostname === "127.0.0.1";
-  if (!isLocalhost) {
-    return null;
-  }
-
-  const directPortFromEnv = (import.meta.env.VITE_API_PORT as string | undefined)?.trim();
-  const normalizedPort = directPortFromEnv && /^\d+$/.test(directPortFromEnv) ? directPortFromEnv : "4000";
-  const suggested = `${window.location.protocol}//${hostname}:${normalizedPort}`;
-  if (suggested.replace(/\/+$/, "") === currentBaseUrl.replace(/\/+$/, "")) {
-    return null;
-  }
-
-  return suggested;
+  return directApiBaseUrl({
+    configuredBase: import.meta.env.VITE_API_BASE_URL as string | undefined,
+    // The dev server sets this to the port it proxies the API to (vite.config.ts).
+    apiPort: import.meta.env.VITE_API_PORT as string | undefined,
+    location: window.location,
+    currentBase: currentBaseUrl
+  });
 }
 
 export function NodeInspector({
@@ -7322,11 +7310,12 @@ export function NodeInspector({
           <>
             <ExpressionField
               label="Response Template"
-              value={toStringValue(config.responseTemplate, "{{answer}}")}
+              value={toStringValue(config.responseTemplate, "")}
               onChange={(next) => setConfig((current) => ({ ...current, responseTemplate: next }))}
               rows={4}
               mode="template"
               previewContext={expressionPreviewContext}
+              help="Empty: the answer or text it receives, else the run's prompt, else everything the parent node sent."
             />
             <AdvancedFields setCount={countSet([[config.outputKey, "result", sampleConfig.outputKey]])}>
               <TextField

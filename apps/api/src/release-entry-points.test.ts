@@ -46,7 +46,7 @@ function sourceFiles(dir = here, prefix = ""): string[] {
 
 /** Calls that load a workflow or one of its saved versions. */
 const LOAD_CALL =
-  /\b(getWorkflow|getWorkflowVersion|listWorkflowConfigsForDestinations|productionWorkflow|resolveRunnableWorkflow|loadProductionWorkflow|versionWorkflow|getRunnableWorkflow|deactivatedProductionWorkflow)(Sync)?\s*(\?\.)?\(|\.(getWorkflow|getWorkflowVersion)\b(?!\s*[:(?])|\bworkflowVersionService\.get\s*(\?\.)?\(/;
+  /\b(getWorkflow|getWorkflowVersion|listWorkflowConfigsForDestinations|productionWorkflow|productionTriggerWorkflow|resolveRunnableWorkflow|loadProductionWorkflow|versionWorkflow|getRunnableWorkflow|deactivatedProductionWorkflow)(Sync)?\s*(\?\.)?\(|\.(getWorkflow|getWorkflowVersion)\b(?!\s*[:(?])|\bworkflowVersionService\.get\s*(\?\.)?\(/;
 /** A method or interface declaration of one of those (or of a store's synchronous body), not a call. */
 const DECLARATION = /^\s*(?:async\s+|private\s+|public\s+)*(?:(?:getWorkflow|getWorkflowVersion|resolveRunnableWorkflow|versionWorkflow)(?:Sync)?\((?:\.\.\.)?\w+:|listWorkflowConfigsForDestinations(?:Sync)?\((?:\.\.\.\w+:[^)]*)?\):)/;
 
@@ -82,7 +82,7 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "services/legal-hold-service.ts", match: "store.getWorkflow(input.scopeId", kind: "not_run", why: "a workflow hold checks the workflow exists and reads its project; nothing runs" },
   { file: "mcp-safety-preset-routes.ts", match: "", kind: "not_run", why: "the untrusted-write switch only checks the workflow exists and reads its project for access" },
   { file: "db/postgres/data-destinations.ts", match: "", kind: "not_run", why: "the Postgres store's destination-scan stub, not a workflow run", count: 1 },
-  { file: "services/release-service.ts", match: "", kind: "production", why: "the release resolver, production path claims and its gate, judge, request and unpublish checks, and a rollback's trigger trust check (12.2)", count: 21 },
+  { file: "services/release-service.ts", match: "", kind: "production", why: "the release resolver, production path claims and its gate, judge, request and unpublish checks, and a rollback's trigger trust check (12.2), and which version's live triggers are paused for unfinished settings", count: 22 },
   { file: "services/gate-admission-service.ts", match: "", kind: "not_run", why: "gate admission reads only a workflow's name and project (audit, requests, inbox views)", count: 3 },
   { file: "services/data-destination-service.ts", match: "", kind: "not_run", why: "the not-classified-yet list reads the draft and published node configs for their hosts in one query; nothing runs" },
 
@@ -93,14 +93,15 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "app.ts", match: "const workflow = productionWorkflow(request.params.workflowId);", kind: "production", why: "Slack, GitHub, Stripe, Telegram, Discord app webhooks and chat", count: 6 },
   { file: "app.ts", match: "const workflow = productionWorkflow(input.workflowId);", kind: "production", why: "a schedule firing" },
   { file: "app.ts", match: "const workflow = productionWorkflow(input.workflow.id);", kind: "production", why: "an app or polling trigger firing: the version current now, not the one it registered from" },
-  { file: "app.ts", match: "schedulerService.setWorkflowLoader?.((workflowId) => productionWorkflow(workflowId));", kind: "production", why: "schedules register from the published version" },
-  { file: "app.ts", match: "triggerService.setWorkflowLoader((workflowId) => productionWorkflow(workflowId));", kind: "production", why: "app and polling triggers register from the published version" },
+  { file: "app.ts", match: "schedulerService.setWorkflowLoader?.((workflowId) => productionTriggerWorkflow(workflowId));", kind: "production", why: "schedules register from the published version (an unfinished one too: its ticks are skipped)" },
+  { file: "app.ts", match: "triggerService.setWorkflowLoader((workflowId) => productionTriggerWorkflow(workflowId));", kind: "production", why: "app and polling triggers register from the published version (an unfinished one too: its fires are skipped)" },
+  { file: "app.ts", match: 'releaseService.resolveRunnableWorkflow(workflowId, "production", { includeUnfinished: true });', kind: "production", why: "the loader schedules and app/polling triggers register from: production's version (an unfinished one too: its fires are skipped and noted)" },
   { file: "app.ts", match: "getRunnableWorkflow: (id, runChannel) => releaseService.resolveRunnableWorkflow(id, runChannel),", kind: "production", why: "sub-workflows called from a production run" },
   { file: "app.ts", match: 'const productionWorkflow = (workflowId: string): Promise<Workflow | null> => releaseService.resolveRunnableWorkflow(workflowId, "production");', kind: "production", why: "the production loader itself" },
-  { file: "app.ts", match: "const wf = productionWorkflow(summary.id);", kind: "production", why: "form trigger and MCP server trigger lookups", count: 2 },
+  { file: "app.ts", match: "const wf = productionTriggerWorkflow(summary.id);", kind: "production", why: "form trigger and MCP server trigger lookups (an unfinished version matches, and a submission or call answers 409)", count: 2 },
   { file: "app.ts", match: "const workflow = productionWorkflow(payload.workflowId);", kind: "production", why: "queued runs and dead-letter re-runs" },
   { file: "app.ts", match: '(channel === "production" ? productionWorkflow(payload.sourceWorkflowId) : store.getWorkflow(payload.sourceWorkflowId))', kind: "production", why: "the error workflow follows the failing run's channel" },
-  { file: "app.ts", match: "const loadForRoute = (id: string) => (isTestRoute ? store.getWorkflow(id) : productionWorkflow(id));", kind: "production", why: "/webhook/ runs the published version, /webhook-test/ the draft" },
+  { file: "app.ts", match: "const loadForRoute = (id: string) => (isTestRoute ? store.getWorkflow(id) : productionTriggerWorkflow(id));", kind: "production", why: "/webhook/ runs the published version (an unfinished one answers 409), /webhook-test/ the draft" },
   { file: "execution-routes.ts", match: 'const workflow = executeChannel.channel === "production" ? productionWorkflow(access.workflow.id) : access.workflow;', kind: "production", why: "/execute and /execute/stream: API-key callers run the published version (or the draft with channel=draft and workflow:write), the editor the draft", count: 2 },
   { file: "execution-routes.ts", match: 'const workflow = retryChannel === "production" ? productionWorkflow(sourceExecution.workflowId) : store.getWorkflow(sourceExecution.workflowId);', kind: "production", why: "a retry of a production run runs what production runs now; a draft run's retry runs the draft" },
   { file: "app.ts", match: "const workflow = releaseService.deactivatedProductionWorkflow(summary.id);", kind: "not_run", why: "a deactivated gated workflow's paths, only to answer \"deactivated\" rather than \"not found\"" },
@@ -187,7 +188,7 @@ const matches = (entry: LoadSite, site: { file: string; text: string }) => {
   return entry.exact ? text === match : text.includes(match);
 };
 
-const RESOLVER = /productionWorkflow\(|resolveRunnableWorkflow\(|versionWorkflow\(|getRunnableWorkflow\(|loadProductionWorkflow/;
+const RESOLVER = /productionWorkflow\(|productionTriggerWorkflow\(|resolveRunnableWorkflow\(|versionWorkflow\(|getRunnableWorkflow\(|loadProductionWorkflow/;
 
 describe("every workflow load is classified", () => {
   const sites: Array<{ file: string; line: number; text: string }> = [];
@@ -338,7 +339,7 @@ describe("production entry points load the published version", () => {
   it("the configured webhook route loads the draft only for /webhook-test/", () => {
     const start = appSource.indexOf("const registerConfiguredWebhookRoute");
     const block = appSource.slice(start, appSource.indexOf('registerConfiguredWebhookRoute("/webhook/:path")', start));
-    expect(block).toContain("(isTestRoute ? await store.getWorkflow(id) : await productionWorkflow(id))");
+    expect(block).toContain("(isTestRoute ? await store.getWorkflow(id) : await productionTriggerWorkflow(id))");
     expect(block.match(/store\.getWorkflow\(/g)?.length).toBe(1);
   });
 

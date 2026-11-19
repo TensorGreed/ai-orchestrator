@@ -118,7 +118,8 @@ import {
   type ReleaseUnpublishResult,
   type ReleaseVerdict,
   type Workflow,
-  type WorkflowRelease
+  type WorkflowRelease,
+  type WorkflowValidationIssue
 } from "@ai-orchestrator/shared";
 import type { EvalFixtureRecord, ReleaseApprovalRequestRecord, ReleaseGateRecord, WorkflowReleaseRecord } from "../db/database.js";
 import type { AuditActor, AuditEventInput } from "./audit-service.js";
@@ -129,6 +130,7 @@ import type { Store } from "../db/store.js";
 import { ReleaseGateEnforcedError } from "../db/store-errors.js";
 import { mapAsync } from "../async-array.js";
 import { triggerTrustChanges } from "./trigger-trust.js";
+import { unfinishedDraftIssues, validateWorkflowGraph } from "@ai-orchestrator/workflow-engine";
 
 /** The gate's sets as they are now (see `ReleaseService.gateSets`). */
 interface GateSets {
@@ -311,6 +313,18 @@ export function isWorkflowDeactivated(workflow: Pick<Workflow, "settings">): boo
 
 /** What a production run of a deactivated gated workflow answers, on every production entry point. */
 export const DEACTIVATED_MESSAGE = "This workflow is deactivated, so production runs are refused. Activate it to serve production again.";
+/**
+ * Why production refuses a workflow whose version has unfinished node settings. Callers of live triggers are not
+ * told which settings: the editor and the audit entry say.
+ */
+export const PAUSED_MESSAGE =
+  "Live triggers of this workflow are paused: it has unfinished settings. Finish them in the editor and save to serve production again.";
+
+/** The unfinished node settings a saved draft may have: production's live triggers do not run a version with them. */
+function unfinishedIssues(workflow: Workflow): WorkflowValidationIssue[] {
+  return unfinishedDraftIssues(validateWorkflowGraph(workflow));
+}
+
 const NOTHING_PUBLISHED_MESSAGE = "No published version of this workflow can be loaded, so production runs are refused until a version is published.";
 
 const TRIGGER_PATH_NODE_TYPES = new Set(["webhook_input", "form_trigger", "mcp_server_trigger"]);
@@ -390,6 +404,8 @@ function sameIdentity(a: { id?: string | null; email?: string | null }, b: { id?
 export class ReleaseService {
   /** The published version each resolved production workflow object came from, for the run's history (retry runs it again). */
   private readonly versions = new WeakMap<Workflow, number>();
+  /** Workflow versions whose paused live triggers this instance already noted (`<id>@<version>`). */
+  private readonly pausedNoted = new Set<string>();
 
   constructor(private readonly options: ReleaseServiceOptions) {}
 
@@ -417,7 +433,75 @@ export class ReleaseService {
    * to an unreviewed draft. After an unpublish production runs the draft, on
    * a gated workflow too (the gate does not check it).
    */
-  async resolveRunnableWorkflow(workflowId: string, channel: ReleaseChannel): Promise<Workflow | null> {
+  async resolveRunnableWorkflow(
+    workflowId: string,
+    channel: ReleaseChannel,
+    options: { includeUnfinished?: boolean } = {}
+  ): Promise<Workflow | null> {
+    const candidate = await this.productionCandidate(workflowId, channel);
+    // A saved draft may have unfinished node settings: production (webhooks, schedules, app triggers) does not run it.
+    // Trigger registration still sees it (`includeUnfinished`), so a schedule tick is skipped and noted, not lost.
+    if (!candidate || channel === "draft" || options.includeUnfinished) return candidate;
+    return unfinishedIssues(candidate).length > 0 ? null : candidate;
+  }
+
+  /**
+   * The workflow production would run were it finished, when it has unfinished node settings: its live triggers are
+   * paused. Null when production runs it, refuses it for another reason, or it does not exist.
+   */
+  async unfinishedProductionWorkflow(workflowId: string): Promise<{ workflow: Workflow; issues: WorkflowValidationIssue[] } | null> {
+    const candidate = await this.productionCandidate(workflowId, "production");
+    if (!candidate) return null;
+    const issues = unfinishedIssues(candidate);
+    return issues.length > 0 ? { workflow: candidate, issues } : null;
+  }
+
+  /**
+   * For a production entry point that matched `workflow` (loaded with `includeUnfinished`): why it must not run it
+   * (its live triggers are paused), noting the pause once per version; null when it may run.
+   */
+  async pausedRefusal(workflow: Workflow): Promise<string | null> {
+    const issues = unfinishedIssues(workflow);
+    if (issues.length === 0) return null;
+    await this.notePaused(workflow.id, workflow, issues);
+    return PAUSED_MESSAGE;
+  }
+
+  /**
+   * Notes once per version (per workflow version, across instances, through the audit log) that production refused a
+   * trigger of a workflow with unfinished settings, so a schedule or a busy webhook does not fill the log.
+   */
+  private async notePaused(workflowId: string, workflow: Workflow, issues: WorkflowValidationIssue[]): Promise<void> {
+    const published = this.versions.get(workflow);
+    const version = published ?? ((await this.store.maxWorkflowVersionNumber(workflowId)) || workflow.workflowVersion);
+    const key = `${workflowId}@${version}`;
+    if (this.pausedNoted.has(key)) return;
+    this.pausedNoted.add(key);
+    try {
+      const earlier = await this.store.listAuditLogs({ eventType: "workflow.triggers_paused", resourceId: workflowId, page: 1, pageSize: 20 });
+      if (earlier.items.some((item) => asRecord(item.metadata).version === version)) return;
+      await this.options.audit({
+        eventType: "workflow.triggers_paused",
+        category: "workflow",
+        actor: { type: "system" },
+        action: "pause",
+        outcome: "denied",
+        resourceType: "workflow",
+        resourceId: workflowId,
+        projectId: workflow.projectId ?? null,
+        metadata: { version, issues: issues.map((issue) => issue.code) },
+        message: "Live triggers paused: unfinished settings"
+      });
+    } catch (error) {
+      this.pausedNoted.delete(key);
+      this.options.logger?.warn("Could not note that a workflow's live triggers are paused", {
+        workflowId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  private async productionCandidate(workflowId: string, channel: ReleaseChannel): Promise<Workflow | null> {
     const draft = await this.store.getWorkflow(workflowId);
     if (!draft || channel === "draft") return draft;
     const gateOn = Boolean((await this.store.getReleaseGate(workflowId))?.enabled);
@@ -448,6 +532,11 @@ export class ReleaseService {
     if (!draft) return null;
     const gateOn = Boolean((await this.store.getReleaseGate(workflowId))?.enabled);
     if (gateOn && isWorkflowDeactivated(draft)) return DEACTIVATED_MESSAGE;
+    const unfinished = await this.unfinishedProductionWorkflow(workflowId);
+    if (unfinished) {
+      await this.notePaused(workflowId, unfinished.workflow, unfinished.issues);
+      return PAUSED_MESSAGE;
+    }
     return await this.resolveRunnableWorkflow(workflowId, "production") === null ? NOTHING_PUBLISHED_MESSAGE : null;
   }
 
@@ -1468,6 +1557,15 @@ export class ReleaseService {
     }
     if (input.override && user.role !== "admin") throw new ReleaseError("Only admins can override the release gate", 403);
     const candidate = (await this.versionCandidate(workflowId, input.version)).workflow;
+    // A draft saves with unfinished node settings; production runs only a version that can run.
+    const unfinished = validateWorkflowGraph(candidate).issues.filter((issue) => issue.severity !== "warning");
+    if (unfinished.length > 0) {
+      throw new ReleaseError(
+        `Version ${input.version} cannot run yet, so it cannot be published: ${unfinished.map((issue) => issue.message).join("; ")}`,
+        409,
+        { code: "workflow_invalid" }
+      );
+    }
     if (user.role !== "admin") {
       const changed = await this.trustChangesFromProduction(workflowId, candidate, previous);
       if (changed.length > 0) {

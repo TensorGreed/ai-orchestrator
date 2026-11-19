@@ -891,7 +891,7 @@ export function WorkflowCanvasArea({
                         </button>
                       </div>
                       <div className="node-status-list node-log-list">
-                        {executionResult.nodeResults.map((result) => {
+                        {executionResult.nodeResults.map((result, resultIndex) => {
                           const meta = nodeMetaById.get(result.nodeId);
                           const isExpanded = expandedNodeLogIds.includes(result.nodeId);
                           const nodeLabel = meta?.label ?? result.nodeId;
@@ -903,7 +903,8 @@ export function WorkflowCanvasArea({
                           const hasDetails = result.input !== undefined || result.output !== undefined || Boolean(result.error) || Boolean(liveText);
 
                           return (
-                            <div key={result.nodeId} className={isExpanded ? "node-status-item expanded" : "node-status-item"}>
+                            // A Loop body's node is listed once per pass, so its id alone is not a unique key.
+                            <div key={`${result.nodeId}#${resultIndex}`} className={isExpanded ? "node-status-item expanded" : "node-status-item"}>
                               <button className="node-status-head" onClick={() => toggleNodeLogExpanded(result.nodeId)} aria-expanded={isExpanded}>
                                 <div className="node-status-title-wrap">
                                   <strong className="node-status-title">{nodeLabel}</strong>

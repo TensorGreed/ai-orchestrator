@@ -80,6 +80,15 @@ Prompt node with text does the same for the system prompt. A workflow that reads
 Request followed by an Output, runs with no prompt, so the test prompt does not show up in its input or its output.
 The chat panel sends the message you type, and its system prompt on the same rule.
 
+**Webhook run** (canvas toolbar) asks for the request body first: a JSON object that the run receives as a call to the
+webhook URL would send it, so nodes read its fields as <span v-pre>`{{webhook.customer}}`</span>. The body is saved with the workflow
+(`settings.testWebhookPayload`, at most 64 KB) and filled in the next time. Everyone who can read the workflow sees it,
+so a field named like a credential (`password`, `token`, `api_key`, `authorization`, `secret` and the like) is refused:
+put credentials in a secret instead.
+
+**New workflow** opens a User Prompt → Output starter in the editor without saving it. Its first edit (or a save or a
+run) saves it; open another workflow first and nothing is kept.
+
 ## Run data
 
 Run a workflow from the editor with **Debug** on (the default) and the canvas shows that run on every node, with
@@ -142,7 +151,8 @@ for every node, so it keeps its shape while you move between nodes; on a narrow 
 **Run data** in the canvas toolbar lists this workflow's latest runs. Pick one to load it onto the canvas and into
 the inspector; the workflow itself is not changed. An older run stays loaded until you pick the latest one or run
 the workflow again. Otherwise a run started elsewhere (a webhook, the API) appears on the canvas on its own while it is
-running.
+running. Opening a workflow loads its latest run, so the run pill and Run data show it straight away; **Clear logs**
+keeps the canvas clear until the next run.
 
 The editor shows exactly what run history stored for that run: it never fetches anything else. Values that run
 history keeps masked or as placeholders (see [content rules](/product/content-rules)) stay that way here.
@@ -168,5 +178,41 @@ Validation checks include:
 - Required node config fields
 - Attachment-type correctness (for agent/supervisor ports)
 - Node-type specific rules
+
+An Output node is optional. Without one, a run's result is the output of the last node that ran, and validation
+lists it as a note, not an error.
+
+Saving keeps a draft: node settings you have not filled in yet (an HTTP Request URL, an IF condition, a model, a
+Set node's fields and the like) do not stop a save. The editor lists them above the canvas after the save, with a
+link to each node, and a run stops at them until they are fixed. Such a version cannot be published either. A save is
+still refused for a broken graph (a cycle, an edge to a missing node, a repeated node id) and for settings that are
+live as soon as the workflow is saved: trigger and webhook authentication settings, approval and content-rule rules,
+and attachment rules.
+
+### Settings that may be unfinished in a draft
+
+These save unfinished; each one stops a run until it is filled in:
+
+- Templates: a Prompt Template's template, an HTTP Request URL, a Set node's fields (and their names and values)
+- Branching: an IF condition, a Switch value and its cases, a Merge node's combine key and its second input
+- Loops: a Loop's input key and item variable
+- Models: an LLM Call's provider, a Gemini model, a chat model's model or gateway base URL, an agent's attached chat
+  model
+- Azure: the Azure OpenAI secret, endpoint and deployment, the Azure embedding secret and settings, and the
+  operation of an Azure Storage, Monitor, Cosmos DB or AI Search node
+- Tools and data: an MCP tool or resource, a connector, a Qdrant operation, an output parser's schema, an input
+  validator's rules
+- Code and sub-workflows: a code node's script, the workflow an Execute Workflow or Workflow Tool node calls
+
+### Live triggers of an unfinished draft
+
+While the version production would run has unfinished settings (a saved draft with nothing published), its live
+triggers are paused and the editor says so above the canvas: a production webhook (`/webhook/:path`, after its own
+address and authentication checks), form submission, chat message or MCP trigger call answers `409` with
+`code: "workflow_unfinished"` and starts no run (the form page and the tool's manifest still show), and a schedule or
+app trigger skips its tick. Other production runs of that version (an API key's `/execute`, a sub-workflow call) are
+refused with `409` too. The audit log records the pause once per version (`workflow.triggers_paused`, "Live triggers paused:
+unfinished settings"). Webhook run and the test webhook URL (`/webhook-test/:path`) still run the draft, so you can
+see where it stops. Save it finished and the triggers serve again.
 
 Non-connected nodes are not executed.

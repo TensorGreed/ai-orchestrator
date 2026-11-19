@@ -404,7 +404,8 @@ describe("runs that write and read session state", () => {
         expect(result.status).toBe("success");
         outcomes.push({
           labels: result.nodeResults.map((entry) => [entry.nodeId, entry.labels ?? null]),
-          output: result.output,
+          // An Output node without a template returns its parent's output, which carries the trigger's firing time.
+          output: JSON.parse(JSON.stringify(result.output ?? null, (key, value) => (key === "firedAt" ? undefined : value))),
           outputLabels: outputLabelsOf(result) ?? null,
           markQueries
         });
