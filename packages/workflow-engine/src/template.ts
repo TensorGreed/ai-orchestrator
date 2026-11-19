@@ -1,6 +1,61 @@
 import { withExpressionEvaluator, isComplexExpression, type ExpressionContext } from "./expression";
 import { isExpressionSandboxFailure, toSandboxJson } from "./expression-sandbox";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { TEMPLATE_VALUE_MISSING_ERROR_CODE } from "@ai-orchestrator/shared";
 import { recordTemplateRead } from "./data-labels";
+
+// ---------------------------------------------------------------------------
+// Strict templates (the workflow setting `strictTemplates`)
+// ---------------------------------------------------------------------------
+
+/** The error code a node fails with when strict templates are on and a `{{ }}` has no value. */
+export const TEMPLATE_VALUE_MISSING_CODE = TEMPLATE_VALUE_MISSING_ERROR_CODE;
+
+/**
+ * The run's optional prompt fields. Nodes read them through default templates (`{{system_prompt}}`,
+ * `{{session_id}}`) and fall back when they are empty, so a run without them still renders them empty.
+ */
+const OPTIONAL_RUN_FIELDS = new Set(["system_prompt", "user_prompt", "session_id"]);
+
+/**
+ * A `{{ }}` rendered nothing while strict templates are on: its path has no value, or its expression returned
+ * nothing or failed. The message names the template body (which the author wrote), never a value.
+ */
+export class TemplateValueMissingError extends Error {
+  readonly code = TEMPLATE_VALUE_MISSING_CODE;
+  constructor(
+    readonly body: string,
+    readonly reason: "missing" | "expression_failed"
+  ) {
+    super(
+      reason === "missing"
+        ? `Template {{${body}}} has no value, and this workflow uses strict templates. Check the field name, or turn off Strict templates in the workflow menu to render it empty.`
+        : `Template {{${body}}} could not be evaluated, and this workflow uses strict templates. Fix the expression, or turn off Strict templates in the workflow menu to render it empty.`
+    );
+    this.name = "TemplateValueMissingError";
+  }
+}
+
+export function isTemplateValueMissingError(error: unknown): error is TemplateValueMissingError {
+  return error instanceof TemplateValueMissingError || (error instanceof Error && (error as Error & { code?: unknown }).code === TEMPLATE_VALUE_MISSING_CODE);
+}
+
+const strictness = new AsyncLocalStorage<boolean>();
+
+/** Runs `body` with strict templates on or off: on, a `{{ }}` without a value throws `TemplateValueMissingError`. */
+export function runWithStrictTemplates<T>(strict: boolean, body: () => T): T {
+  return strictness.run(strict, body);
+}
+
+function strictTemplatesOn(): boolean {
+  return strictness.getStore() === true;
+}
+
+/** One `{{ }}` of a template that rendered nothing: its body and why. */
+export interface MissingTemplateValue {
+  body: string;
+  reason: "missing" | "expression_failed";
+}
 
 function toRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
@@ -40,9 +95,15 @@ export function renderTemplateAdvanced(
   template: string,
   values: Record<string, unknown>,
   options: { pieces?: TemplatePiece[] } = {}
-): { rendered: string; unresolvedKeys: string[] } {
+): { rendered: string; unresolvedKeys: string[]; missing: MissingTemplateValue[] } {
+  const strict = strictTemplatesOn();
   const render = (evaluate: ((expression: string) => unknown) | null) => {
     const unresolvedKeys: string[] = [];
+    const missing: MissingTemplateValue[] = [];
+    const noValue = (body: string, reason: MissingTemplateValue["reason"]): string => {
+      missing.push({ body, reason });
+      return "";
+    };
     const pieces = options.pieces;
     if (pieces) pieces.length = 0;
     let last = 0;
@@ -57,7 +118,7 @@ export function renderTemplateAdvanced(
       return text;
     });
     if (pieces && last < template.length) pieces.push({ text: template.slice(last) });
-    return { rendered, unresolvedKeys };
+    return { rendered, unresolvedKeys, missing };
 
     function renderBody(body: string): string {
       const trimmed = body.trim();
@@ -66,7 +127,12 @@ export function renderTemplateAdvanced(
         // Phase 16 — the running node read this path (its labels follow).
         recordTemplateRead(trimmed, true);
         const value = resolvePath(values, trimmed);
-        if (value === undefined || value === null) {
+        if (value === undefined) {
+          unresolvedKeys.push(trimmed);
+          return noValue(trimmed, "missing");
+        }
+        if (value === null) {
+          // A field that holds null has a value: it renders empty, in strict mode too.
           unresolvedKeys.push(trimmed);
           return "";
         }
@@ -78,7 +144,8 @@ export function renderTemplateAdvanced(
         recordTemplateRead(trimmed, false);
         try {
           const result = evaluate(trimmed);
-          if (result === undefined || result === null) return "";
+          if (result === undefined) return noValue(trimmed, "missing");
+          if (result === null) return "";
           if (typeof result === "string") return result;
           if (typeof result === "number" || typeof result === "boolean") return String(result);
           try { return JSON.stringify(result); } catch { return String(result); }
@@ -86,7 +153,7 @@ export function renderTemplateAdvanced(
           // The expression's own error or timeout renders "". A sandbox failure fails the node instead:
           // an IF or Switch must never branch on a value that silently lost its expression.
           if (isExpressionSandboxFailure(error)) throw error;
-          return "";
+          return noValue(trimmed, "expression_failed");
         }
       }
       return "";
@@ -97,9 +164,17 @@ export function renderTemplateAdvanced(
     const trimmed = (match[1] ?? "").trim();
     return !SIMPLE_PATH.test(trimmed) && isComplexExpression(trimmed);
   });
-  if (!hasExpression) return render(null);
   // A session that cannot start throws ExpressionSandboxError (retryable when no instance was ready).
-  return withExpressionEvaluator(expressionContextFor(values), render);
+  const result = hasExpression ? withExpressionEvaluator(expressionContextFor(values), render) : render(null);
+  // Strict templates: a `{{ }}` without a value fails the node, except the run's optional prompt fields. Thrown
+  // after the sandbox session has closed, so it never counts as a sandbox failure.
+  if (strict) throwIfStrictMissing(result.missing);
+  return result;
+}
+
+function throwIfStrictMissing(missing: MissingTemplateValue[]): void {
+  const first = missing.find((entry) => !OPTIONAL_RUN_FIELDS.has(entry.body));
+  if (first) throw new TemplateValueMissingError(first.body, first.reason);
 }
 
 export function renderTemplate(template: string, values: Record<string, unknown>, options: { pieces?: TemplatePiece[] } = {}): string {
@@ -156,15 +231,20 @@ function conditionErrorKind(error: unknown, expression: string): string {
  * sandbox session has closed, so it fails the node without counting as a sandbox crash; the error names the
  * condition and the error's class, not values.
  */
-export function evaluateConditionTemplate(template: string, values: Record<string, unknown>): { result: boolean; evaluatedValue: string } {
+export function evaluateConditionTemplate(
+  template: string,
+  values: Record<string, unknown>
+): { result: boolean; evaluatedValue: string; missing: MissingTemplateValue[] } {
   const matches = [...template.matchAll(TEMPLATE_BODY)];
   const outside = template.replace(TEMPLATE_BODY, " ");
   if (matches.length === 0 || !outside.trim()) {
-    const evaluated = renderTemplate(template, values).trim();
-    return { result: isTruthyConditionText(evaluated), evaluatedValue: evaluated };
+    const rendered = renderTemplateAdvanced(template, values);
+    const evaluated = rendered.rendered.trim();
+    return { result: isTruthyConditionText(evaluated), evaluatedValue: evaluated, missing: rendered.missing };
   }
   // Text outside the braces that names data reads it as a computed expression does (its labels follow).
   if (conditionTextReadsData(outside)) recordTemplateRead(template.replace(TEMPLATE_BODY, " 0 ").trim(), false);
+  const missing: MissingTemplateValue[] = [];
   const outcome = withExpressionEvaluator(expressionContextFor(values), (evaluate): { ok: true; value: unknown } | { ok: false; kind: string } => {
     let expression = "";
     let last = 0;
@@ -177,13 +257,16 @@ export function evaluateConditionTemplate(template: string, values: Record<strin
       if (SIMPLE_PATH.test(body)) {
         recordTemplateRead(body, true);
         value = resolvePath(values, body);
+        if (value === undefined) missing.push({ body, reason: "missing" });
       } else {
         recordTemplateRead(body, false);
         try {
           value = evaluate(body);
+          if (value === undefined) missing.push({ body, reason: "missing" });
         } catch (error) {
           if (isExpressionSandboxFailure(error)) throw error;
           value = undefined;
+          missing.push({ body, reason: "expression_failed" });
         }
       }
       expression += value === undefined ? " (undefined) " : ` (${toSandboxJson(value)}) `;
@@ -198,6 +281,8 @@ export function evaluateConditionTemplate(template: string, values: Record<strin
       return { ok: false, kind: conditionErrorKind(error, expression) };
     }
   });
+  // Strict templates: a `{{ }}` of the condition without a value fails the node (after the session has closed).
+  if (strictTemplatesOn()) throwIfStrictMissing(missing);
   if (!outcome.ok) {
     throw new Error(
       `IF condition '${template}' could not be evaluated once its {{ }} values were filled in (${outcome.kind}). ` +
@@ -206,7 +291,7 @@ export function evaluateConditionTemplate(template: string, values: Record<strin
     );
   }
   const evaluatedValue = stringifyConditionValue(outcome.value).trim();
-  return { result: isTruthyConditionText(evaluatedValue), evaluatedValue };
+  return { result: isTruthyConditionText(evaluatedValue), evaluatedValue, missing };
 }
 
 function resolvePath(values: Record<string, unknown>, path: string): unknown {

@@ -70,8 +70,11 @@ The agent's **Language Models** drawer offers **LLM Call** too, so an agent can 
 ## Workflow settings
 
 The **⋯** menu in the editor's top bar holds the settings of the whole workflow (they are saved with it):
-**No write tools**, **Ask before write tools…**, **Subject references…** and **Error workflow…**. A tick shows the ones
-that are on.
+**No write tools**, **Strict templates**, **Ask before write tools…**, **Subject references…** and **Error
+workflow…**. A tick shows the ones that are on.
+
+**Strict templates** makes a <span v-pre>`{{ }}`</span> without a value fail its node instead of rendering empty
+(`settings.strictTemplates`; off by default). See [strict templates](../runtime/templates-and-expressions.md#strict-templates).
 
 **Error workflow…** picks another workflow of the project that starts when a run of this one fails, for alerts or
 clean-up (`settings.errorWorkflowId` in the workflow JSON). Start it with an **Error Trigger**, which outputs the failed
@@ -153,7 +156,9 @@ for every node, so it keeps its shape while you move between nodes; on a narrow 
   body that is valid JSON is sent as `application/json` unless the headers set a `Content-Type`. Help for a field is
   behind the **?** next to its label. The expression helpers
   under a template field show while you edit it, and its preview shows when the result differs from what you typed
-  (or the expression has an error). A code node's **Test Run** stays in view, with its test input folded under it.
+  (or the expression has an error). Typing <span v-pre>`{{`</span> in a template field lists the last run's fields, variables and steps
+  to insert, and a field name dragged from the **Input** pane inserts its <span v-pre>`{{path}}`</span>; a note under the field names
+  any <span v-pre>`{{ }}`</span> the last run had no value for (see [writing templates in the editor](../runtime/templates-and-expressions.md#writing-templates-in-the-editor)). A code node's **Test Run** stays in view, with its test input folded under it.
 - **Settings** holds what every node has: disabled, accent colour, error handling (retries, delay, on error), input
   mapping and data labels. A dot on the tab means one of them differs from the default.
 - **Trace** shows timing, token use, the agent's activity and tool policy decisions for the run.

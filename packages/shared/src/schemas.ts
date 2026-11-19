@@ -323,7 +323,12 @@ export const workflowSettingsSchema = z
     /** 13.3 — subject references: which values of a run name the person it is about (stored as keyed hashes only). */
     dataProtection: workflowDataProtectionSchema.optional(),
     /** The editor's test payload for "Webhook run". Stored with the workflow, so it must not hold credentials. */
-    testWebhookPayload: testWebhookPayloadSchema.optional()
+    testWebhookPayload: testWebhookPayloadSchema.optional(),
+    /**
+     * A `{{ }}` without a value fails its node instead of rendering empty (`template_value_missing`). Off (unset) by
+     * default. The run's optional prompt fields (`system_prompt`, `user_prompt`, `session_id`) still render empty.
+     */
+    strictTemplates: z.boolean().optional()
   })
   .passthrough();
 

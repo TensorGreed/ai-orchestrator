@@ -163,7 +163,16 @@ import {
   type EgressUrlJudge,
   type OutboundGuardConfig
 } from "./outbound-url-guard";
-import { bindCheckedRenderings, evaluateConditionTemplate, renderTemplate, tryParseJson, type TemplatePiece } from "./template";
+import {
+  bindCheckedRenderings,
+  evaluateConditionTemplate,
+  isTemplateValueMissingError,
+  renderTemplate,
+  runWithStrictTemplates,
+  TEMPLATE_VALUE_MISSING_CODE,
+  tryParseJson,
+  type TemplatePiece
+} from "./template";
 import {
   createMcpElicitationHandler,
   createMcpSamplingHandler,
@@ -4549,7 +4558,35 @@ function executeNode(
   dependencies: WorkflowExecutionDependencies
 ): Promise<unknown> {
   // A node's output keeps only the model usage it made itself (usage-ownership.ts), so a pass-through is not counted.
-  return runInLabelScope(context.labelScope, () => runAsUsageOwner(() => executeNodeHandler(node, context, dependencies)));
+  return runWithNodeTemplateMode(context, () =>
+    runInLabelScope(context.labelScope, () => runAsUsageOwner(() => executeNodeHandler(node, context, dependencies)))
+  );
+}
+
+/**
+ * Runs a step of a node with the workflow's template mode: with `settings.strictTemplates`, a `{{ }}` without a value
+ * fails the node with a `template_value_missing` error that is never retried (the same data fails the same way).
+ */
+async function runWithNodeTemplateMode<T>(context: Pick<NodeRuntimeContext, "workflow">, body: () => Promise<T>): Promise<T> {
+  const strict = context.workflow.settings?.strictTemplates === true;
+  try {
+    return await runWithStrictTemplates(strict, body);
+  } catch (error) {
+    if (!(error instanceof WorkflowError) && isTemplateValueMissingError(error)) {
+      throw new WorkflowError(
+        error.message,
+        ErrorCategory.NODE_CONFIG,
+        false,
+        { code: TEMPLATE_VALUE_MISSING_CODE },
+        "Strict templates are on for this workflow. Open the node and fix the field the error names (the editor lists the paths the last run had), or turn off Strict templates in the workflow menu."
+      );
+    }
+    throw error;
+  }
+}
+
+function isStrictTemplateFailure(error: unknown): boolean {
+  return error instanceof WorkflowError && error.metadata?.code === TEMPLATE_VALUE_MISSING_CODE;
 }
 
 async function executeNodeHandler(
@@ -8590,7 +8627,7 @@ async function executeNodeWithRetry(
   if (replayStub) {
     throwIfAborted(dependencies.abortSignal);
     // Phase 16 — the egress check runs just before the stub: nothing is sent, nothing pauses.
-    await runInLabelScope(context.labelScope, () => outboundPreCheck(node, config, context, dependencies));
+    await runWithNodeTemplateMode(context, () => runInLabelScope(context.labelScope, () => outboundPreCheck(node, config, context, dependencies)));
     return { output: resolveReplayStub(replayStub, context), attempts: 1 };
   }
   const retry = getRetryConfigForNode(node);
@@ -8619,6 +8656,10 @@ async function executeNodeWithRetry(
         // A rejection or timeout is final: the resumed child must not restart and ask again.
         (context.resumeDecision?.nodeId === node.id && context.resumeDecision.decision !== "approve")
       ) {
+        throw error;
+      }
+      // A strict template without a value has no value on the next attempt either.
+      if (isStrictTemplateFailure(error)) {
         throw error;
       }
       // A URL the outbound guard refuses is refused again on every attempt.

@@ -1354,6 +1354,8 @@ export async function previewExpression(payload: {
     ok: boolean;
     result?: unknown;
     error?: string;
+    /** Template and condition modes: each `{{ }}` that rendered nothing, and why. */
+    missing?: Array<{ body: string; reason: "missing" | "expression_failed" }>;
   }>("/api/expressions/preview", {
     method: "POST",
     body: JSON.stringify(payload)

@@ -1091,6 +1091,69 @@
   color: var(--fg);
 }
 
+/* `{{ }}` autocomplete: the last run's fields, under the field being typed in. */
+.expression-field {
+  position: relative;
+}
+.template-suggest {
+  list-style: none;
+  margin: -2px 0 0;
+  padding: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg-elev-2);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.18);
+}
+.template-suggest li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.template-suggest li.active,
+.template-suggest li:hover {
+  background: var(--accent-soft, var(--bg-input));
+}
+.template-suggest-path {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.template-suggest-source {
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+.template-suggest-detail {
+  grid-column: 1 / -1;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A `{{ }}` the last run had no value for. */
+.expression-missing {
+  padding: 6px 10px;
+  border: 1px solid var(--warn, var(--line));
+  border-left-width: 3px;
+  border-radius: var(--r-sm);
+  background: var(--warn-soft, var(--bg-input));
+  font-size: var(--fs-xs);
+  color: var(--fg);
+}
+.expression-missing code {
+  font-family: var(--font-mono);
+}
+
 /* ---- Run data (Input / Output) ------------------------------------------- */
 .insp-tabbar {
   display: flex;
@@ -1667,6 +1730,13 @@
   color: var(--accent);
   white-space: nowrap;
   width: 32%;
+}
+/* A field that drags into a template field as `{{path}}`. */
+.run-data-table th[draggable="true"] {
+  cursor: grab;
+}
+.run-data-table th[draggable="true"]:active {
+  cursor: grabbing;
 }
 .run-data-value {
   font-family: var(--font-mono);

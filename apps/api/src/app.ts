@@ -102,6 +102,8 @@ import {
   importWorkflowFromJson,
   renderExpressionTemplate,
   renderTemplate,
+  renderTemplateAdvanced,
+  type MissingTemplateValue,
   evaluateConditionTemplate,
   runWithSandboxOwner,
   validateWorkflowGraph,
@@ -12197,18 +12199,27 @@ export async function createApp(
 
     try {
       // Previews count against the user's own sandbox circuit breaker, not a workflow's.
-      const result = runWithSandboxOwner(`user:${user.id}`, () =>
-        parsed.data.mode === "template"
-          ? renderTemplate(parsed.data.expression, templateData)
-          : parsed.data.mode === "condition"
-            ? evaluateConditionTemplate(parsed.data.expression, templateData).result
-          : parsed.data.expression.includes("{{")
+      // Template and condition previews also list each `{{ }}` that rendered nothing (`missing`), so the editor can
+      // warn before a run renders it empty (or, with strict templates, fails the node).
+      const { result, missing } = runWithSandboxOwner(`user:${user.id}`, (): { result: unknown; missing?: MissingTemplateValue[] } => {
+        if (parsed.data.mode === "template") {
+          const rendered = renderTemplateAdvanced(parsed.data.expression, templateData);
+          return { result: rendered.rendered, missing: rendered.missing };
+        }
+        if (parsed.data.mode === "condition") {
+          const condition = evaluateConditionTemplate(parsed.data.expression, templateData);
+          return { result: condition.result, missing: condition.missing };
+        }
+        return {
+          result: parsed.data.expression.includes("{{")
             ? renderExpressionTemplate(parsed.data.expression, expressionContext)
             : evaluateExpression(parsed.data.expression, expressionContext)
-      );
+        };
+      });
       return {
         ok: true,
-        result
+        result,
+        ...(missing ? { missing } : {})
       };
     } catch (error) {
       return {

@@ -1464,6 +1464,11 @@ function StudioApp() {
     () => new Set(Object.keys(asRecord(currentWorkflow.pinnedData) ?? {})),
     [currentWorkflow.pinnedData]
   );
+  // Ids a new node must not take: the workflow's nodes, its pinned data and the last run's nodes (a new node with the
+  // id of a deleted one would show that node's pinned data or run result).
+  const nodeIdsInUseRef = useRef<() => Set<string>>(() => new Set());
+  nodeIdsInUseRef.current = () =>
+    new Set([...nodes.map((node) => node.id), ...pinnedNodeIds, ...(executionResult?.nodeResults ?? []).map((result) => result.nodeId)]);
   const currentWorkflowExists = workflowList.some((item) => item.id === currentWorkflow.id);
   const canManageWorkflows = authUser?.role === "admin" || authUser?.role === "builder";
   const canManageSecrets = authUser?.role === "admin" || authUser?.role === "builder";
@@ -1674,8 +1679,9 @@ function StudioApp() {
         event.preventDefault();
         pushHistorySnapshot();
         const idMap = new Map<string, string>();
+        const takenIds = nodeIdsInUseRef.current();
         const duplicates: Node<EditorNodeData>[] = selected.map((node) => {
-          const newId = createNodeId(node.data.nodeType);
+          const newId = createNodeId(node.data.nodeType, node.data.label, takenIds);
           idMap.set(node.id, newId);
           return {
             ...node,
@@ -2139,8 +2145,9 @@ function StudioApp() {
         pasteCountRef.current += 1;
 
         const idMap = new Map<string, string>();
+        const takenIds = nodeIdsInUseRef.current();
         const newNodes: Node<EditorNodeData>[] = payload.nodes.map((entry) => {
-          const newId = createNodeId(entry.nodeType);
+          const newId = createNodeId(entry.nodeType, entry.label, takenIds);
           idMap.set(entry.sourceId, newId);
           return {
             id: newId,
@@ -3906,8 +3913,9 @@ function StudioApp() {
 
     setError(null);
     const draft = createBlankWorkflow();
-    const userPromptNodeId = createNodeId("user_prompt");
-    const outputNodeId = createNodeId("output");
+    const blankIds = new Set<string>();
+    const userPromptNodeId = createNodeId("user_prompt", "User Prompt", blankIds);
+    const outputNodeId = createNodeId("output", "Output", blankIds);
     const workflow: Workflow = {
       ...draft,
       name: `Workflow ${workflowList.length + 1}`,
@@ -4384,7 +4392,7 @@ function StudioApp() {
         case "duplicate": {
           pushHistorySnapshot();
           const src = soloSelectedNode;
-          const newId = createNodeId(src.data.nodeType);
+          const newId = createNodeId(src.data.nodeType, src.data.label, nodeIdsInUseRef.current());
           const duplicate: Node<EditorNodeData> = {
             ...src,
             id: newId,
@@ -4526,7 +4534,7 @@ function StudioApp() {
       attachContext?: NodeDrawerContext | null,
       insertSource?: PaletteInsertSource | null
     ) => {
-      const id = createNodeId(definition.type as EditorNodeData["nodeType"]);
+      const id = createNodeId(definition.type as EditorNodeData["nodeType"], definition.label, nodeIdsInUseRef.current());
       const bounds = flowWrapperRef.current?.getBoundingClientRect();
       const fallbackPosition = findFreePosition(
         reactFlowInstance
@@ -5120,6 +5128,17 @@ function StudioApp() {
                   setCurrentWorkflow((current) => {
                     const { noWriteTools, ...rest } = current.settings ?? {};
                     const settings = noWriteTools ? rest : { ...rest, noWriteTools: true };
+                    return { ...current, settings };
+                  })
+              : undefined
+          }
+          strictTemplates={currentWorkflow.settings?.strictTemplates === true}
+          onToggleStrictTemplates={
+            canManageWorkflows
+              ? () =>
+                  setCurrentWorkflow((current) => {
+                    const { strictTemplates, ...rest } = current.settings ?? {};
+                    const settings = strictTemplates ? rest : { ...rest, strictTemplates: true };
                     return { ...current, settings };
                   })
               : undefined
@@ -6205,6 +6224,7 @@ function StudioApp() {
             id: currentWorkflow.id,
             name: currentWorkflow.name,
             vars: currentWorkflow.variables,
+            strictTemplates: currentWorkflow.settings?.strictTemplates === true,
             projectId: currentWorkflow.projectId ?? activeProjectId
           }}
           pinnedData={currentWorkflow.pinnedData}

@@ -1,6 +1,6 @@
 ---
 title: "Templates and expressions: reading data between steps"
-description: "What a {{ }} template in an L2M node can read: direct parents, any earlier step with results or $node(), run input, variables, loops and empty values."
+description: "What a {{ }} template in an L2M node can read: direct parents, any earlier step with results or $node(), run input, variables, loops, empty values, autocomplete and strict templates."
 ---
 
 # Templates and expressions
@@ -32,7 +32,9 @@ A node's template sees the steps connected straight into it, the run's input, an
 | `{{vars.name}}`, `{{ $vars.name }}` | Workflow variables, in every node. | `{{vars.API_URL}}` |
 | `{{workflow.id}}`, `{{workflow.name}}`, `{{execution.id}}`, `{{execution.customData.key}}` | The workflow and this run. `$workflow` and `$execution` work in expressions. | `{{execution.id}}` |
 
-The node id is the id in the workflow JSON, not the label on the canvas; nodes added in the editor get ids such as `http_request-k3j9x2`. A path body takes such an id as it is: `{{results.http_request-k3j9x2.body}}`. In an expression, a `-` is a minus sign, so write `results['http_request-k3j9x2'].body` or `$node('http_request-k3j9x2').output.body`. A direct parent's field with the same name as a run input (a parent that outputs `user_prompt`, say) is the one `{{user_prompt}}` reads.
+The node id is the id in the workflow JSON, not the label on the canvas. A node added in the editor gets an id made from its label when it is added: "Fetch items" becomes `fetch_items`, and a one-word label is numbered (`set_1`, `output_1`) so the id never reads like a field name. A second node with the same label gets the next number (`http_request_2`). Renaming a node changes its label only: the id stays, so templates, pinned data and past runs keep pointing at it. The template autocomplete shows each step's label next to its id.
+
+Nodes added before this change, and workflows from elsewhere, keep ids such as `http_request-k3j9x2`. A path body takes such an id as it is: `{{results.http_request-k3j9x2.body}}`. In an expression, a `-` is a minus sign, so write `results['http_request-k3j9x2'].body` or `$node('http_request-k3j9x2').output.body`. A direct parent's field with the same name as a run input (a parent that outputs `user_prompt`, say) is the one `{{user_prompt}}` reads.
 
 ### Direct parents and earlier steps
 
@@ -60,9 +62,24 @@ After the loop, a loop body node's result is its **last pass**: `{{results.<body
 {{ results.loop.items.map(pass => pass.outputs.summarize.text).join('\n') }}
 ```
 
+## Writing templates in the editor
+
+- **Autocomplete.** Type `{{` in a template field for a list of what the node can read, filled from the last run (or pinned data): the fields of the steps connected straight in, the run input (`webhook.…`, `user_prompt`), variables (`vars.…`), and every step under `results.<nodeId>`, with its label and its value in that run. Keep typing to filter; the arrow keys move, Enter or Tab inserts the path and closes the `}}`, Escape closes the list. Type `$json.` inside `{{ }}` for the same fields as an expression. Without a run, the list still offers each step's `results.<nodeId>` and the variables.
+- **Drag a field.** In the inspector's side-by-side view, drag a field name from the **Input** pane into a text field: it inserts `{{field}}` where you drop it. With one step connected straight in, a field drags as `{{field}}`; with several, as `{{results.<nodeId>.field}}`, so it names the step. A column of a list drags its first item's field (`{{items.0.title}}`).
+- **Preview.** Each template field shows what it renders with the last run's data. When the node ran and a `{{ }}` has no value in that run, a note under the field names it.
+
 ## When a value is missing
 
-A template never fails a node for a missing value: a path that does not resolve renders as an empty string, with no warning. So does an expression that throws or runs out of time, such as `{{ $node('fetch').output.body.title }}` before `fetch` has run. Only a failure of the sandbox itself fails the node ([code execution](/security/code-execution)).
+By default, a template never fails a node for a missing value: a path that does not resolve renders as an empty string. So does an expression that throws or runs out of time, such as `{{ $node('fetch').output.body.title }}` before `fetch` has run. Only a failure of the sandbox itself fails the node ([code execution](/security/code-execution)). The editor's preview names each such `{{ }}` (see above).
+
+### Strict templates
+
+Turn on **Strict templates** in the workflow's **More actions** menu to make a missing value fail the node instead (`settings.strictTemplates: true` in the workflow JSON; off by default). With it on, a node fails when a `{{ }}` in a setting it renders:
+
+- is a path with no value, such as `{{customer.id}}` when the input has no `customer`;
+- is an expression that returns nothing (`undefined`) or fails, such as `{{ $json.customer.name.first }}`.
+
+The error names the template, for example `Template {{customer.id}} has no value, and this workflow uses strict templates`, and the node's result carries `errorCode: "template_value_missing"` (a webhook caller gets it as `code`). The failure is not retried, and the node's **On Error** setting applies as for any other failure, so an Error output can catch it. A field that holds `null` still renders empty, and so do the run's optional prompt fields `{{system_prompt}}`, `{{user_prompt}}` and `{{session_id}}`, which nodes read by default and fall back from when the run has none. IF conditions follow the setting too.
 
 A path only walks objects and arrays: on a text, `{{answer.length}}` renders empty. Write it as an expression instead, such as `{{ answer.trim().length }}`.
 

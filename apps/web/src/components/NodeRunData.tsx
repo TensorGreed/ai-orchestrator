@@ -11,6 +11,7 @@ import {
   usedPinnedData,
   type AttachmentUse
 } from "../lib/run-data";
+import { joinTemplatePath, templateForPath } from "../lib/template-suggest";
 
 /** Characters of JSON shown before "Show all". */
 export const RUN_DATA_JSON_LIMIT = 20_000;
@@ -174,7 +175,30 @@ function defaultMode(value: unknown): DataViewMode {
   return value !== null && typeof value === "object" ? "table" : "json";
 }
 
-function DataTable({ value }: { value: unknown }) {
+/**
+ * Makes a field name draggable into a template field: the drop inserts `{{path}}` (as text, so any text field takes
+ * it at the drop point). Without a path (no drag here, or a key a path cannot read) it adds nothing.
+ */
+function fieldDragProps(path: string | undefined): React.HTMLAttributes<HTMLElement> & { "data-template-path"?: string } {
+  if (!path) return {};
+  const template = templateForPath(path);
+  return {
+    draggable: true,
+    title: `Drag into a field to insert ${template}`,
+    "data-template-path": path,
+    onDragStart: (event) => {
+      event.dataTransfer.setData("text/plain", template);
+      event.dataTransfer.effectAllowed = "copy";
+    }
+  };
+}
+
+function childPath(base: string | undefined, key: string | number): string | undefined {
+  return base === undefined ? undefined : joinTemplatePath(base, key);
+}
+
+/** `fieldPath`: the template path of `value`, which makes its field names draggable ("" for top-level fields). */
+function DataTable({ value, fieldPath }: { value: unknown; fieldPath?: string }) {
   const pane = useContext(RunDataPaneContext);
   const [localShowInternal, setLocalShowInternal] = useState(false);
   const showInternal = pane ? pane.showInternal : localShowInternal;
@@ -208,8 +232,8 @@ function DataTable({ value }: { value: unknown }) {
       return (
         <>
           <div className="run-data-subtitle">items ({itemsSplit.items.length})</div>
-          <DataTable value={itemsSplit.items} />
-          {Object.keys(itemsSplit.rest).length > 0 ? <DataTable value={itemsSplit.rest} /> : null}
+          <DataTable value={itemsSplit.items} fieldPath={childPath(fieldPath, "items")} />
+          {Object.keys(itemsSplit.rest).length > 0 ? <DataTable value={itemsSplit.rest} fieldPath={fieldPath} /> : null}
         </>
       );
     }
@@ -244,7 +268,7 @@ function DataTable({ value }: { value: unknown }) {
           <tbody>
             {visible.map(([key, child]) => (
               <tr key={key}>
-                <th scope="row" className="run-data-key">
+                <th scope="row" className="run-data-key" {...fieldDragProps(childPath(fieldPath, key))}>
                   {key}
                 </th>
                 <Cell value={child} className="run-data-value" />
@@ -272,7 +296,16 @@ function DataTable({ value }: { value: unknown }) {
         <thead>
           <tr>
             <th scope="col">#</th>
-            {recordRows ? shownColumns.map((column) => <th key={column} scope="col">{column}</th>) : <th scope="col">Value</th>}
+            {recordRows ? (
+              shownColumns.map((column) => (
+                // A column drags the first item's field (`items.0.title`).
+                <th key={column} scope="col" {...fieldDragProps(childPath(childPath(fieldPath, 0), column))}>
+                  {column}
+                </th>
+              ))
+            ) : (
+              <th scope="col">Value</th>
+            )}
           </tr>
         </thead>
         <tbody>
@@ -327,7 +360,7 @@ function JsonBlock({ value }: { value: unknown }) {
 }
 
 /** One value of a run, as a table, JSON or inferred schema. */
-export function RunDataView({ value, label }: { value: unknown; label: string }) {
+export function RunDataView({ value, label, fieldPath }: { value: unknown; label: string; fieldPath?: string }) {
   const pane = useContext(RunDataPaneContext);
   const [localMode, setMode] = useState<DataViewMode>(() => defaultMode(value));
   const mode = pane ? pane.mode : localMode;
@@ -358,7 +391,7 @@ export function RunDataView({ value, label }: { value: unknown; label: string })
         </div>
       ) : null}
       {active === "table" ? (
-        <DataTable value={value} />
+        <DataTable value={value} fieldPath={fieldPath} />
       ) : active === "schema" ? (
         <JsonBlock value={inferSchema(value)} />
       ) : typeof value === "string" ? (
@@ -429,12 +462,23 @@ interface NodeRunInputProps {
   nodeExists?: (nodeId: string) => boolean;
   /** Shown above the received data (for example the values the node resolved this run). */
   before?: ReactNode;
+  /** Field names drag into template fields as `{{path}}` (the inspector's Input pane). */
+  draggableFields?: boolean;
 }
 
 /** What the node received in the run: each upstream node's output, other fields in scope, and the run context. */
 const ALWAYS = () => true;
 
-export function NodeRunInput({ result, labelFor, isTrigger, hasOwnTestData = false, onOpenNode, nodeExists = ALWAYS, before }: NodeRunInputProps) {
+export function NodeRunInput({
+  result,
+  labelFor,
+  isTrigger,
+  hasOwnTestData = false,
+  onOpenNode,
+  nodeExists = ALWAYS,
+  before,
+  draggableFields = false
+}: NodeRunInputProps) {
   const input = result?.input;
   const promptIsInput = runPromptInput(input, hasOwnTestData) !== undefined;
   const split = useMemo(() => splitNodeInput(input, labelFor, { promptIsInput }), [input, labelFor, promptIsInput]);
@@ -477,21 +521,26 @@ export function NodeRunInput({ result, labelFor, isTrigger, hasOwnTestData = fal
                 entry.label
               )}
             </h4>
-            <RunDataView value={entry.value} label={`From ${entry.label}`} />
+            <RunDataView
+              value={entry.value}
+              label={`From ${entry.label}`}
+              // One upstream step: its fields read as `{{field}}`; with several, `{{results.<id>.field}}` says whose.
+              fieldPath={draggableFields ? (split.receivedFrom.length === 1 ? "" : joinTemplatePath("results", entry.nodeId)) : undefined}
+            />
           </section>
         ))
       )}
       {otherKeys.length > 0 ? (
         <section className="run-data-block" aria-label="Other fields">
           <h4 className="run-data-block-title">Run input</h4>
-          <RunDataView value={split.otherFields} label="Other fields" />
+          <RunDataView value={split.otherFields} label="Other fields" fieldPath={draggableFields ? "" : undefined} />
         </section>
       ) : null}
       {Object.keys(split.runContext).length > 0 ? (
         <details className="run-data-context" open={isTrigger && otherKeys.length === 0 ? true : undefined}>
           <summary>Run context (prompt fields, variables, trigger)</summary>
           <p className="run-data-hint">The same for every node of this run. Available in templates, for example {"{{vars.KEY}}"}.</p>
-          <RunDataView value={split.runContext} label="Run context" />
+          <RunDataView value={split.runContext} label="Run context" fieldPath={draggableFields ? "" : undefined} />
         </details>
       ) : null}
     </div>

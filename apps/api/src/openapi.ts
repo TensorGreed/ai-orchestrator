@@ -3095,7 +3095,7 @@ export const openApiSpec = {
           required: true,
           content: { "application/json": { schema: { type: "object", required: ["expression"], properties: { expression: { type: "string" }, mode: { type: "string", enum: ["expression", "template", "condition"] }, context: { type: "object" } } } } }
         },
-        responses: { "200": { description: "Expression result" } }
+        responses: { "200": { description: "Expression result. Template and condition previews also list each {{ }} that rendered nothing (`missing`: body and reason)." } }
       }
     },
 

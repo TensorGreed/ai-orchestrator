@@ -240,6 +240,12 @@ export interface WorkflowSettings {
    * shown to everyone who can read it, so fields named like credentials are refused. At most 64 KB of JSON.
    */
   testWebhookPayload?: Record<string, unknown>;
+  /**
+   * When true, a `{{ }}` without a value fails its node (`template_value_missing`) instead of rendering empty: a path
+   * with no value, or an expression that returns nothing or fails. A field that holds null still renders empty, and so
+   * do the run's optional prompt fields (`system_prompt`, `user_prompt`, `session_id`). Unset (the default): off.
+   */
+  strictTemplates?: boolean;
 }
 
 export interface WriteToolApprovalSettings {
@@ -355,8 +361,11 @@ export type WorkflowExecutionStatus = "success" | "error" | "partial" | "waiting
 /** A run whose called workflow's live version is unfinished (a paused trigger): a stable code for API callers. */
 export const WORKFLOW_UNFINISHED_CODE = "workflow_unfinished";
 
+/** A node failed because a `{{ }}` had no value while the workflow's strict templates setting is on. */
+export const TEMPLATE_VALUE_MISSING_ERROR_CODE = "template_value_missing";
+
 /** Error codes a run passes on to API callers (`errorCode`, a webhook's `code`). Other codes stay internal. */
-export const PUBLIC_RUN_ERROR_CODES: ReadonlySet<string> = new Set([WORKFLOW_UNFINISHED_CODE]);
+export const PUBLIC_RUN_ERROR_CODES: ReadonlySet<string> = new Set([WORKFLOW_UNFINISHED_CODE, TEMPLATE_VALUE_MISSING_ERROR_CODE]);
 
 export interface NodeExecutionResult {
   nodeId: string;
