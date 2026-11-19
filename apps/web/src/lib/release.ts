@@ -245,3 +245,18 @@ export function gateSettingsFromForm(form: GateForm, previous: ReleaseGateView):
   };
   return { settings, errors };
 }
+
+/**
+ * The export file of the editor's workflow: its `workflowVersion` (the file's and the workflow's) is the newest saved
+ * version, the number the version history and the Publish dialog give it, when the server told us one. The workflow's
+ * own field only counts its creation, so an export of a workflow saved and published as version 2 said 1 before.
+ */
+export function workflowExportPayload<W extends { workflowVersion: number }>(
+  workflow: W,
+  schemaVersion: string,
+  savedVersion: number | null | undefined,
+  exportedAt: string = new Date().toISOString()
+): { schemaVersion: string; workflowVersion: number; workflow: W; exportedAt: string } {
+  const workflowVersion = typeof savedVersion === "number" && savedVersion > 0 ? savedVersion : workflow.workflowVersion;
+  return { schemaVersion, workflowVersion, workflow: { ...workflow, workflowVersion }, exportedAt };
+}

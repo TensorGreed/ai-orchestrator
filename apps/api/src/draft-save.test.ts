@@ -558,3 +558,29 @@ describe("a workflow stored with an invalid errorConfig", () => {
     expect((await context.app.inject({ method: "PUT", url: "/api/workflows/wf-hook-draft", headers: { cookie }, payload: fixed })).statusCode).toBe(200);
   });
 });
+
+describe("export", () => {
+  it("numbers the file with the newest saved version, as the version history and the Publish dialog do", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context);
+    const workflow = {
+      id: "wf-export-version",
+      name: "Export version",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [{ id: "out", type: "output", name: "Out", position: { x: 0, y: 0 }, config: {} }],
+      edges: []
+    };
+    const created = await context.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie }, payload: workflow });
+    expect(created.statusCode, created.body).toBeLessThan(300);
+    const updated = await context.app.inject({ method: "PUT", url: "/api/workflows/wf-export-version", headers: { cookie }, payload: { ...workflow, name: "Export version 2" } });
+    expect(updated.statusCode, updated.body).toBe(200);
+    const versions = (await context.app.inject({ method: "GET", url: "/api/workflows/wf-export-version/versions", headers: { cookie } })).json<{ versions: Array<{ version: number }> }>().versions;
+    const newest = Math.max(...versions.map((entry) => entry.version));
+    expect(newest).toBeGreaterThan(1);
+    const exported = await context.app.inject({ method: "GET", url: "/api/workflows/wf-export-version/export", headers: { cookie } });
+    const file = JSON.parse(exported.json<{ json: string }>().json) as { workflowVersion: number; workflow: { workflowVersion: number } };
+    expect(file.workflowVersion).toBe(newest);
+    expect(file.workflow.workflowVersion).toBe(newest);
+  });
+});

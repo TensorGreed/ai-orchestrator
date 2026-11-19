@@ -11875,7 +11875,10 @@ export async function createApp(
 
     const access = await runAccess.workflow(user, request.params.id, "workflow:read");
     if (!access.ok) return denyRunAccess(reply, access);
-    const workflow = access.workflow;
+    // Numbered as the version history numbers the saved workflow (what the Publish dialog shows), not by the
+    // workflow's own field, which only counts its creation.
+    const savedVersion = await store.maxWorkflowVersionNumber(access.workflow.id);
+    const workflow = savedVersion > 0 ? { ...access.workflow, workflowVersion: savedVersion } : access.workflow;
 
     return {
       json: exportWorkflowToJson(workflow)
