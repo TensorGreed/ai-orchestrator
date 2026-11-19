@@ -299,6 +299,23 @@ describe("checkBuilderDraft", () => {
     expect(byId.get("keep_open")!.config).toMatchObject({ mode: "gate" });
   });
 
+  it("refuses node ids that templates already read (readable ids)", () => {
+    const check = checkBuilderDraft(
+      {
+        name: "Reserved",
+        nodes: [
+          { id: "webhook", type: "webhook_input", label: "Incoming", config: { path: "x" } },
+          { id: "results", type: "set_node", label: "Results", config: {} }
+        ],
+        edges: [{ source: "webhook", target: "results" }]
+      },
+      { workflowId: "wf" }
+    );
+    const messages = check.issues.map((issue) => issue.message).join("\n");
+    expect(messages).toMatch(/'webhook' is a name templates already read/);
+    expect(messages).toMatch(/'results' is a name templates already read/);
+  });
+
   it("refuses a submission too large to be a workflow", () => {
     const huge = { ...webhookToHttp, nodes: [{ ...webhookToHttp.nodes[0]!, config: { path: "x".repeat(250_000) } }, webhookToHttp.nodes[1]!] };
     expect(checkBuilderDraft(huge, { workflowId: "wf" }).issues[0]!.message).toMatch(/too large/);

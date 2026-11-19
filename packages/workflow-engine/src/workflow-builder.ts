@@ -19,6 +19,7 @@ import {
   WORKFLOW_BUILDER_MAX_EDGES,
   WORKFLOW_BUILDER_MAX_NODES,
   WORKFLOW_SCHEMA_VERSION,
+  isReservedNodeId,
   legacyBehaviours,
   nodeDefinitions,
   upgradeToNewBehaviour,
@@ -359,6 +360,10 @@ export function checkBuilderDraft(raw: unknown, options: BuilderDraftOptions): B
     const type = typeof entry.type === "string" ? entry.type.trim() : "";
     if (!NODE_ID_PATTERN.test(id)) {
       issues.push({ message: `nodes[${index}].id '${id}' must start with a letter and use only letters, digits, _ and - (at most 64)` });
+      return;
+    }
+    if (isReservedNodeId(id)) {
+      issues.push({ message: `nodes[${index}].id '${id}' is a name templates already read; use a readable id such as fetch_orders`, nodeId: id });
       return;
     }
     if (ids.has(id)) {
