@@ -1527,6 +1527,18 @@ function StudioApp() {
   /** Set once the first project lists are in, so the deep link knows whether the workflow is already one of them. */
   const [listsLoadedOnce, setListsLoadedOnce] = useState(false);
   const activeProjectIdRef = useRef<string | null>(null);
+  /** The project the workflow lists were last loaded for (so a project switch waits for that project's lists). */
+  const [listsProjectId, setListsProjectId] = useState<string | null>(null);
+  /**
+   * Set when the person switches project in the picker. Until something else is opened, the editor then opens one of
+   * that project's workflows, also in place of a workflow opened from a link or from "Shared with you": an explicit
+   * choice of project wins. `seq` is the workflow-load sequence at the switch; any later open clears it.
+   */
+  const explicitProjectSwitchRef = useRef<{ projectId: string; seq: number } | null>(null);
+  const switchProjectExplicitly = useCallback((id: string) => {
+    explicitProjectSwitchRef.current = { projectId: id, seq: workflowLoadSeqRef.current };
+    setActiveProjectId(id);
+  }, []);
   const currentWorkflowExists =
     workflowList.some((item) => item.id === currentWorkflow.id) ||
     sharedWithMe.some((item) => item.id === currentWorkflow.id) ||
@@ -2425,6 +2437,7 @@ function StudioApp() {
       const noProject = Boolean(projectPayload) && (projectPayload?.projects ?? []).length === 0;
       // Someone in no project has no project's workflows: what they can read is what is shared with them.
       setWorkflowList(noProject ? [] : workflowItems);
+      setListsProjectId(activeProjectId);
       setSharedWithProject(noProject ? [] : projectSharedPayload.workflows);
       // A workflow listed as shared with this project is not listed again as shared with you.
       const projectSharedIds = new Set(projectSharedPayload.workflows.map((item) => item.id));
@@ -3161,6 +3174,7 @@ function StudioApp() {
 
         const workflows = await fetchWorkflows({ projectId: targetProjectId });
         setWorkflowList(workflows);
+        setListsProjectId(targetProjectId);
         rememberTabWorkflowId(workflow.id);
         setError(null);
         setActiveMode("editor");
@@ -3214,12 +3228,33 @@ function StudioApp() {
       return;
     }
 
+    // After an explicit project switch, the project's own workflow opens unless something was opened since.
+    let afterProjectSwitch = false;
+    const projectSwitch = explicitProjectSwitchRef.current;
+    if (projectSwitch) {
+      if (projectSwitch.seq !== workflowLoadSeqRef.current || projectSwitch.projectId !== activeProjectId) {
+        explicitProjectSwitchRef.current = null;
+      } else if (listsProjectId !== activeProjectId) {
+        // The lists are still the previous project's: wait for this project's.
+        return;
+      } else {
+        afterProjectSwitch = true;
+      }
+    }
+
     if (workflowList.length === 0) {
+      if (afterProjectSwitch) explicitProjectSwitchRef.current = null;
       return;
     }
 
-    // A workflow shared with you (or with this project), or opened from a link, stays open.
-    if (currentWorkflowExists) {
+    if (afterProjectSwitch) {
+      // Only one of the project's own workflows stays open; one shared with you or opened from a link gives way.
+      if (workflowList.some((item) => item.id === currentWorkflow.id)) {
+        explicitProjectSwitchRef.current = null;
+        return;
+      }
+    } else if (currentWorkflowExists) {
+      // A workflow shared with you (or with this project), or opened from a link, stays open.
       return;
     }
 
@@ -3244,6 +3279,7 @@ function StudioApp() {
       const wipMatchesProject = !wipWorkflow?.projectId || wipWorkflow.projectId === activeProjectId;
       // An empty tab copy goes through loadWorkflowById below, which checks it against the server.
       if (wipWorkflow && wipWorkflow.nodes.length > 0 && wipMatchesProject && workflowList.some((item) => item.id === wipWorkflow.id)) {
+        explicitProjectSwitchRef.current = null;
         hydrateWorkflow(wipWorkflow);
         return;
       }
@@ -3257,8 +3293,9 @@ function StudioApp() {
         : rememberedId && workflowList.some((item) => item.id === rememberedId)
           ? rememberedId
           : workflowList[0]!.id;
+    explicitProjectSwitchRef.current = null;
     void loadWorkflowById(chosenWorkflowId);
-  }, [activeMode, activeProjectId, authUser, currentWorkflow.id, currentWorkflowExists, deepLinkResolved, hydrateWorkflow, loadWorkflowById, loading, readWipWorkflow, workflowList]);
+  }, [activeMode, activeProjectId, authUser, currentWorkflow.id, currentWorkflowExists, deepLinkResolved, hydrateWorkflow, listsProjectId, loadWorkflowById, loading, readWipWorkflow, workflowList]);
 
   /**
    * A deep link (`?workflowId=`) to a workflow outside the active project's list opens it when you can read it in any
@@ -3295,6 +3332,8 @@ function StudioApp() {
           handleApiError(linkError, "Failed to open the linked workflow");
         }
       } finally {
+        // Overtaken by a project switch with nothing opened since: the link no longer holds the editor's choice.
+        if (pendingWorkflowLoadIdRef.current === linkedId && workflowLoadSeqRef.current === seq) pendingWorkflowLoadIdRef.current = null;
         setDeepLinkResolved(true);
       }
     })();
@@ -5287,7 +5326,7 @@ function StudioApp() {
         onModeChange={setActiveMode}
         projects={projects}
         activeProjectId={activeProjectId}
-        onChangeActiveProject={(id) => setActiveProjectId(id)}
+        onChangeActiveProject={switchProjectExplicitly}
         // Only people who may create projects (builders and admins) are offered "New project".
         onCreateProject={
           canManageWorkflows
@@ -5342,7 +5381,7 @@ function StudioApp() {
           onOpenShortcuts={() => setShowShortcutsPanel(true)}
           projects={projects}
           activeProjectId={activeProjectId}
-          onChangeActiveProject={(id) => setActiveProjectId(id)}
+          onChangeActiveProject={switchProjectExplicitly}
           onCreateProject={
             canManageWorkflows
               ? () => {

@@ -288,3 +288,138 @@ test.describe("opening shared workflows (strict isolation)", () => {
     }
   });
 });
+
+test.describe("switching project after opening a shared workflow (strict isolation)", () => {
+  test.setTimeout(240_000);
+
+  test("an explicit project switch opens that project's workflow, also while a link's access check is pending", async ({ page, browser }) => {
+    const ollama = await guardLocalModels(page);
+    await signIn(page);
+    const stamp = Date.now();
+    const [team, homeA, homeB] = [`e2e-switch-team-${stamp}`, `e2e-switch-a-${stamp}`, `e2e-switch-b-${stamp}`];
+    const [shared, ownA, ownB] = [`wf-e2e-switch-shared-${stamp}`, `wf-e2e-switch-a-${stamp}`, `wf-e2e-switch-b-${stamp}`];
+    const userIds: string[] = [];
+    try {
+      for (const [id, name] of [[team, "E2E Switch team"], [homeA, "E2E Switch A"], [homeB, "E2E Switch B"]] as const) {
+        expect((await page.request.post("/api/projects", { data: { id, name } })).ok()).toBeTruthy();
+      }
+      for (const [id, project, name] of [[shared, team, "E2E Switch shared"], [ownA, homeA, "E2E Switch own A"], [ownB, homeB, "E2E Switch own B"]] as const) {
+        const created = await page.request.post("/api/workflows", { data: flow(id, project, name) });
+        expect(created.ok(), await created.text()).toBeTruthy();
+      }
+      const operator = await makeUser(page, `e2e-switch-${stamp}@example.com`, "operator");
+      userIds.push(operator.id);
+      for (const project of [homeA, homeB]) {
+        expect((await page.request.post(`/api/projects/${project}/members`, { data: { email: operator.email, role: "viewer" } })).ok()).toBeTruthy();
+      }
+      expect((await page.request.post(`/api/workflows/${shared}/user-shares`, { data: { email: operator.email, accessLevel: "execute" } })).ok()).toBeTruthy();
+
+      const as = await pageAs(browser, operator.email, operator.password);
+      try {
+        const access = (await (await as.page.request.get(`/api/workflows/${shared}/access`)).json()) as { ownRunsOnly?: boolean };
+        test.skip(access.ownRunsOnly !== true, "Needs a server with PROJECT_ISOLATION=strict");
+        const name = as.page.getByLabel("Workflow name");
+        const projectPicker = as.page.getByLabel("Project", { exact: true });
+
+        // 1. Opened from a link: it stays open until the person switches project; then that project's workflow opens.
+        await as.page.goto(`/?projectId=${encodeURIComponent(homeA)}&workflowId=${encodeURIComponent(shared)}&mode=editor`);
+        await expect(name).toHaveValue("E2E Switch shared", { timeout: 60_000 });
+        await as.page.waitForTimeout(1_500);
+        await expect(name).toHaveValue("E2E Switch shared");
+        await projectPicker.selectOption(homeB);
+        await expect(name).toHaveValue("E2E Switch own B", { timeout: 30_000 });
+        await as.page.waitForTimeout(1_500);
+        await expect(name).toHaveValue("E2E Switch own B");
+
+        // 2. Opened from "Shared with you": the same.
+        await as.page.goto(`/?projectId=${encodeURIComponent(homeB)}&mode=dashboard`);
+        const sharedWithYou = as.page.getByRole("region", { name: "Shared with you" });
+        await expect(sharedWithYou).toBeVisible({ timeout: 60_000 });
+        await sharedWithYou.getByRole("button", { name: /E2E Switch shared/ }).click();
+        await expect(name).toHaveValue("E2E Switch shared", { timeout: 60_000 });
+        await projectPicker.selectOption(homeA);
+        await expect(name).toHaveValue("E2E Switch own A", { timeout: 30_000 });
+
+        // 3. A switch while the link's access check is still pending wins over the link.
+        let releaseAccess: () => void = () => undefined;
+        const accessHeld = new Promise<void>((resolve) => (releaseAccess = resolve));
+        let accessSeen = false;
+        await as.page.route(`**/api/workflows/${shared}/access`, async (route) => {
+          accessSeen = true;
+          await accessHeld;
+          await route.continue();
+        });
+        await as.page.goto(`/?projectId=${encodeURIComponent(homeA)}&workflowId=${encodeURIComponent(shared)}&mode=editor`);
+        await expect.poll(() => accessSeen, { timeout: 60_000 }).toBe(true);
+        await projectPicker.selectOption(homeB);
+        releaseAccess();
+        await expect(name).toHaveValue("E2E Switch own B", { timeout: 30_000 });
+        await as.page.waitForTimeout(2_000);
+        await expect(name).toHaveValue("E2E Switch own B");
+        await expect(as.page.getByText("Workflow not found")).toHaveCount(0);
+        await as.page.unroute(`**/api/workflows/${shared}/access`);
+        expect(as.ollama).toEqual([]);
+      } finally {
+        await as.context.close();
+      }
+      expect(ollama).toEqual([]);
+    } finally {
+      for (const id of [shared, ownA, ownB]) await page.request.delete(`/api/workflows/${id}`);
+      for (const id of [team, homeA, homeB]) await page.request.delete(`/api/projects/${id}`);
+      for (const userId of userIds) await page.request.delete(`/api/users/${userId}`);
+    }
+  });
+
+  test("a click on a workflow while a link's access check is pending wins over the link", async ({ page, browser }) => {
+    const ollama = await guardLocalModels(page);
+    await signIn(page);
+    const stamp = Date.now();
+    const [team, home] = [`e2e-race-team-${stamp}`, `e2e-race-home-${stamp}`];
+    const [shared, own, other] = [`wf-e2e-race-shared-${stamp}`, `wf-e2e-race-own-${stamp}`, `wf-e2e-race-other-${stamp}`];
+    const userIds: string[] = [];
+    try {
+      for (const [id, name] of [[team, "E2E Race team"], [home, "E2E Race home"]] as const) {
+        expect((await page.request.post("/api/projects", { data: { id, name } })).ok()).toBeTruthy();
+      }
+      for (const [id, project, name] of [[shared, team, "E2E Race shared"], [own, home, "E2E Race own"], [other, home, "E2E Race other"]] as const) {
+        expect((await page.request.post("/api/workflows", { data: flow(id, project, name) })).ok()).toBeTruthy();
+      }
+      const operator = await makeUser(page, `e2e-race-${stamp}@example.com`, "operator");
+      userIds.push(operator.id);
+      expect((await page.request.post(`/api/projects/${home}/members`, { data: { email: operator.email, role: "viewer" } })).ok()).toBeTruthy();
+      expect((await page.request.post(`/api/workflows/${shared}/user-shares`, { data: { email: operator.email, accessLevel: "execute" } })).ok()).toBeTruthy();
+
+      const as = await pageAs(browser, operator.email, operator.password);
+      try {
+        const access = (await (await as.page.request.get(`/api/workflows/${shared}/access`)).json()) as { ownRunsOnly?: boolean };
+        test.skip(access.ownRunsOnly !== true, "Needs a server with PROJECT_ISOLATION=strict");
+        let releaseAccess: () => void = () => undefined;
+        const accessHeld = new Promise<void>((resolve) => (releaseAccess = resolve));
+        let accessSeen = false;
+        await as.page.route(`**/api/workflows/${shared}/access`, async (route) => {
+          accessSeen = true;
+          await accessHeld;
+          await route.continue();
+        });
+        // The link is held on the dashboard, where the person opens another workflow from the grid.
+        await as.page.goto(`/?projectId=${encodeURIComponent(home)}&workflowId=${encodeURIComponent(shared)}&mode=dashboard`);
+        await expect.poll(() => accessSeen, { timeout: 60_000 }).toBe(true);
+        await as.page.getByRole("article").filter({ has: as.page.getByRole("heading", { name: "E2E Race other" }) }).getByRole("button", { name: "Open" }).click();
+        const name = as.page.getByLabel("Workflow name");
+        await expect(name).toHaveValue("E2E Race other", { timeout: 30_000 });
+        releaseAccess();
+        await as.page.waitForTimeout(2_500);
+        await expect(name).toHaveValue("E2E Race other");
+        await as.page.unroute(`**/api/workflows/${shared}/access`);
+        expect(as.ollama).toEqual([]);
+      } finally {
+        await as.context.close();
+      }
+      expect(ollama).toEqual([]);
+    } finally {
+      for (const id of [shared, own, other]) await page.request.delete(`/api/workflows/${id}`);
+      for (const id of [team, home]) await page.request.delete(`/api/projects/${id}`);
+      for (const userId of userIds) await page.request.delete(`/api/users/${userId}`);
+    }
+  });
+});

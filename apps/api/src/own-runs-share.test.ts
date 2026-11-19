@@ -389,3 +389,111 @@ describe("a person who has a workflow only through a share with them sees only t
     expect((await call(context, "GET", "/api/workflows/wf-team/access", gus.cookie)).json<{ ownRunsOnly: boolean }>().ownRunsOnly).toBe(false);
   });
 });
+
+describe("own runs only meets approvals around a Loop that routes branches", () => {
+  /** start -> gate (Approval Gate) -> loop over [1,2,3] (routes branches) -> IF x > 1 -> big / small. */
+  function gatedLoopWorkflow(id: string): Workflow {
+    return {
+      ...echoWorkflow(id),
+      nodes: [
+        { id: "start", type: "manual_trigger", name: "Start", position: { x: 0, y: 0 }, config: {} },
+        {
+          id: "gate",
+          type: "approval_gate",
+          name: "Gate",
+          position: { x: 100, y: 0 },
+          config: { message: "Go on?", approverRoles: ["operator", "builder", "admin"], allowSelfApproval: true, timeoutMinutes: 60, timeoutOutcome: "fallback" }
+        },
+        { id: "src", type: "set_node", name: "Src", position: { x: 200, y: 0 }, config: { assignments: [{ key: "xs", valueTemplate: "[1,2,3]", type: "json" }] } },
+        { id: "loop", type: "loop_node", name: "Loop", position: { x: 300, y: 0 }, config: { inputKey: "xs", itemVariable: "x", routeBranches: true } },
+        { id: "if", type: "if_node", name: "If", position: { x: 400, y: 0 }, config: { condition: "{{x}} > 1" } },
+        { id: "big", type: "set_node", name: "Big", position: { x: 500, y: 0 }, config: { assignments: [{ key: "big", valueTemplate: "{{x}}", type: "auto" }] } },
+        { id: "small", type: "set_node", name: "Small", position: { x: 500, y: 100 }, config: { assignments: [{ key: "small", valueTemplate: "{{x}}", type: "auto" }] } }
+      ],
+      edges: [
+        { id: "e1", source: "start", target: "gate" },
+        { id: "e2", source: "gate", sourceHandle: "approved", target: "src" },
+        { id: "e3", source: "src", target: "loop" },
+        { id: "e4", source: "loop", target: "if" },
+        { id: "e5", source: "if", sourceHandle: "true", target: "big" },
+        { id: "e6", source: "if", sourceHandle: "false", target: "small" }
+      ]
+    };
+  }
+
+  /** start -> src -> loop -> ask (Human Approval in the body). */
+  function approvalInLoopWorkflow(id: string): Workflow {
+    return {
+      ...echoWorkflow(id),
+      nodes: [
+        { id: "start", type: "manual_trigger", name: "Start", position: { x: 0, y: 0 }, config: {} },
+        { id: "src", type: "set_node", name: "Src", position: { x: 100, y: 0 }, config: { assignments: [{ key: "xs", valueTemplate: "[1]", type: "json" }] } },
+        { id: "loop", type: "loop_node", name: "Loop", position: { x: 200, y: 0 }, config: { inputKey: "xs", itemVariable: "x", routeBranches: true } },
+        { id: "ask", type: "human_approval", name: "Ask", position: { x: 300, y: 0 }, config: { approvalMessage: "ok?", timeoutMinutes: 30 } }
+      ],
+      edges: [
+        { id: "e1", source: "start", target: "src" },
+        { id: "e2", source: "src", target: "loop" },
+        { id: "e3", source: "loop", target: "ask" }
+      ]
+    };
+  }
+
+  const share = async (context: TestContext, owner: Person, workflowId: string, people: Person[]) => {
+    for (const person of people) {
+      const shared = await call(context, "POST", `/api/workflows/${workflowId}/user-shares`, owner.cookie, { email: person.email, accessLevel: "execute" });
+      expect(shared.statusCode, shared.body).toBeLessThan(300);
+    }
+  };
+
+  it("a paused run before the Loop is listed and decided only by its owner (and the project); the resumed Loop routes once per item", async () => {
+    const { context, owner, member, olivia, gus } = await seed({ queue: false });
+    await context.store.upsertWorkflow(gatedLoopWorkflow("wf-gated-loop"));
+    await share(context, owner, "wf-gated-loop", [olivia, gus]);
+
+    const paused = await call(context, "POST", "/api/workflows/wf-gated-loop/execute", olivia.cookie, { input: {} });
+    expect(paused.json<{ status: string }>().status, paused.body).toBe("waiting_approval");
+    const executionId = paused.json<{ executionId: string }>().executionId;
+
+    expect(await inboxIds(context, olivia)).toEqual([executionId]);
+    expect(await inboxIds(context, gus)).toEqual([]);
+    expect(await inboxIds(context, gus, "?status=all&workflowId=wf-gated-loop")).toEqual([]);
+    expect(await inboxIds(context, member)).toEqual([executionId]);
+    expect((await call(context, "GET", `/api/approvals?executionId=${executionId}`, gus.cookie)).statusCode).toBe(404);
+    for (const decision of ["approve", "reject"]) {
+      expect((await call(context, "POST", `/api/approvals/${executionId}/${decision}`, gus.cookie, {})).statusCode).toBe(404);
+    }
+    expect((await context.store.getWorkflowExecutionState(executionId))!.status).toBe("waiting_approval");
+
+    const approved = await call(context, "POST", `/api/approvals/${executionId}/approve`, olivia.cookie, {});
+    expect(approved.statusCode, approved.body).toBe(200);
+    const detail = await call(context, "GET", `/api/executions/${executionId}`, olivia.cookie);
+    expect(detail.statusCode, detail.body).toBe(200);
+    const nodeResults = detail.json<{ nodeResults: Array<{ nodeId: string; status: string }> }>().nodeResults;
+    const ran = (nodeId: string) => nodeResults.filter((entry) => entry.nodeId === nodeId && entry.status === "success").length;
+    // Routed per pass after the resume: x = 2 and 3 take "true", x = 1 takes "false"; nothing runs twice.
+    expect(ran("if")).toBe(3);
+    expect(ran("big")).toBe(2);
+    expect(ran("small")).toBe(1);
+    // The resumed run is still Olivia's alone.
+    expect((await call(context, "GET", `/api/executions/${executionId}`, gus.cookie)).statusCode).toBe(404);
+    expect((await listRuns(context, gus, "?workflowId=wf-gated-loop")).total).toBe(0);
+    expect((await listRuns(context, olivia, "?workflowId=wf-gated-loop")).ids).toEqual([executionId]);
+  });
+
+  it("a Human Approval in a Loop body fails the run and leaves nothing in anyone's inbox", async () => {
+    const { context, owner, member, olivia, gus } = await seed({ queue: false });
+    await context.store.upsertWorkflow(approvalInLoopWorkflow("wf-loop-ask"));
+    await share(context, owner, "wf-loop-ask", [olivia, gus]);
+    const response = await call(context, "POST", "/api/workflows/wf-loop-ask/execute", olivia.cookie, { input: {} });
+    const body = response.json<{ status: string; executionId: string; error?: string }>();
+    expect(body.status, response.body).toBe("error");
+    expect(response.body).toContain("Approvals cannot pause inside a Loop body");
+    for (const person of [olivia, gus, member, owner]) {
+      expect(await inboxIds(context, person, "?status=all&workflowId=wf-loop-ask")).toEqual([]);
+    }
+    // The failed run is Olivia's: Gus cannot open it.
+    expect((await call(context, "GET", `/api/executions/${body.executionId}`, gus.cookie)).statusCode).toBe(404);
+    expect((await call(context, "GET", `/api/executions/${body.executionId}`, olivia.cookie)).statusCode).toBe(200);
+  });
+});
