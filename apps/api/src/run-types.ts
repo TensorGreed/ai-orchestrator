@@ -198,6 +198,11 @@ export interface RunWorkflowExecutionInput {
    */
   responseBoundary?: ResponseBoundary;
   /**
+   * An error workflow's run: the failed run it handles (its model calls' audit names it). Set only by the API when a
+   * failed run starts its error workflow.
+   */
+  errorSourceExecutionId?: string;
+  /**
    * The user a run's budgets are matched against when it differs from `policyActor` / `triggeredBy`: a resumed run
    * keeps the user who started it (from the paused state), not the approver. Used for its sub-workflows' checks.
    */

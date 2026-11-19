@@ -1300,6 +1300,13 @@ button.tag-chip:hover {
   overflow-wrap: anywhere;
 }
 
+.execution-run-link {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
 .execution-custom-data {
   display: flex;
   flex-direction: column;

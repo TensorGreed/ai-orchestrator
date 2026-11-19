@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import { fetchMcpElicitations, inBackground, type ExecutionHistoryDetail, type ExecutionHistorySummary, type McpReplayMode } from "../lib/api";
+import { fetchMcpElicitations, inBackground, type ExecutionHistoryDetail, type ExecutionHistorySummary, type ExecutionRunLink, type McpReplayMode } from "../lib/api";
 import type { McpElicitationView, WorkflowListItem } from "@ai-orchestrator/shared";
 import { McpCassetteViewer } from "./McpCassetteViewer";
 import { McpElicitationForm } from "./McpElicitationForm";
@@ -118,6 +118,8 @@ interface ExecutionHistoryPanelProps {
    * run the draft, so their controls are shown only for workflows you may edit. Left out: every workflow.
    */
   mayEditWorkflow?: (workflowId: string) => boolean;
+  /** Shows another run (one a run's record links to): its workflow's runs, with that run open. */
+  onOpenExecution?: (executionId: string, workflowId: string) => void;
 }
 
 const everyWorkflow = () => true;
@@ -176,6 +178,26 @@ function CassetteIcon() {
   );
 }
 
+/** "Error workflow ran → run 1a2b3c4d (Handler, success)": a link to a related run. */
+function RunLinkNote({ label, link, onOpen }: { label: string; link: ExecutionRunLink; onOpen?: (executionId: string, workflowId: string) => void }) {
+  const runName = `run ${link.executionId.slice(0, 8)}`;
+  return (
+    <div className="execution-run-link" data-testid="execution-run-link">
+      <span>{label} →</span>{" "}
+      {onOpen ? (
+        <button type="button" className="pg-btn small ghost" onClick={() => onOpen(link.executionId, link.workflowId)}>
+          {runName}
+        </button>
+      ) : (
+        <code>{runName}</code>
+      )}{" "}
+      <span className="muted-cell">
+        {link.workflowName} · {link.status.replace(/_/g, " ")}
+      </span>
+    </div>
+  );
+}
+
 function StatusPill({ status, statusColors }: { status: string; statusColors: Record<string, string> }) {
   const known = TOKENISED_STATUSES.has(status);
   return (
@@ -210,7 +232,8 @@ export function ExecutionHistoryPanel({
   canDeleteCassettes = false,
   canManageGoldenRuns = false,
   onReviewApproval,
-  mayEditWorkflow = everyWorkflow
+  mayEditWorkflow = everyWorkflow,
+  onOpenExecution
 }: ExecutionHistoryPanelProps) {
   const [expandedTraceKey, setExpandedTraceKey] = useState<string | null>(null);
   const [viewer, setViewer] = useState<{ cassetteId: string; executionId: string; workflowId: string } | null>(null);
@@ -493,6 +516,12 @@ export function ExecutionHistoryPanel({
                         {!detail && <div className="page-hint">Loading full trace…</div>}
                         {detail && (
                           <div className="execution-trace">
+                            {detail.errorWorkflowRun && (
+                              <RunLinkNote label="Error workflow ran" link={detail.errorWorkflowRun} onOpen={onOpenExecution} />
+                            )}
+                            {detail.errorWorkflowSource && (
+                              <RunLinkNote label="Error workflow for" link={detail.errorWorkflowSource} onOpen={onOpenExecution} />
+                            )}
                             {hasCustomData(customData) && (
                               <div className="execution-custom-data">
                                 <span className="pg-eyebrow">Custom data</span>

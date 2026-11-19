@@ -6188,6 +6188,10 @@ function StudioApp() {
               canDeleteCassettes={authUser?.role === "admin"}
               canManageGoldenRuns={canManageWorkflows}
               mayEditWorkflow={mayEditRunWorkflow}
+              onOpenExecution={(executionId, workflowId) => {
+                setExecutionHistoryFilters({ status: "", workflowId, startedFrom: "", startedTo: "" });
+                if (!expandedExecutionIds.includes(executionId)) void toggleExecutionRow(executionId);
+              }}
               onReviewApproval={(executionId) => {
                 setApprovalFocusExecutionId(executionId);
                 setActiveMode("approvals");
