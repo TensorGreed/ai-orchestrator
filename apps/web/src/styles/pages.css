@@ -2693,6 +2693,11 @@ button.tag-chip:hover {
   font-size: var(--fs-xs);
 }
 
+/* The embedder's setting fields reuse the inspector's field labels: one line, left-aligned. */
+.kb-create-form label.cfg-field-label {
+  flex-direction: row;
+}
+
 .kb-success {
   padding: 10px 12px;
   border-radius: var(--r-md);
