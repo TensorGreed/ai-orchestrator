@@ -2960,7 +2960,13 @@ export async function createApp(
           // Phase 15.1 — a replay never fires the error workflow or its notifications.
           // An error workflow's own failure starts no other error workflow.
           triggerErrorWorkflow: input.replay || input.triggerType === ERROR_WORKFLOW_TRIGGER_TYPE ? undefined : async (payload) => {
-            // Fire-and-forget: execute the error workflow + send notifications
+            // Fire-and-forget: execute the error workflow + send notifications.
+            // At most once per failed run: the same run executed again (a lost lease, a re-run job) starts no second
+            // error workflow run and sends no second failure notification.
+            if (payload.executionId && !(await claimErrorWorkflowRun(store, payload.executionId))) {
+              app.log.info({ executionId: payload.executionId, errorWorkflowId: payload.errorWorkflowId }, "Error workflow already ran for this run");
+              return;
+            }
             notificationService.notify({
               type: "execution.failure",
               workflowId: payload.sourceWorkflowId,
@@ -2997,11 +3003,6 @@ export async function createApp(
             // Recorded like any other run (Runs, budgets, the queue), under an id the failed run's record can name.
             // It belongs to whoever owns the failed run: their own-runs view and their sessions.
             const errorExecutionId = payload.executionId ? errorWorkflowRunId(payload.executionId) : crypto.randomUUID();
-            // At most once per failed run: the same run executed again (a lost lease, a re-run job) starts no second one.
-            if (payload.executionId && !(await claimErrorWorkflowRun(store, payload.executionId))) {
-              app.log.info({ executionId: payload.executionId, errorWorkflowId: payload.errorWorkflowId }, "Error workflow already ran for this run");
-              return;
-            }
             try {
               await runDispatcher.fire(
                 {

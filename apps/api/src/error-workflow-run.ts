@@ -53,17 +53,20 @@ const ERROR_WORKFLOW_CLAIM_ENDPOINT = "l2m:error-workflow-run";
 /** How long a failed run's claim is kept: longer than any re-run of that run (a lost lease, a dead-letter retry). */
 const ERROR_WORKFLOW_CLAIM_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-type ClaimStore = Pick<Store, "saveWebhookIdempotencyPending" | "getWebhookIdempotency">;
+type ClaimStore = Pick<Store, "saveWebhookIdempotencyPending" | "getWebhookIdempotency" | "clearExpiredWebhookSecurityState">;
 
 /**
  * Claims the error workflow run of a failed run: true for the first caller, false when the failed run already started
  * its error workflow (the same run executed again, as after a lost lease). A store error other than the claim being
- * taken counts as claimed, so the error workflow still runs, as it did before claims.
+ * taken counts as claimed, so the error workflow still runs, as it did before claims. A claim stays taken when the
+ * error workflow's dispatch is then refused (a budget records that refusal as the run's attempt).
  */
 export async function claimErrorWorkflowRun(store: ClaimStore, failedExecutionId: string, now = Date.now()): Promise<boolean> {
   const key = { endpointKey: ERROR_WORKFLOW_CLAIM_ENDPOINT, idempotencyKey: failedExecutionId };
   try {
     await store.saveWebhookIdempotencyPending({ ...key, requestHash: errorWorkflowRunId(failedExecutionId), expiresAt: new Date(now + ERROR_WORKFLOW_CLAIM_TTL_MS).toISOString() });
+    // Expired claims (and webhook replay state) go now: nothing else purges them on an instance without signed webhooks.
+    void store.clearExpiredWebhookSecurityState(new Date(now).toISOString()).catch(() => undefined);
     return true;
   } catch {
     const existing = await store.getWebhookIdempotency(key).catch(() => null);

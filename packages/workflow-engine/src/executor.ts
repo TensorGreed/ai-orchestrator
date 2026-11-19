@@ -760,7 +760,8 @@ export interface ExecuteWorkflowRequest {
   inputTriggerType?: string;
   /**
    * The trigger whose output rule the run follows when it is not the run's own (a replay of a webhook recording,
-   * imported ones included): a webhook run's output is its last Webhook Response's reply. It decides nothing else.
+   * imported ones included): a webhook run's output is its last Webhook Response's reply, with that node's data labels.
+   * It decides nothing about the input's trust.
    */
   outputTriggerType?: string;
   triggeredBy?: string;
