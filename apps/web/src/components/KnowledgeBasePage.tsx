@@ -22,13 +22,25 @@ import {
   fetchKnowledgeBaseChunks,
   fetchKnowledgeBases,
   searchKnowledgeBase,
-  uploadKnowledgeBaseDocument
+  uploadKnowledgeBaseDocument,
+  fetchSecrets,
+  type SecretListItem
 } from "../lib/api";
+import { embedderSettingFields } from "../lib/structured-settings";
+import { SettingsFields } from "./StructuredConfigFields";
+
+/** The settings that hold an embedder's key (a secret reference); the Key picker edits them. */
+const EMBEDDER_KEY_SETTINGS = ["secretRef", "embeddingSecretRef"];
+
+function secretIdOf(config: Record<string, unknown>): string {
+  const ref = (config.secretRef ?? config.embeddingSecretRef) as { secretId?: unknown } | undefined;
+  return ref && typeof ref.secretId === "string" ? ref.secretId : "";
+}
 
 const EMBEDDER_OPTIONS: Array<{ value: string; label: string; hint: string }> = [
   { value: "token-embedder", label: "Token (built-in, demo only)", hint: "Zero-deps 64-d hash. Quality is poor — use only to demo the pipeline." },
-  { value: "openai-embedder", label: "OpenAI (text-embedding-3-small)", hint: "Requires OPENAI_API_KEY or a secretRef in embedderConfig." },
-  { value: "azure-openai-embedder", label: "Azure OpenAI", hint: "Set endpoint/deployment in embedderConfig." },
+  { value: "openai-embedder", label: "OpenAI (text-embedding-3-small)", hint: "Requires OPENAI_API_KEY or a key from Secrets." },
+  { value: "azure-openai-embedder", label: "Azure OpenAI", hint: "Set the endpoint and deployment below." },
   { value: "cohere-embedder", label: "Cohere (embed-english-v3.0)", hint: "Requires COHERE_API_KEY." },
   { value: "mistral-embedder", label: "Mistral (mistral-embed)", hint: "Requires MISTRAL_API_KEY." },
   { value: "google-vertex-embedder", label: "Google Vertex (text-embedding-004)", hint: "Requires GEMINI_API_KEY." },
@@ -190,22 +202,32 @@ function CreateKbForm({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [embedderId, setEmbedderId] = useState("token-embedder");
-  const [embedderConfigJson, setEmbedderConfigJson] = useState("{}");
+  const [embedderConfig, setEmbedderConfig] = useState<Record<string, unknown>>({});
   const [busy, setBusy] = useState(false);
+  const [secrets, setSecrets] = useState<SecretListItem[] | null>(null);
+  const needsKey = embedderId !== "token-embedder";
+  useEffect(() => {
+    if (!needsKey || secrets) return;
+    let cancelled = false;
+    fetchSecrets(projectId ? { projectId } : {})
+      .then((list) => {
+        if (!cancelled) setSecrets(list);
+      })
+      .catch(() => {
+        if (!cancelled) setSecrets([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [needsKey, secrets, projectId]);
 
   const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
     setBusy(true);
     try {
-      let parsedConfig: Record<string, unknown> = {};
-      if (embedderConfigJson.trim()) {
-        try {
-          parsedConfig = JSON.parse(embedderConfigJson) as Record<string, unknown>;
-        } catch {
-          throw new Error("embedderConfig is not valid JSON");
-        }
-      }
+      // The built-in embedder reads no settings.
+      const parsedConfig: Record<string, unknown> = needsKey ? embedderConfig : {};
       const res = await createKnowledgeBase({
         name: name.trim(),
         description: description.trim() || null,
@@ -219,7 +241,7 @@ function CreateKbForm({
     } finally {
       setBusy(false);
     }
-  }, [name, description, embedderId, embedderConfigJson, projectId, onCreated, onError]);
+  }, [name, description, embedderId, embedderConfig, needsKey, projectId, onCreated, onError]);
 
   const selectedEmbedder = EMBEDDER_OPTIONS.find((e) => e.value === embedderId);
 
@@ -231,7 +253,17 @@ function CreateKbForm({
       </div>
       <div className="kb-form-row">
         <label>Embedder
-          <select value={embedderId} onChange={(e) => setEmbedderId(e.target.value)}>
+          <select
+            aria-label="Embedder"
+            value={embedderId}
+            onChange={(e) => {
+              const next = e.target.value;
+              setEmbedderId(next);
+              // Settings the new embedder does not read are dropped; its key is kept.
+              const keep = new Set([...embedderSettingFields(next).map((field) => field.key), ...EMBEDDER_KEY_SETTINGS]);
+              setEmbedderConfig((current) => Object.fromEntries(Object.entries(current).filter(([key]) => keep.has(key))));
+            }}
+          >
             {EMBEDDER_OPTIONS.map((opt) => (
               <option key={opt.value} value={opt.value}>{opt.label}</option>
             ))}
@@ -239,17 +271,39 @@ function CreateKbForm({
           {selectedEmbedder && <small className="kb-subtle">{selectedEmbedder.hint}</small>}
         </label>
       </div>
-      <div className="kb-form-row">
-        <label>embedderConfig (JSON)
-          <textarea
-            value={embedderConfigJson}
-            onChange={(e) => setEmbedderConfigJson(e.target.value)}
-            rows={4}
-            spellCheck={false}
-            placeholder='{ "model": "text-embedding-3-small", "secretRef": { "secretId": "sec_..." } }'
+      {needsKey ? (
+        <div className="kb-form-row kb-embedder-settings">
+          <label>Key
+            <select
+              aria-label="Embedder key"
+              value={secretIdOf(embedderConfig)}
+              onChange={(e) => {
+                const secretId = e.target.value;
+                setEmbedderConfig((current) => {
+                  const { secretRef: _secretRef, embeddingSecretRef: _legacy, ...rest } = current;
+                  return secretId ? { ...rest, secretRef: { secretId } } : rest;
+                });
+              }}
+            >
+              <option value="">The deployment&apos;s key (environment)</option>
+              {(secrets ?? []).map((secret) => (
+                <option key={secret.id} value={secret.id}>{secret.name}</option>
+              ))}
+              {secretIdOf(embedderConfig) && !(secrets ?? []).some((secret) => secret.id === secretIdOf(embedderConfig)) ? (
+                <option value={secretIdOf(embedderConfig)}>{secretIdOf(embedderConfig)}</option>
+              ) : null}
+            </select>
+            <small className="kb-subtle">A secret from Secrets, or blank for the key the deployment has in its environment.</small>
+          </label>
+          <SettingsFields
+            fields={embedderSettingFields(embedderId)}
+            settings={embedderConfig}
+            hiddenKeys={EMBEDDER_KEY_SETTINGS}
+            otherLabel="Other embedder settings"
+            onChange={setEmbedderConfig}
           />
-        </label>
-      </div>
+        </div>
+      ) : null}
       <div className="kb-form-row">
         <button type="submit" className="pg-btn primary" disabled={busy || !name.trim()}>
           {busy ? "Creating…" : "Create knowledge base"}

@@ -573,7 +573,7 @@
       "steps": [
         "Create a knowledge base and add a document, as in the [knowledge base recipe](/recipes/rag-knowledge-base#create-a-knowledge-base-with-the-api). Create it with the embedder the **Retrieve** node uses: `openai-embedder` as shipped, or `token-embedder` to start with no key.",
         "With no OpenAI key, use echo for the **LLM** node. The **Provider** list has no echo entry, so set the node's `providerId` to `echo` in the JSON file and import it again before you edit the nodes below.",
-        "Open **Retrieve** and replace `<your-kb-id>` with the knowledge base id, in **Vector Store Extra Config (JSON)**. If you used `token-embedder`, set **Embedder** to **Token Based (Local Demo)**. Leave **Vector Store** alone: its list has no entry for the built-in knowledge base, so it may show another store, but the saved `knowledge-base` value stays. Save.",
+        "Open **Retrieve**. **Vector Store** already shows **Knowledge Base (built in)**: pick your knowledge base in **Knowledge Base**, in place of the `<your-kb-id>` placeholder. If you used `token-embedder`, check that **Embedder** shows **Token Based (Local Demo)**. Save.",
         "Run it, then open the run and click **Extract Citations** to read the resolved citations."
       ],
       "sections": [
