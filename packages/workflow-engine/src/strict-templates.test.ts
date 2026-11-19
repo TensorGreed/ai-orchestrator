@@ -192,4 +192,29 @@ describe("the strictTemplates workflow setting", () => {
     };
     expect((await executeWorkflow({ workflow: respond }, dependencies())).status).toBe("success");
   });
+
+  it("in a Loop body, says which node and template has no value, and never to file an issue (the validation's loop run)", async () => {
+    const loop: Workflow = {
+      ...setWorkflow("x", { strictTemplates: true }),
+      nodes: [
+        { id: "start", type: "set_node", name: "Orders", position, config: { assignments: [{ key: "orders", valueTemplate: '[{"id":1},{"id":2}]', type: "json" }] } },
+        { id: "loop", type: "loop_node", name: "Each order", position, config: { inputKey: "orders", itemVariable: "item" } },
+        { id: "line", type: "set_node", name: "Line", position, config: { assignments: [{ key: "line", valueTemplate: "{{item.nope}}" }] } }
+      ],
+      edges: [
+        { id: "e1", source: "start", target: "loop" },
+        { id: "e2", source: "loop", target: "line" }
+      ]
+    };
+    const result = await executeWorkflow({ workflow: loop }, dependencies());
+    expect(result.status).toBe("error");
+    const failed = result.nodeResults.filter((node) => node.status === "error");
+    expect(failed.length).toBeGreaterThan(0);
+    for (const node of failed) {
+      expect(node.errorRemediation ?? "", node.nodeId).not.toMatch(/file an issue|github/i);
+      expect(`${node.error} ${node.errorRemediation ?? ""}`, node.nodeId).toContain("{{item.nope}}");
+    }
+    expect(`${result.error} ${result.errorRemediation ?? ""}`).not.toMatch(/file an issue|github/i);
+    expect(result.error).toContain("{{item.nope}}");
+  });
 });

@@ -10334,6 +10334,11 @@ async function executeWorkflowRun(
             if (rejection) nodeOutputs.set(childNode.id, { ...rejection.decisionPayload, error: rejection.message });
             throw new LoopApprovalStop(loopFailure);
           }
+          // The Loop fails with its child's category, code and hint (a strict template names the template it could not
+          // fill), not as an unknown error whose hint is to report a bug.
+          if (caughtChildError instanceof WorkflowError) {
+            throw new WorkflowError(loopFailure, caughtChildError.category, caughtChildError.retryable, caughtChildError.metadata, caughtChildError.remediation);
+          }
           throw new Error(loopFailure);
         } finally {
           // A pass that paused here: its span ends as waiting (the waiting result is recorded when the run pauses).
