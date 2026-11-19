@@ -21,6 +21,14 @@ describe("public live triggers", () => {
     expect(publicEntryMessage(node("chat_trigger"))).toMatch(/^Public chat/);
   });
 
+  it("compares the mode exactly, as the routes do, and flags a Telegram trigger without a secret token (on or off)", () => {
+    expect(publicEntryMessage(node("mcp_server_trigger", { authMode: "bearer " }))).toMatch(/^Public MCP tool/);
+    expect(publicEntryMessage(node("webhook_input", { authMode: " bearer_token" }))).toMatch(/^Public webhook/);
+    expect(publicEntryMessage(node("telegram_trigger", {}))).toMatch(/^Public Telegram trigger/);
+    expect(publicEntryMessage(node("telegram_trigger", { active: false }))).toMatch(/^Public Telegram trigger/);
+    expect(publicEntryMessage(node("telegram_trigger", { signingSecretRef: { secretId: "sec_1" } }))).toBeNull();
+  });
+
   it("leaves out protected and switched-off triggers and every other node", () => {
     expect(publicEntryMessage(node("webhook_input", { authMode: "bearer_token" }))).toBeNull();
     expect(publicEntryMessage(node("webhook_input", { authMode: "hmac_sha256" }))).toBeNull();

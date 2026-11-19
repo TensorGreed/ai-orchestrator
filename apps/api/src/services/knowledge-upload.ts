@@ -105,8 +105,16 @@ function tooLarge(maxBytes: number): KnowledgeUploadError {
  * usual encoding of older text files. Undefined when the bytes are not text in any of these.
  */
 export function decodeTextBytes(bytes: Uint8Array): string | undefined {
-  if (bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder("utf-16le").decode(bytes.subarray(2));
-  if (bytes[0] === 0xfe && bytes[1] === 0xff) return new TextDecoder("utf-16be").decode(bytes.subarray(2));
+  if ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff)) {
+    // Bytes behind a UTF-16 mark are text only if they decode to no NUL or control characters.
+    let text: string;
+    try {
+      text = new TextDecoder(bytes[0] === 0xff ? "utf-16le" : "utf-16be", { fatal: true, ignoreBOM: true }).decode(bytes.subarray(2));
+    } catch {
+      return undefined;
+    }
+    return /[\u0000-\u0008\u000B\u000E-\u001F\uFFFD]/.test(text) ? undefined : text;
+  }
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes).replace(/^\uFEFF/, "");
   } catch {
@@ -148,7 +156,8 @@ function loadText(input: KnowledgeUploadInput, text: string, sourceId: string): 
   try {
     documents = loadDocuments(kind, text, { sourceId, metadata: input.metadata ?? {}, csv: input.csv });
   } catch (error) {
-    throw new KnowledgeUploadError(`Loader failed: ${error instanceof Error ? error.message : String(error)}`, 400, "loader_failed");
+    // The loader's message can quote the file (a JSON parse error does): say what failed, not what it read.
+    throw new KnowledgeUploadError(`The file could not be read as ${kind}. Check that it is valid ${kind}, or upload it as text.`, 400, "loader_failed");
   }
   return { kind, documents };
 }

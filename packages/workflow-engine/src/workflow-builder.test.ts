@@ -115,6 +115,22 @@ describe("checkBuilderDraft", () => {
     // An empty required field is unfinished (the draft saves), not an example that looks like real config.
     expect(check.unfinished.map((issue) => issue.nodeId)).toEqual(expect.arrayContaining(["fetch", "shape"]));
     expect(check.notes.join("\n")).toMatch(/schedule starts off \(nightly\)/);
+    // A described MCP tool starts on a bearer token; one the model made public is said in the preview.
+    const tools = checkBuilderDraft(
+      {
+        name: "Tools",
+        nodes: [
+          { id: "safe_tool", type: "mcp_server_trigger", config: { path: "safe" } },
+          { id: "open_tool", type: "mcp_server_trigger", config: { path: "open", authMode: "public" } }
+        ],
+        edges: []
+      },
+      { workflowId: "wf" }
+    );
+    expect(tools.workflow!.nodes[0]!.config).toMatchObject({ authMode: "bearer" });
+    const toolNotes = tools.notes.join("\n");
+    expect(toolNotes).toMatch(/\(open_tool\): Public MCP tool/);
+    expect(toolNotes).not.toMatch(/\(safe_tool\)/);
     // A time zone the model chose is kept.
     const chosen = checkBuilderDraft(
       { name: "x", nodes: [{ id: "tick", type: "schedule_trigger", config: { timezone: "Asia/Tokyo" } }], edges: [] },

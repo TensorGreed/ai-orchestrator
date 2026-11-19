@@ -194,6 +194,25 @@ describe.each(["strict", "role"] as const)("a person who has a workflow only thr
     for (const person of [owner, member, admin]) expect(await listRuns(context, person)).toEqual({ ids: all, total: 5 });
   });
 
+  it("the data-subject reference preview reads only their own runs (a builder with a share edits, but sees only theirs)", async () => {
+    const { context, owner, gus, run } = await seed();
+    await run(owner);
+    const send = () => call(context, "POST", "/api/data-protection/subject-refs/preview", gus.cookie, { workflowId: "wf-team", subjectRefs: ["{{input.note}}"] });
+    // Strict isolation lends no write through a share; role isolation lends the builder's role, but not other runs.
+    if (mode === "strict") {
+      expect((await send()).statusCode).toBe(403);
+      return;
+    }
+    const preview = async () => {
+      const response = await send();
+      expect(response.statusCode, response.body).toBe(200);
+      return response.json<{ runs: number }>().runs;
+    };
+    expect(await preview()).toBe(0);
+    await run(gus);
+    expect(await preview()).toBe(1);
+  });
+
   it("someone else's run answers 404 on its detail, events, manifest, bundle and rule events; their own opens", async () => {
     const { context, owner, member, olivia, run } = await seed();
     const ownerRun = await run(owner);

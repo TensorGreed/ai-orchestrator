@@ -22,6 +22,7 @@ import {
   isReservedNodeId,
   legacyBehaviours,
   newNodeBaseConfig,
+  publicEntryMessage,
   nodeDefinitions,
   upgradeToNewBehaviour,
   type LLMProviderConfig,
@@ -534,6 +535,11 @@ export function checkBuilderDraft(raw: unknown, options: BuilderDraftOptions): B
   if (removedCredentials.length > 0) notes.push(`Left out credential values the model wrote (${removedCredentials.join(", ")}): pick saved credentials on those nodes.`);
   if (removedAdminKeys.length > 0) notes.push(`Left out settings only an admin sets (${removedAdminKeys.join(", ")}).`);
   if (removedAddresses.length > 0) notes.push(`Left the model server address at its placeholder on ${removedAddresses.join(", ")}: set your server on those nodes.`);
+  // A trigger the draft leaves open to anyone is said in the preview, before it is inserted (the save says it again).
+  for (const node of nodes) {
+    const open = publicEntryMessage(node);
+    if (open) notes.push(`${node.name} (${node.id}): ${open}`);
+  }
   if (scheduleIds.length > 0) notes.push(`The schedule starts off (${scheduleIds.join(", ")}): open it and choose Turn on when the workflow is ready.`);
   if (modelChanged) notes.push("Model nodes use the model the builder used; change it on each node if you want another one.");
   return { workflow, issues, unfinished, pathIssues, notes };

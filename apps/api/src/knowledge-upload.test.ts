@@ -13,7 +13,7 @@ import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
 import { AuthService } from "./services/auth-service.js";
-import { looksBinary } from "./services/knowledge-upload.js";
+import { decodeTextBytes, looksBinary } from "./services/knowledge-upload.js";
 import { SecretService } from "./services/secret-service.js";
 import { openTestStore } from "./test-support/test-store.js";
 
@@ -301,5 +301,17 @@ describe("keyless retrieval: the Token embedder searches hybrid by default", () 
     expect(unset.retrieval?.mode).toBe("hybrid");
     expect(unset.sourceId).toBe("refund-policy.md");
     expect((await run({ searchMode: "vector" })).retrieval?.mode).not.toBe("hybrid");
+  });
+});
+
+describe("decodeTextBytes", () => {
+  it("reads UTF-16 behind its mark only when it decodes to text, never binary or broken bytes", () => {
+    const utf16 = (text: string) => Uint8Array.from([0xff, 0xfe, ...Buffer.from(text, "utf16le")]);
+    expect(decodeTextBytes(utf16("Refunds take 5 days.\n"))).toBe("Refunds take 5 days.\n");
+    // Arbitrary binary behind a UTF-16 mark: control characters once decoded.
+    expect(decodeTextBytes(Uint8Array.from([0xff, 0xfe, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00]))).toBeUndefined();
+    // An odd byte count or a lone surrogate is not UTF-16 text.
+    expect(decodeTextBytes(Uint8Array.from([0xfe, 0xff, 0x00, 0x41, 0x00]))).toBeUndefined();
+    expect(decodeTextBytes(Uint8Array.from([0xff, 0xfe, 0x00, 0xd8, 0x41, 0x00]))).toBeUndefined();
   });
 });

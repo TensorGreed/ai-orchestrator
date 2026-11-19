@@ -18,8 +18,15 @@ function configOf(node: EntryNode): Record<string, unknown> {
  */
 export function publicEntryMessage(node: EntryNode): string | null {
   const config = configOf(node);
+  if (node.type === "telegram_trigger") {
+    // Its route checks the secret token only when one is set, and takes calls whatever `active` says.
+    const ref = config.signingSecretRef;
+    const hasSecret = Boolean(ref && typeof ref === "object" && typeof (ref as Record<string, unknown>).secretId === "string" && (ref as Record<string, unknown>).secretId);
+    return hasSecret ? null : "Public Telegram trigger: without a secret token anyone who knows the workflow's id can start it. Pick the secret that holds the token.";
+  }
   if (config.active === false) return null;
-  const authMode = typeof config.authMode === "string" ? config.authMode.trim() : "";
+  // Compared exactly as the routes compare it: a padded value (" bearer") is not a protected mode there either.
+  const authMode = typeof config.authMode === "string" ? config.authMode : "";
   switch (node.type) {
     case "webhook_input":
       return authMode === "bearer_token" || authMode === "hmac_sha256"
