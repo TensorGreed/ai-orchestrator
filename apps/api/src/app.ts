@@ -4061,8 +4061,12 @@ export async function createApp(
   // workflow only through a share with them, also with a key of their own (run-editor-options.ts personalSessionOwner).
   // Other API keys and service accounts keep the workflow's sessions.
   const sessionOwnerFor = async (user: SafeUser, workflow: Workflow): Promise<string | undefined> => {
+    // A builder who reads the workflow only through a share with them (a read share too: a signed-in chat needs only
+    // read) is kept to their own sessions, as are those who may run it only through such a share.
     const shareOnly =
-      user.role === "builder" && !user.serviceAccount ? await rbacService.runsOnlyThroughUserShare(user, workflow) : false;
+      user.role === "builder" && !user.serviceAccount
+        ? (await rbacService.runsOnlyThroughUserShare(user, workflow)) || (await rbacService.readsOnlyThroughUserShare(user, workflow))
+        : false;
     return personalSessionOwner(user, shareOnly);
   };
   const sessionOwnerOptionFor = async (user: SafeUser, workflow: Workflow): Promise<{ sessionOwner?: string }> => {
@@ -13132,6 +13136,8 @@ export async function createApp(
             policyActor: user,
             workflow,
             directInput: { trigger_type: "manual", trigger_node_id: manualNode.id, ...body },
+            // A share-only runner's session memory is kept to them, as on /execute.
+            ...await sessionOwnerOptionFor(user, workflow),
             executionId,
             triggerType: "manual",
             triggeredBy: user.email

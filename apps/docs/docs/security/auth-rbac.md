@@ -266,7 +266,9 @@ project member keeps the full view, and so does anyone who also has the workflow
   their runs, filtered before paging, so totals count only those.
 - **Single runs.** Someone else's run answers `404`, the same answer as a run that does not exist: its detail, its live
   events, its manifest and bundle export, its rule events, retry, replay, cancel, and using its data for a new run
-  (`sourceExecutionId`).
+  (`sourceExecutionId`). An action the share does not allow answers `404` for someone else's run too; only for their
+  own run does it answer `403`.
+- **Session memory.** Their runs, and a signed-in chat even with a read share, use session memory of their own.
 - **Approvals and questions.** The approvals inbox and the tool questions (`/api/mcp/elicitations`, and the count in the
   MCP overview) list only those of their own runs, and they can decide only those; anyone else's answers `404`.
 - **Data from many people's runs.** Golden runs, golden sets (their cases, export, and evaluations or replay jobs

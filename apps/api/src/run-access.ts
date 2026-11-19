@@ -238,10 +238,13 @@ export function createRunAccess(deps: RunAccessDeps): RunAccess {
     async run(user, run, permission, what = "Execution") {
       if (!run) return notFound(what);
       const workflow = await deps.getWorkflow(run.workflowId) ?? null;
-      const denial = await workflowVerdict(user, workflow, permission, what);
-      if (denial) return denial;
-      // Someone else's run, for a person who sees only their own: answered as missing, so run ids reveal nothing.
+      // Read first, then whether the run is theirs to see, and only then the action's permission: someone else's run
+      // must answer as missing (404) before a 403 for the action could tell them it exists.
+      const readDenial = await workflowVerdict(user, workflow, "workflow:read", what);
+      if (readDenial) return readDenial;
       if (await hiddenRun(user, run, workflow)) return notFound(what);
+      const denial = permission === "workflow:read" ? null : await workflowVerdict(user, workflow, permission, what);
+      if (denial) return denial;
       return { ok: true, run, workflow };
     },
 

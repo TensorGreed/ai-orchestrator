@@ -497,3 +497,50 @@ describe("own runs only meets approvals around a Loop that routes branches", () 
     expect((await call(context, "GET", `/api/executions/${body.executionId}`, olivia.cookie)).statusCode).toBe(200);
   });
 });
+
+describe("no difference between someone else's run and a missing one, and read shares keep chat memory to the person", () => {
+  it("an action the share does not allow answers 404 for someone else's run and 403 only for their own", async () => {
+    const { context, owner, gus, run } = await seed();
+    const ownerRun = await run(owner);
+    const gusRun = await run(gus);
+    // Golden runs need write, which a share never gives: someone else's run is missing, their own is forbidden.
+    const otherGolden = await call(context, "POST", "/api/replay/recordings", gus.cookie, { executionId: ownerRun, name: "g" });
+    expect(otherGolden.statusCode, otherGolden.body).toBe(404);
+    expect(otherGolden.json()).toEqual((await call(context, "POST", "/api/replay/recordings", gus.cookie, { executionId: "no-such-run", name: "g" })).json());
+    expect((await call(context, "POST", "/api/replay/recordings", gus.cookie, { executionId: gusRun, name: "g" })).statusCode).toBe(403);
+
+    // With a read share, retry and replay (execute) answer the same way.
+    const downgraded = await call(context, "POST", "/api/workflows/wf-team/user-shares", owner.cookie, { email: gus.email, accessLevel: "read" });
+    expect(downgraded.statusCode, downgraded.body).toBeLessThan(300);
+    for (const action of ["retry", "replay"]) {
+      const other = await call(context, "POST", `/api/executions/${ownerRun}/${action}`, gus.cookie, {});
+      expect(other.statusCode, `${action}: ${other.body}`).toBe(404);
+      expect(other.json()).toEqual((await call(context, "POST", `/api/executions/no-such-run/${action}`, gus.cookie, {})).json());
+      expect((await call(context, "POST", `/api/executions/${gusRun}/${action}`, gus.cookie, {})).statusCode, action).toBe(403);
+    }
+  });
+
+  it("a builder with a read share chats in sessions of their own, and the chat run is theirs", async () => {
+    const { context, owner, gus } = await seed();
+    const chat: Workflow = {
+      ...echoWorkflow("wf-chat"),
+      nodes: [
+        { id: "start", type: "chat_trigger", name: "Chat", position: { x: 0, y: 0 }, config: { authMode: "session" } },
+        { id: "out", type: "output", name: "Out", position: { x: 200, y: 0 }, config: { responseTemplate: "ok" } }
+      ]
+    };
+    await context.store.upsertWorkflow(chat);
+    const shared = await call(context, "POST", "/api/workflows/wf-chat/user-shares", owner.cookie, { email: gus.email, accessLevel: "read" });
+    expect(shared.statusCode, shared.body).toBeLessThan(300);
+    const said = await call(context, "POST", "/api/chat/wf-chat", gus.cookie, { message: "hi", session_id: "someone-elses-session" });
+    expect(said.statusCode, said.body).toBe(200);
+    const runs = await listRuns(context, gus, "?workflowId=wf-chat");
+    expect(runs.total).toBe(1);
+    expect(await context.store.getExecutionSessionOwner(runs.ids[0]!)).toBe(gus.id);
+
+    // The manual trigger route keeps an execute-share runner's sessions to them too, as /execute does.
+    const manual = await call(context, "POST", "/api/triggers/manual/wf-team", gus.cookie, { note: "x" });
+    expect(manual.statusCode, manual.body).toBe(200);
+    expect(await context.store.getExecutionSessionOwner(manual.json<{ executionId: string }>().executionId)).toBe(gus.id);
+  });
+});
