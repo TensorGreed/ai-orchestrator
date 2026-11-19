@@ -228,6 +228,8 @@ interface WorkflowCanvasAreaProps {
   onOpenNodeConfig: (nodeId: string) => void;
   reactFlowInstance: ReactFlowInstance | null;
   onClearCanvas: () => void;
+  /** "Describe it" on an empty canvas (absent: not offered, for example when it is turned off). */
+  onDescribeWorkflow?: () => void;
   /** Why you cannot change this workflow (your role or your access): Add node and Clear are disabled with it as tooltip. */
   editDisabledReason?: string | null;
   /** Why you cannot run it: Webhook run is disabled with it as tooltip. */
@@ -317,6 +319,7 @@ export function WorkflowCanvasArea({
   onOpenNodeConfig,
   reactFlowInstance,
   onClearCanvas,
+  onDescribeWorkflow,
   editDisabledReason,
   runDisabledReason,
   debugMode,
@@ -778,6 +781,15 @@ export function WorkflowCanvasArea({
               <Controls showInteractive={false} position="bottom-left" />
             </ReactFlow>
             </CanvasInsertContext.Provider>
+
+            {nodes.length === 0 && onDescribeWorkflow && !editDisabledReason && !showNodeDrawer ? (
+              <div className="canvas-empty-start" data-testid="canvas-empty-start">
+                <p>Start by saying what this workflow should do, or add a node.</p>
+                <button type="button" className="pg-btn primary" onClick={onDescribeWorkflow}>
+                  Describe it…
+                </button>
+              </div>
+            ) : null}
 
             <div className="canvas-toolbar" role="toolbar" aria-label="Canvas tools">
               {!showNodeDrawer && (

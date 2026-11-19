@@ -33,3 +33,4 @@ export * from "./documents/index";
 export { describeRunResult } from "./run-instrumentation";
 export * from "./model-references";
 export * from "./redteam-suite";
+export * from "./workflow-builder";

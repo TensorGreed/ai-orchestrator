@@ -247,6 +247,20 @@ describe("WorkflowCanvasArea", () => {
     expect(screen.queryByRole("navigation", { name: "Workflow stages" })).not.toBeInTheDocument();
   });
 
+  it("offers Describe it on an empty canvas only, and only when it is on and the workflow can be edited", async () => {
+    const onDescribeWorkflow = vi.fn();
+    const { rerender } = render(<WorkflowCanvasArea {...makeProps({ onDescribeWorkflow })} />);
+    await userEvent.click(within(screen.getByTestId("canvas-empty-start")).getByRole("button", { name: "Describe it…" }));
+    expect(onDescribeWorkflow).toHaveBeenCalledTimes(1);
+
+    rerender(<WorkflowCanvasArea {...makeProps({ onDescribeWorkflow, editDisabledReason: "Viewers cannot change workflows" })} />);
+    expect(screen.queryByTestId("canvas-empty-start")).not.toBeInTheDocument();
+    rerender(<WorkflowCanvasArea {...makeProps()} />);
+    expect(screen.queryByTestId("canvas-empty-start")).not.toBeInTheDocument();
+    rerender(<WorkflowCanvasArea {...makeProps({ onDescribeWorkflow, nodes: [makeNode("a", "manual_trigger", "Start")] })} />);
+    expect(screen.queryByTestId("canvas-empty-start")).not.toBeInTheDocument();
+  });
+
   it("renders hub slots for empty ports and opens the attachment drawer on click", async () => {
     const user = userEvent.setup();
     const onOpenAgentAttachmentDrawer = vi.fn();
