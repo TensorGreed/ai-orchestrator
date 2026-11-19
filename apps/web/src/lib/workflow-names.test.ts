@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { copyWorkflowName, nextNewWorkflowName, shortWorkflowId, workflowPickerLabels } from "./workflow-names";
+import { copyWorkflowName, nextNewWorkflowName, shortWorkflowId, workflowPickerLabel, workflowPickerLabels } from "./workflow-names";
 
 describe("workflow names", () => {
   it("offers a new workflow a Workflow N no other workflow has", () => {
@@ -25,5 +25,8 @@ describe("workflow names", () => {
     expect(labels.get("wf-9b1c22aa")).toBe("VAL Error handler · 9b1c22");
     expect(labels.get("x")).toBe("Orders");
     expect(shortWorkflowId("builtin-starter-approval")).toBe("builti");
+    const list = [{ id: "a1b2c3d4", name: "Orders" }, { id: "e5f6a7b8", name: "orders" }, { id: "c", name: "Other" }];
+    expect(workflowPickerLabel(list, list[0]!)).toBe("Orders · a1b2c3");
+    expect(workflowPickerLabel(list, list[2]!)).toBe("Other");
   });
 });

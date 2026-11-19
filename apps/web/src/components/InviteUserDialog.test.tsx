@@ -32,7 +32,7 @@ describe("InviteUserDialog", () => {
     // Or send it from their own mail app: a message to the invitee with the link in it.
     const send = screen.getByRole("link", { name: "Send email" });
     const href = send.getAttribute("href") ?? "";
-    expect(href.startsWith("mailto:ana%40example.com?")).toBe(true);
+    expect(href.startsWith("mailto:ana@example.com?")).toBe(true);
     expect(decodeURIComponent(href)).toContain("http://localhost:5173/#invite=abc");
     expect(decodeURIComponent(href)).toContain("as operator");
   });

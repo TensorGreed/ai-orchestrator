@@ -146,6 +146,19 @@ describe("saving a draft", () => {
     expect((await validate()).issues.filter((issue) => issue.code === "public_entry")).toEqual([]);
   });
 
+  it("an MCP trigger that asks for a bearer token before its secret is picked refuses calls with 401", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context);
+    const flow = hookFlow({
+      nodes: [{ id: "tool", type: "mcp_server_trigger", name: "Tool", position, config: { path: "draft-bearer-tool", toolName: "lookup", authMode: "bearer" } }],
+      edges: []
+    });
+    expect((await context.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie }, payload: flow })).statusCode).toBe(200);
+    const call = await context.app.inject({ method: "POST", url: "/api/mcp-server/draft-bearer-tool/invoke", headers: { authorization: "Bearer anything" }, payload: { arguments: {} } });
+    expect(call.statusCode).toBe(401);
+    expect(call.json()).toMatchObject({ code: "token_not_set" });
+  });
+
   it("saves unfinished node settings, which validate still lists and a run still refuses", async () => {
     const context = await createTestContext();
     const cookie = await login(context);

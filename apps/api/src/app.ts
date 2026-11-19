@@ -13583,6 +13583,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       if (isLiveEntryOff(found.node)) return mcpServerOff(reply);
       const cfg = asRecord(found.node.config);
       if (cfg.authMode === "bearer") {
+        // A new trigger asks for a token before its secret is picked: every call is refused, as an unauthorised one.
+        if (typeof asRecord(cfg.secretRef).secretId !== "string" || !String(asRecord(cfg.secretRef).secretId).trim()) {
+          reply.code(401);
+          return { error: "This tool asks for a bearer token, but no token secret is picked on its trigger yet", code: "token_not_set" };
+        }
         const secret = await secretService.resolveSecret(toSecretReference(cfg.secretRef));
         if (!secret) {
           reply.code(500);

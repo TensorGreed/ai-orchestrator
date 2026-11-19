@@ -10,27 +10,31 @@ function configOf(node: EntryNode): Record<string, unknown> {
 }
 
 /**
- * The open door a node leaves, or null: a webhook with no token or signature, a public form, or an Expose as MCP Tool
- * trigger whose REST route takes no token. A trigger that is switched off (`active: false`) takes no live calls, so
- * it is not one. Unset values are read as the routes read them (webhook: none; form and MCP trigger: public).
+ * The open door a node leaves, or null: a webhook with no token or signature, a public form, an Expose as MCP Tool
+ * trigger whose REST route takes no token, or a public chat. Read as the routes read them: anything but a protected
+ * mode is open (webhook: `bearer_token` or `hmac_sha256`; form: `session`; MCP trigger: `bearer`; chat: `session` or
+ * `bearer`), so unset and unknown values count as public. A trigger that is switched off (`active: false`) takes no
+ * live calls, so it is not one.
  */
 export function publicEntryMessage(node: EntryNode): string | null {
   const config = configOf(node);
   if (config.active === false) return null;
-  const authMode = typeof config.authMode === "string" && config.authMode.trim() ? config.authMode.trim() : null;
+  const authMode = typeof config.authMode === "string" ? config.authMode.trim() : "";
   switch (node.type) {
     case "webhook_input":
-      return (authMode ?? "none") === "none"
-        ? "Public webhook: anyone who can reach this server can call it. Set Auth Mode to a bearer token or HMAC signature, or turn it off."
-        : null;
+      return authMode === "bearer_token" || authMode === "hmac_sha256"
+        ? null
+        : "Public webhook: anyone who can reach this server can call it. Set Auth Mode to a bearer token or HMAC signature, or turn it off.";
     case "form_trigger":
-      return (authMode ?? "public") === "public"
-        ? "Public form: anyone who can reach this server can open and submit it. Set Auth Mode to Session, or turn it off."
-        : null;
+      return authMode === "session" ? null : "Public form: anyone who can reach this server can open and submit it. Set Auth Mode to Session, or turn it off.";
     case "mcp_server_trigger":
-      return (authMode ?? "public") === "public"
-        ? "Public MCP tool: anyone who can reach this server can call its REST route without a token. Set Auth Mode to Bearer token, or turn it off."
-        : null;
+      return authMode === "bearer"
+        ? null
+        : "Public MCP tool: anyone who can reach this server can call its REST route without a token. Set Auth Mode to Bearer token, or turn it off.";
+    case "chat_trigger":
+      return authMode === "session" || authMode === "bearer"
+        ? null
+        : "Public chat: anyone who can reach this server can send it messages. Set Auth Mode to Session or Bearer, or turn it off.";
     default:
       return null;
   }

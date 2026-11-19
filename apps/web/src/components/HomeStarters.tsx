@@ -14,20 +14,23 @@ const FIRST = ["builtin-starter-csv-to-json", "builtin-starter-loop-collect", "b
 const rank = (id: string) => (FIRST.includes(id) ? FIRST.indexOf(id) : FIRST.length);
 
 interface HomeStartersProps {
+  /** The project open in the studio: the new workflow goes there. */
+  projectId: string;
   /** Opens the workflow the starter made. */
   onWorkflowCreated: (workflowId: string) => void | Promise<void>;
   /** Opens Templates on the Starters category. */
   onBrowseStarters: () => void;
 }
 
-export function HomeStarters({ onWorkflowCreated, onBrowseStarters }: HomeStartersProps) {
+export function HomeStarters({ projectId, onWorkflowCreated, onBrowseStarters }: HomeStartersProps) {
   const [starters, setStarters] = useState<TemplateListItem[] | null>(null);
   const [usingId, setUsingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    fetchTemplates({ category: "Starters", withoutSetupOnly: true })
+    // Every starter, as the Templates page lists them (so "All N starters" counts the same); the row shows ones that run without setup.
+    fetchTemplates({ category: "Starters" })
       .then((result) => {
         if (!cancelled) setStarters([...result.templates].sort((a, b) => rank(a.id) - rank(b.id)));
       })
@@ -46,7 +49,7 @@ export function HomeStarters({ onWorkflowCreated, onBrowseStarters }: HomeStarte
     setUsingId(templateId);
     setError(null);
     try {
-      const created = await createFromTemplate(templateId);
+      const created = await createFromTemplate(templateId, { projectId });
       await onWorkflowCreated(created.workflowId);
     } catch (useError) {
       setError(useError instanceof Error ? useError.message : "Could not make a workflow from this starter");
@@ -72,7 +75,7 @@ export function HomeStarters({ onWorkflowCreated, onBrowseStarters }: HomeStarte
         </div>
       )}
       <div className="home-starters-row">
-        {starters.slice(0, SHOWN).map((starter) => (
+        {starters.filter((starter) => !starter.dependencies || starter.dependencies.length === 0).slice(0, SHOWN).map((starter) => (
           <article key={starter.id} className="home-starter-card" data-testid={`home-starter-${starter.id}`}>
             <h4 className="home-starter-name">{starter.name}</h4>
             <p className="home-starter-desc">{starter.description}</p>

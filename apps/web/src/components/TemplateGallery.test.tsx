@@ -63,12 +63,13 @@ describe("TemplateGallery", () => {
     vi.mocked(api.useTemplate).mockResolvedValue({ workflowId: "wf-new", name: "Created from template" });
     const onWorkflowCreated = vi.fn();
 
-    render(<TemplateGallery onWorkflowCreated={onWorkflowCreated} />);
+    render(<TemplateGallery onWorkflowCreated={onWorkflowCreated} projectId="proj-team" />);
 
     await screen.findByText("Webhook Starter");
     await user.click(screen.getByRole("button", { name: "Use Template" }));
 
-    expect(api.useTemplate).toHaveBeenCalledWith("tpl-1");
+    // The new workflow goes into the project open in the studio.
+    expect(api.useTemplate).toHaveBeenCalledWith("tpl-1", { projectId: "proj-team" });
     expect(onWorkflowCreated).toHaveBeenCalledWith("wf-new");
   });
 

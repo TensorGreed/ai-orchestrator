@@ -39,3 +39,9 @@ export function workflowPickerLabels(workflows: ReadonlyArray<{ id: string; name
     ])
   );
 }
+
+/** One workflow's picker label among `workflows` (see workflowPickerLabels). */
+export function workflowPickerLabel(workflows: ReadonlyArray<{ id: string; name: string }>, workflow: { id: string; name: string }): string {
+  const name = normalize(workflow.name);
+  return workflows.some((other) => other.id !== workflow.id && normalize(other.name) === name) ? `${workflow.name} · ${shortWorkflowId(workflow.id)}` : workflow.name;
+}

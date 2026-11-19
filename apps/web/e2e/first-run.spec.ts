@@ -115,7 +115,7 @@ test("the quickstart's first run, word for word", async ({ page }) => {
     await expect(row.getByRole("button", { name: new RegExp(`^${label("Use")} starter `) }).first()).toBeVisible();
     await expect(page.getByRole("button", { name: label("New workflow") })).toBeVisible();
     expect(steps).toContain(`**${label("Home")}**`);
-    expect(steps).toContain(`**${label("Describe it…")}**`);
+    await expect(page.getByRole("button", { name: label("Describe it…") })).toBeVisible();
     expect(steps).toContain(`**${label("Secrets")}**`);
     expect(ollama).toEqual([]);
   } finally {

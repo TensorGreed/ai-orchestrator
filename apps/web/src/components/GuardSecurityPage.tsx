@@ -12,6 +12,7 @@
  * Overview's numbers (the API's default).
  */
 
+import { workflowPickerLabel } from "../lib/workflow-names";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { GuardEventView, GuardProfileSummary, Project, WorkflowListItem } from "@ai-orchestrator/shared";
 import { ApiError, fetchGuardEvents, fetchGuardProfiles, fetchGuardStats, type GuardStats } from "../lib/api";
@@ -163,9 +164,9 @@ function GuardOverview({ projects, workflows, onOpenRun }: { projects: Project[]
           <span>Workflow</span>
           <select value={workflowId} onChange={(event) => setWorkflowId(event.target.value)}>
             <option value="">All workflows</option>
-            {visibleWorkflows.map((workflow) => (
+            {visibleWorkflows.map((workflow, _index, list) => (
               <option key={workflow.id} value={workflow.id}>
-                {workflow.name}
+                {workflowPickerLabel(list, workflow)}
               </option>
             ))}
           </select>

@@ -93,6 +93,24 @@ test.describe("new node defaults", () => {
     expect(ollama).toEqual([]);
   });
 
+  test("New workflow left alone saves nothing, through Home and a reload", async ({ page }) => {
+    const ollama = await openStudio(page);
+    before = await workflowIds(page);
+    await page.goto("/?mode=dashboard");
+    await page.getByRole("button", { name: "New workflow" }).first().click();
+    await expect(page.getByLabel("Workflow name")).toBeVisible({ timeout: 60_000 });
+    await expect(page.locator(".react-flow__node")).toHaveCount(2);
+    await page.waitForTimeout(1500);
+    await page.reload();
+    await expect(page.locator("aside.app-sidebar")).toBeVisible({ timeout: 60_000 });
+    await page.waitForTimeout(1500);
+    await page.goto("/?mode=dashboard");
+    await expect(page.getByRole("button", { name: "New workflow" }).first()).toBeVisible({ timeout: 60_000 });
+    await page.waitForTimeout(1000);
+    expect(await workflowIds(page)).toEqual(before);
+    expect(ollama).toEqual([]);
+  });
+
   test("palette nodes start with placeholders, not example values", async ({ page }) => {
     const ollama = await openStudio(page);
     before = await workflowIds(page);

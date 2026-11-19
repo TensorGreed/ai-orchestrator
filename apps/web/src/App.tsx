@@ -5688,6 +5688,7 @@ function StudioApp() {
 
               {canManageWorkflows && !inNoProject && (
                 <HomeStarters
+                  projectId={activeProjectId}
                   onWorkflowCreated={handleTemplateWorkflowCreated}
                   onBrowseStarters={() => {
                     setTemplateInitialCategory("Starters");
@@ -6494,6 +6495,7 @@ function StudioApp() {
             <TemplateGallery
               onWorkflowCreated={handleTemplateWorkflowCreated}
               initialCategory={templateInitialCategory}
+              projectId={inNoProject ? undefined : activeProjectId}
             />
           )}
 

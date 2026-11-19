@@ -18,9 +18,11 @@ const CATEGORIES = [
 interface TemplateGalleryProps {
   onWorkflowCreated: (workflowId: string) => void | Promise<void>;
   initialCategory?: string;
+  /** The project open in the studio: a workflow made from a template goes there. */
+  projectId?: string;
 }
 
-export function TemplateGallery({ onWorkflowCreated, initialCategory }: TemplateGalleryProps) {
+export function TemplateGallery({ onWorkflowCreated, initialCategory, projectId }: TemplateGalleryProps) {
   const [templates, setTemplates] = useState<TemplateListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -57,7 +59,7 @@ export function TemplateGallery({ onWorkflowCreated, initialCategory }: Template
     async (templateId: string) => {
       setUsingTemplateId(templateId);
       try {
-        const result = await useTemplate(templateId);
+        const result = await useTemplate(templateId, { projectId });
         await onWorkflowCreated(result.workflowId);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to create workflow from template");
@@ -65,7 +67,7 @@ export function TemplateGallery({ onWorkflowCreated, initialCategory }: Template
         setUsingTemplateId(null);
       }
     },
-    [onWorkflowCreated]
+    [onWorkflowCreated, projectId]
   );
 
   return (

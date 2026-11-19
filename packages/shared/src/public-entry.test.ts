@@ -13,6 +13,14 @@ describe("public live triggers", () => {
     expect(publicEntryMessage(node("mcp_server_trigger", { authMode: "public" }))).toMatch(/^Public MCP tool/);
   });
 
+  it("reads unknown modes as the routes do: open", () => {
+    expect(publicEntryMessage(node("webhook_input", { authMode: "bearer" }))).toMatch(/^Public webhook/);
+    expect(publicEntryMessage(node("form_trigger", { authMode: "bearer" }))).toMatch(/^Public form/);
+    expect(publicEntryMessage(node("mcp_server_trigger", { authMode: "session" }))).toMatch(/^Public MCP tool/);
+    expect(publicEntryMessage(node("chat_trigger", { authMode: "public" }))).toMatch(/^Public chat/);
+    expect(publicEntryMessage(node("chat_trigger"))).toMatch(/^Public chat/);
+  });
+
   it("leaves out protected and switched-off triggers and every other node", () => {
     expect(publicEntryMessage(node("webhook_input", { authMode: "bearer_token" }))).toBeNull();
     expect(publicEntryMessage(node("webhook_input", { authMode: "hmac_sha256" }))).toBeNull();
@@ -21,7 +29,8 @@ describe("public live triggers", () => {
     expect(publicEntryMessage(node("webhook_input", { authMode: "none", active: false }))).toBeNull();
     expect(publicEntryMessage(node("mcp_server_trigger", { active: false }))).toBeNull();
     expect(publicEntryMessage(node("http_request", { authMode: "none" }))).toBeNull();
-    expect(publicEntryMessage(node("chat_trigger", { authMode: "public" }))).toBeNull();
+    expect(publicEntryMessage(node("chat_trigger", { authMode: "session" }))).toBeNull();
+    expect(publicEntryMessage(node("chat_trigger", { authMode: "bearer" }))).toBeNull();
   });
 
   it("gives one one-line warning per open trigger, never an error", () => {

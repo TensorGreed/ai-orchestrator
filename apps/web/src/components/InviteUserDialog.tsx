@@ -69,7 +69,8 @@ export function InviteUserDialog({ onInvited, onClose }: InviteUserDialogProps) 
 
   /** A mailto: link for the admin's own mail app: to the invitee, with the link and its expiry in the body. */
   const mailto = result?.inviteUrl
-    ? `mailto:${encodeURIComponent(result.user.email)}?subject=${encodeURIComponent("You are invited to L2M")}&body=${encodeURIComponent(
+    ? // The address stays as it is (the server checked it): some mail apps do not decode an encoded one.
+      `mailto:${result.user.email}?subject=${encodeURIComponent("You are invited to L2M")}&body=${encodeURIComponent(
         `You are invited to L2M as ${result.user.role}.\n\nOpen this link to choose your password and sign in:\n${result.inviteUrl}\n\nThe link works once and expires at ${new Date(result.invite.expiresAt).toLocaleString()}.`
       )}`
     : null;
