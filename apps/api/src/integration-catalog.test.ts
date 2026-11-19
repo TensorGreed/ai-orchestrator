@@ -100,7 +100,7 @@ beforeAll(async () => {
     request.on("end", () => {
       const url = request.url ?? "";
       const spec = fixtureYaml.replace("http://127.0.0.1:1/api", `${base}/api`);
-      if (url === "/spec.yaml") {
+      if (url === "/spec.yaml" || url.startsWith("/spec.yaml?")) {
         response.writeHead(200, { "content-type": "application/yaml" });
         response.end(specVersion === 1 ? spec : spec.replace(/  \/tickets\/\{ticketId\}:[\s\S]*$/, ""));
       } else if (url === "/spec.json") {
@@ -143,6 +143,20 @@ describe("parseSpecText", () => {
 });
 
 describe("OpenAPI specs", () => {
+  it("never shows a spec URL's query to readers, and keeps it for refresh", async () => {
+    const context = await createTestContext();
+    const builder = await login(context, "builder");
+    specVersion = 1;
+    const created = await call(context, "POST", "/api/catalog/openapi-specs", builder.cookie, { url: `${base}/spec.yaml?token=s3cret` });
+    expect(created.statusCode).toBe(201);
+    const spec = created.json().spec;
+    expect(spec.sourceUrl).toBe(`${base}/spec.yaml?…`);
+    const catalog = (await call(context, "GET", "/api/catalog?projectId=default", builder.cookie)).json();
+    expect(JSON.stringify(catalog)).not.toContain("s3cret");
+    expect(JSON.stringify((await call(context, "GET", `/api/catalog/openapi-specs/${spec.id}`, builder.cookie)).json())).not.toContain("s3cret");
+    expect((await call(context, "POST", `/api/catalog/openapi-specs/${spec.id}/refresh`, builder.cookie, {})).statusCode).toBe(200);
+  });
+
   it("adds a spec from a URL, lists its operations in the catalog, refreshes and removes it", async () => {
     const context = await createTestContext();
     const builder = await login(context, "builder");
@@ -170,7 +184,7 @@ describe("OpenAPI specs", () => {
         urlTemplate: `${base}/api/tickets`,
         failOnHttpError: true,
         secretAuth: { type: "header", name: "X-API-Key" },
-        openapiOperation: { specId: spec.id, operationId: "createTicket", method: "POST", path: "/tickets" },
+        openapiOperation: { specId: spec.id, operationId: "createTicket", method: "POST", path: "/tickets", baseUrl: `${base}/api` },
         operationValues: {}
       }
     });
@@ -189,8 +203,11 @@ describe("OpenAPI specs", () => {
     expect(refreshed.statusCode).toBe(200);
     expect(refreshed.json()).toMatchObject({ spec: { operationCount: 2 }, removed: ["getTicket"], added: [] });
 
+    const readAt = refreshed.json().spec.fetchedAt;
     const patched = await call(context, "PATCH", `/api/catalog/openapi-specs/${spec.id}`, builder.cookie, { name: "Desk", baseUrl: "https://desk.example.com/v2/" });
     expect(patched.json().spec).toMatchObject({ name: "Desk", baseUrl: "https://desk.example.com/v2" });
+    // A rename is not a read of the spec.
+    expect(patched.json().spec.fetchedAt).toBe(readAt);
     // A base URL someone set survives a refresh.
     const again = await call(context, "POST", `/api/catalog/openapi-specs/${spec.id}/refresh`, builder.cookie, {});
     expect(again.json().spec.baseUrl).toBe("https://desk.example.com/v2");

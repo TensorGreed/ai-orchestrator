@@ -18,6 +18,15 @@ export const OPENAPI_SPEC_MAX_BYTES = 2 * 1024 * 1024;
 /** Most operations kept from one spec; the rest are dropped with a warning. */
 export const OPENAPI_MAX_OPERATIONS = 500;
 const MAX_REF_DEPTH = 24;
+/**
+ * Most schema nodes one spec may expand to once its `$ref`s are inlined, and the largest stored catalog. A small spec
+ * whose schemas each reference the next one many times would otherwise grow exponentially.
+ */
+const MAX_RESOLVED_NODES = 500_000;
+export const OPENAPI_CATALOG_MAX_BYTES = 8 * 1024 * 1024;
+const EXPANDS_TOO_FAR = "The spec's schemas expand too far once their references are filled in. Split the spec or simplify its schemas.";
+/** Nodes left to expand in the parse under way (parsing is synchronous). */
+let resolveBudget = Number.POSITIVE_INFINITY;
 const MAX_WARNINGS = 20;
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -91,6 +100,11 @@ export interface OpenApiOperationRef {
   operationId: string;
   method: string;
   path: string;
+  /**
+   * The base URL the node sends to. The form keeps it when the API's base URL changes later, so the node's secret is
+   * not sent to a new host without someone choosing it. Empty until the API has one.
+   */
+  baseUrl: string;
 }
 
 /** One palette entry of the catalog, as `GET /api/catalog` lists it. */
@@ -157,6 +171,7 @@ function lookupRef(root: Record<string, unknown>, ref: string): unknown {
  */
 function resolveRefs(root: Record<string, unknown>, value: unknown, seen: readonly string[] = [], depth = 0): unknown {
   if (depth > MAX_REF_DEPTH) return {};
+  if (--resolveBudget < 0) throw new OpenApiSpecError(EXPANDS_TOO_FAR);
   if (Array.isArray(value)) return value.map((entry) => resolveRefs(root, entry, seen, depth + 1));
   if (!isRecord(value)) return value;
   if (typeof value.$ref === "string") {
@@ -333,6 +348,17 @@ function readRequestBody(raw: unknown, root: Record<string, unknown>): OpenApiRe
  * `OpenApiSpecError` when the document is not OpenAPI 3.x or has no operations the HTTP Request node can call.
  */
 export function parseOpenApiDocument(document: unknown, options: { sourceUrl?: string } = {}): OpenApiCatalog {
+  resolveBudget = MAX_RESOLVED_NODES;
+  try {
+    const catalog = parseDocument(document, options);
+    if (JSON.stringify(catalog).length > OPENAPI_CATALOG_MAX_BYTES) throw new OpenApiSpecError(EXPANDS_TOO_FAR);
+    return catalog;
+  } finally {
+    resolveBudget = Number.POSITIVE_INFINITY;
+  }
+}
+
+function parseDocument(document: unknown, options: { sourceUrl?: string }): OpenApiCatalog {
   if (!isRecord(document)) throw new OpenApiSpecError("The spec is not a JSON or YAML object.");
   const version = text(document.openapi);
   if (!version) {
@@ -447,6 +473,36 @@ export function hasTemplate(value: string): boolean {
   return TEMPLATE_TOKEN.test(value);
 }
 
+/** `results.fetch.body.name`, `webhook.items[0]`: a plain path, safe to wrap in an encoding call. */
+const PLAIN_PATH = /^[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*|\[\d+\])*$/;
+
+/** Splits text into literal pieces and `{{ }}` expressions (with the inner expression, trimmed). */
+function templatePieces(value: string): Array<{ literal: string } | { token: string; expression: string }> {
+  const pieces: Array<{ literal: string } | { token: string; expression: string }> = [];
+  let last = 0;
+  for (const match of value.matchAll(/\{\{([\s\S]*?)\}\}/g)) {
+    if (match.index! > last) pieces.push({ literal: value.slice(last, match.index) });
+    pieces.push({ token: match[0], expression: match[1]!.trim() });
+    last = match.index! + match[0].length;
+  }
+  if (last < value.length) pieces.push({ literal: value.slice(last) });
+  return pieces;
+}
+
+/**
+ * Text as a JSON string in a template. Literal text is escaped; a plain-path expression renders escaped too
+ * (`{{ JSON.stringify(String(x)).slice(1, -1) }}`), so a quote or a newline in the value cannot break the JSON or add
+ * keys. Any other expression is kept as written: its author controls what it renders.
+ */
+export function jsonStringTemplate(value: string): string {
+  let out = "";
+  for (const piece of templatePieces(value)) {
+    if ("literal" in piece) out += JSON.stringify(piece.literal).slice(1, -1);
+    else out += PLAIN_PATH.test(piece.expression) ? `{{ JSON.stringify(String(${piece.expression})).slice(1, -1) }}` : piece.token;
+  }
+  return `"${out}"`;
+}
+
 function schemaTypeOf(schema: Record<string, unknown>): string | undefined {
   const raw = schema.type;
   if (typeof raw === "string") return raw;
@@ -489,7 +545,7 @@ function scalarJson(kind: string | undefined, raw: string, path: string, errors:
     errors[path] = "Use true, false or an expression";
     return undefined;
   }
-  if (kind === "string" || kind === undefined) return JSON.stringify(raw);
+  if (kind === "string" || kind === undefined) return jsonStringTemplate(raw);
   // Objects, arrays and anything else: JSON text or an expression, as written.
   if (hasTemplate(trimmed)) return trimmed;
   try {
@@ -573,16 +629,17 @@ export function jsonTemplateFromForm(
   return { template: parts.length ? `{\n  ${parts.join(",\n  ")}\n}` : "{}", errors };
 }
 
-/** Literal text is percent-encoded; an expression is kept as written (it renders at run time). */
+/**
+ * Literal text is percent-encoded; a plain-path expression is encoded when it renders (`encodeURIComponent`), so a
+ * value cannot reach another path or add query parameters. Any other expression is kept as written.
+ */
 function encodeUrlPart(value: string): string {
-  if (!hasTemplate(value)) return encodeURIComponent(value);
   let out = "";
-  let last = 0;
-  for (const match of value.matchAll(/\{\{[\s\S]*?\}\}/g)) {
-    out += encodeURIComponent(value.slice(last, match.index)) + match[0];
-    last = match.index! + match[0].length;
+  for (const piece of templatePieces(value)) {
+    if ("literal" in piece) out += encodeURIComponent(piece.literal);
+    else out += PLAIN_PATH.test(piece.expression) ? `{{ encodeURIComponent(${piece.expression}) }}` : piece.token;
   }
-  return out + encodeURIComponent(value.slice(last));
+  return out;
 }
 
 function formText(value: CatalogFormValue): string {
@@ -690,10 +747,17 @@ export function buildOperationRequest(operation: OpenApiOperation, baseUrl: stri
   return {
     method: operation.method,
     urlTemplate: `${base}${path}${query.length ? `?${query.join("&")}` : ""}`,
-    headersTemplate: JSON.stringify(headers, null, 2),
+    headersTemplate: headersJsonTemplate(headers),
     bodyTemplate,
     errors
   };
+}
+
+/** Headers as a JSON template; values go through jsonStringTemplate. */
+function headersJsonTemplate(headers: Record<string, string>): string {
+  const entries = Object.entries(headers);
+  if (!entries.length) return "{}";
+  return `{\n${entries.map(([name, value]) => `  ${JSON.stringify(name)}: ${jsonStringTemplate(value)}`).join(",\n")}\n}`;
 }
 
 /** The palette label of a catalog entry: `<source> · <item>`. */
@@ -708,7 +772,7 @@ export function readOpenApiOperationRef(config: Record<string, unknown>): OpenAp
   const specId = text(ref.specId);
   const operationId = text(ref.operationId);
   if (!specId || !operationId) return null;
-  return { specId, operationId, method: text(ref.method).toUpperCase(), path: text(ref.path) };
+  return { specId, operationId, method: text(ref.method).toUpperCase(), path: text(ref.path), baseUrl: text(ref.baseUrl) };
 }
 
 /** Reads a node's `secretAuth`; null when unset, an error string when malformed. */
@@ -752,7 +816,7 @@ export function openApiNodeConfig(specId: string, operation: OpenApiOperation, b
     responseType: "json",
     timeoutMs: 15000,
     failOnHttpError: true,
-    openapiOperation: { specId, operationId: operation.id, method: operation.method, path: operation.path },
+    openapiOperation: { specId, operationId: operation.id, method: operation.method, path: operation.path, baseUrl },
     operationValues: {},
     ...(operation.auth ? { secretAuth: operation.auth } : {})
   };

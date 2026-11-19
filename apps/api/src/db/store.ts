@@ -517,6 +517,8 @@ export interface OpenApiSpecWrite {
   specText: string;
   catalog: OpenApiCatalog;
   createdBy: string | null;
+  /** When the spec was last read; now when unset (a rename or a base URL change passes the old time). */
+  fetchedAt?: string;
 }
 
 export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentRedactionStore {

@@ -24,3 +24,16 @@ export function catalogPresets(entries: readonly CatalogPaletteEntry[]): Palette
 export function canUseIntegrationCatalog(role: string | null | undefined): boolean {
   return role === "admin" || role === "builder";
 }
+
+/**
+ * An MCP Tool node switched to one tool. A node that edits its arguments with the form starts that tool with an empty
+ * form: the previous tool's arguments mean nothing to it.
+ */
+export function withMcpToolChoice(current: Record<string, unknown>, toolName: string): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...current, toolName, allowedTools: toolName ? [toolName] : undefined };
+  if (current.toolName !== toolName && current.argValues && typeof current.argValues === "object") {
+    next.argValues = {};
+    next.argsTemplate = "{}";
+  }
+  return next;
+}

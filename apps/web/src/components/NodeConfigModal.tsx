@@ -65,6 +65,7 @@ import { McpAnnotationChips, McpOutputSchema } from "./McpToolMeta";
 import { SecretSaveWarnings } from "./SecretSaveWarnings";
 import { ModelAllowlistWarning, useModelAllowlistWarning } from "./ModelAllowlistWarning";
 import { directApiBaseUrl } from "../lib/direct-api-url";
+import { withMcpToolChoice } from "../lib/integration-catalog";
 import {
   TRIGGER_TRUST_OPTIONS,
   describeTriggerTrust,
@@ -4221,11 +4222,7 @@ export function NodeInspector({
                         name={`mcp-single-tool-${node.id}`}
                         checked={primarySelectedToolName === tool.name}
                         onChange={() =>
-                          setConfig((current) => ({
-                            ...current,
-                            toolName: tool.name,
-                            allowedTools: [tool.name]
-                          }))
+                          setConfig((current) => withMcpToolChoice(current, tool.name))
                         }
                       />
                       <span title={tool.name}>{tool.name}</span>
@@ -4239,13 +4236,7 @@ export function NodeInspector({
           <TextField
             label="Tool Name"
             value={toStringValue(config.toolName)}
-            onChange={(next) =>
-              setConfig((current) => ({
-                ...current,
-                toolName: next,
-                allowedTools: next ? [next] : undefined
-              }))
-            }
+            onChange={(next) => setConfig((current) => withMcpToolChoice(current, next))}
           />
         ) : discoveredTools.length > 0 ? (
           <>
@@ -4382,7 +4373,13 @@ export function NodeInspector({
             <ExpressionField
               label="Tool Args Template"
               value={toStringValue(config.argsTemplate, "{}")}
-              onChange={(next) => setConfig((current) => ({ ...current, argsTemplate: next }))}
+              onChange={(next) =>
+                setConfig((current) => {
+                  // Written by hand: the arguments form no longer owns the template.
+                  const { argValues: _form, ...rest } = current;
+                  return { ...rest, argsTemplate: next };
+                })
+              }
               rows={3}
               mode="template"
               previewContext={expressionPreviewContext}

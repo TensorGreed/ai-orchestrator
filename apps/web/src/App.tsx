@@ -2637,17 +2637,20 @@ function StudioApp() {
 
   const catalogProjectId = activeProjectId || null;
   const canUseCatalog = canUseIntegrationCatalog(authUser?.role);
+  // Only the latest load applies, so a slow answer for the previous project never fills this project's palette.
+  const catalogRequestRef = useRef(0);
   const reloadIntegrationCatalog = useCallback(async () => {
+    const request = ++catalogRequestRef.current;
     if (!canUseCatalog) {
       setIntegrationCatalog({ entries: [], sources: [] });
       return;
     }
     try {
       const response = await fetchIntegrationCatalog(catalogProjectId);
-      setIntegrationCatalog({ entries: response.entries, sources: response.sources });
+      if (request === catalogRequestRef.current) setIntegrationCatalog({ entries: response.entries, sources: response.sources });
     } catch {
       // The palette works without the catalog; the dialog shows its own errors.
-      setIntegrationCatalog({ entries: [], sources: [] });
+      if (request === catalogRequestRef.current) setIntegrationCatalog({ entries: [], sources: [] });
     }
   }, [canUseCatalog, catalogProjectId]);
 

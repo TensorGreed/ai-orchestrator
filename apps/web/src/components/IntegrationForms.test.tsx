@@ -48,7 +48,7 @@ describe("McpToolArgsForm", () => {
     await userEvent.type(screen.getByLabelText("precision"), "{{{{ vars.digits }}");
     const config = readConfig();
     expect(config.argValues).toEqual({ expression: "{{ webhook.sum }}", precision: "{{ vars.digits }}" });
-    expect(config.argsTemplate).toBe('{\n  "expression": "{{ webhook.sum }}",\n  "precision": {{ vars.digits }}\n}');
+    expect(config.argsTemplate).toBe('{\n  "expression": "{{ JSON.stringify(String(webhook.sum)).slice(1, -1) }}",\n  "precision": {{ vars.digits }}\n}');
     expect(screen.queryByText("Required")).not.toBeInTheDocument();
   });
 
@@ -124,7 +124,7 @@ const nodeConfig = {
   method: "PATCH",
   urlTemplate: "https://desk.example.com/api/tickets/",
   secretAuth: { type: "query", name: "api_key" },
-  openapiOperation: { specId: "oas_1", operationId: "updateTicket", method: "PATCH", path: "/tickets/{id}" },
+  openapiOperation: { specId: "oas_1", operationId: "updateTicket", method: "PATCH", path: "/tickets/{id}", baseUrl: spec.baseUrl },
   operationValues: {}
 };
 
@@ -139,9 +139,21 @@ describe("OpenApiOperationForm", () => {
     await userEvent.selectOptions(screen.getByLabelText("notify"), "true");
     await userEvent.selectOptions(screen.getByLabelText("status"), "closed");
     const config = readConfig();
-    expect(config.urlTemplate).toBe("https://desk.example.com/api/tickets/{{ webhook.id }}?notify=true");
+    expect(config.urlTemplate).toBe("https://desk.example.com/api/tickets/{{ encodeURIComponent(webhook.id) }}?notify=true");
     expect(JSON.parse(String(config.bodyTemplate))).toEqual({ status: "closed" });
     expect(config.operationValues).toEqual({ "path.id": "{{ webhook.id }}", "query.notify": true, "body.status": "closed" });
+  });
+
+  it("keeps the node's base URL when the API's changes, until someone picks the new one", async () => {
+    vi.mocked(api.fetchOpenApiSpec).mockResolvedValue({ spec: { ...specView, baseUrl: "https://other.example.net" } });
+    render(<Harness initial={nodeConfig}>{(config, setConfig) => <OpenApiOperationForm config={config} setConfig={setConfig} />}</Harness>);
+    expect(await screen.findByTestId("openapi-base-changed")).toHaveTextContent("now uses https://other.example.net");
+    await userEvent.type(screen.getByLabelText("id"), "7");
+    expect(readConfig().urlTemplate).toBe(`${spec.baseUrl}/tickets/7`);
+    await userEvent.click(screen.getByRole("button", { name: "Use the new base URL" }));
+    expect(readConfig().urlTemplate).toBe("https://other.example.net/tickets/7");
+    expect(readConfig().openapiOperation).toMatchObject({ baseUrl: "https://other.example.net" });
+    expect(screen.queryByTestId("openapi-base-changed")).not.toBeInTheDocument();
   });
 
   it("keeps the node's request when the API is gone, and can detach from it", async () => {

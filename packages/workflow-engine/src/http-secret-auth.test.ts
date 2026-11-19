@@ -19,7 +19,7 @@ function deps(): WorkflowExecutionDependencies {
     connectorRegistry: createDefaultConnectorRegistry(),
     mcpRegistry: createDefaultMCPRegistry(),
     agentRuntime: new DefaultAgentRuntime(),
-    resolveSecret: async ({ secretId }) => (secretId === "sec_key" ? "s3cr3t:pw" : undefined),
+    resolveSecret: async (reference) => (reference?.secretId === "sec_key" ? "s3cr3t:pw" : undefined),
     codeSandbox: IN_PROCESS_CODE_SANDBOX,
     outboundGuard: DEFAULT_OUTBOUND_GUARD
   };

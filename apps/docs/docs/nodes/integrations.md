@@ -30,8 +30,10 @@ Builders and admins see the section. Palette search ranks these entries with the
    JSON field.
 
 Any value may be an expression, such as `{{ webhook.ticket_id }}`. A number or true/false field takes an
-expression as is, so it renders as the value, not as text. The form writes the node's `argsTemplate`, which is
-what runs.
+expression as is, so it renders as the value, not as text. In a text field, a plain path such as
+`{{ webhook.ticket_id }}` is escaped when it renders, so a quote or a line break in the value cannot break the
+arguments; any other expression is kept as written. The form writes the node's `argsTemplate`, which is what runs.
+Picking another tool starts its form empty.
 
 **Edit as JSON** switches the node back to the plain **Tool Args Template** field. A node that writes JSON, such as
 one saved before this form existed, shows **Use a form** when its tool has a schema; it replaces the JSON (after
@@ -48,7 +50,9 @@ schedule; an admin can also refresh one from **Add an API…** (or the MCP serve
 
 Then pick an operation. The HTTP Request node shows the operation (method, path and summary) and a form with its
 **Path**, **Query** and **Headers** parameters and its **Body**. The form writes the node's URL, headers and body
-templates; **Request** under the form shows what will be sent. **Edit the request directly** turns the node into a
+templates; **Request** under the form shows what will be sent. A plain path such as `{{ webhook.id }}` in a path or
+query parameter is URL-encoded when it renders, and in a header or body text field it is escaped, so a value cannot
+reach another endpoint or add fields; any other expression is kept as written. **Edit the request directly** turns the node into a
 plain HTTP Request node with the same request.
 
 Credentials never live in the spec. Pick a **Secret** on the node. It is sent the way the spec's security scheme
@@ -84,7 +88,11 @@ Reading stops after 15 seconds or 2 MB. A URL with a user name or password is re
 
 **Refresh** reads the spec again from its URL (an uploaded spec asks for the new file) and reports the operations
 that were removed. A base URL you set stays; one that came from the spec follows it. Nodes already in workflows keep
-their request: a node whose operation was removed still runs, and its inspector says the operation is gone.
+their request and their base URL: when the API's base URL changes, the node's form says so and offers **Use the new
+base URL**, so a node's secret never goes to a new host without someone choosing it. A node whose operation was
+removed still runs, and its inspector says the operation is gone.
+
+A spec URL's query is kept for refreshing but never shown: readers see `?…` in its place.
 
 **Remove** takes the API out of the palette. Nodes made from it keep running.
 

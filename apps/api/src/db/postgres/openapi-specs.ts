@@ -32,7 +32,7 @@ export async function saveOpenApiSpec(ctx: PgContext, input: OpenApiSpecWrite): 
   const now = new Date().toISOString();
   await ctx.execute(
     `INSERT INTO openapi_specs (id, project_id, name, source_url, base_url, spec_text, catalog_json, operation_count, created_by, created_at, updated_at, fetched_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, $10)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, $11)
      ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, source_url = EXCLUDED.source_url, base_url = EXCLUDED.base_url,
        spec_text = EXCLUDED.spec_text, catalog_json = EXCLUDED.catalog_json, operation_count = EXCLUDED.operation_count,
        updated_at = EXCLUDED.updated_at, fetched_at = EXCLUDED.fetched_at`,
@@ -46,7 +46,8 @@ export async function saveOpenApiSpec(ctx: PgContext, input: OpenApiSpecWrite): 
       JSON.stringify(input.catalog),
       input.catalog.operations.length,
       input.createdBy,
-      now
+      now,
+      input.fetchedAt ?? now
     ]
   );
   return (await getOpenApiSpec(ctx, input.id))!;

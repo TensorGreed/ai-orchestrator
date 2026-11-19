@@ -126,12 +126,23 @@ function displayUrl(raw: string): string {
   }
 }
 
+/** A spec URL as readers see it: a query (which may hold a key) is shown as `?…`. The stored URL keeps it for refresh. */
+function shownSourceUrl(raw: string | null): string | null {
+  if (!raw) return raw;
+  try {
+    const url = new URL(raw);
+    return `${url.protocol}//${url.host}${url.pathname}${url.search ? "?…" : ""}`;
+  } catch {
+    return null;
+  }
+}
+
 export function specView(record: OpenApiSpecRecord, options: { operations: boolean }) {
   return {
     id: record.id,
     projectId: record.projectId,
     name: record.name,
-    sourceUrl: record.sourceUrl,
+    sourceUrl: shownSourceUrl(record.sourceUrl),
     baseUrl: record.baseUrl,
     title: record.catalog.title,
     version: record.catalog.version,
@@ -243,7 +254,7 @@ export function registerIntegrationCatalogRoutes(deps: IntegrationCatalogDeps): 
       }
     }
     for (const spec of await store.listOpenApiSpecs(projectId)) {
-      sources.push({ kind: "openapi_spec", id: spec.id, name: spec.name, itemCount: spec.operationCount, refreshedAt: spec.fetchedAt, sourceUrl: spec.sourceUrl, projectId: spec.projectId });
+      sources.push({ kind: "openapi_spec", id: spec.id, name: spec.name, itemCount: spec.operationCount, refreshedAt: spec.fetchedAt, sourceUrl: shownSourceUrl(spec.sourceUrl), projectId: spec.projectId });
       for (const operation of spec.catalog.operations) {
         entries.push({
           key: `openapi:${spec.id}:${operation.id}`,
@@ -347,7 +358,8 @@ export function registerIntegrationCatalogRoutes(deps: IntegrationCatalogDeps): 
         baseUrl,
         specText,
         catalog: record.catalog,
-        createdBy: record.createdBy
+        createdBy: record.createdBy,
+        fetchedAt: record.fetchedAt
       });
       await deps.auditUser(request, user, {
         category: "project",

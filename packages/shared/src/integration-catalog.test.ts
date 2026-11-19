@@ -129,14 +129,17 @@ describe("buildOperationRequest", () => {
     expect(get.urlTemplate).toBe("https://eu.tickets.example.com/v1/tickets/a%20b%2Fc");
     expect(get.errors).toEqual({});
     const templated = buildOperationRequest(getOne!, catalog.baseUrl, { "path.ticketId": "id-{{ webhook.id }}" });
-    expect(templated.urlTemplate).toBe("https://eu.tickets.example.com/v1/tickets/id-{{ webhook.id }}");
+    // A plain path is encoded when it renders; any other expression is kept as written.
+    expect(templated.urlTemplate).toBe("https://eu.tickets.example.com/v1/tickets/id-{{ encodeURIComponent(webhook.id) }}");
+    const custom = buildOperationRequest(getOne!, catalog.baseUrl, { "path.ticketId": "{{ $json.id }}" });
+    expect(custom.urlTemplate).toBe("https://eu.tickets.example.com/v1/tickets/{{ $json.id }}");
     const listed = buildOperationRequest(list!, catalog.baseUrl + "/", { "query.limit": "10" });
     expect(listed.urlTemplate).toBe("https://eu.tickets.example.com/v1/tickets?limit=10");
     expect(JSON.parse(listed.headersTemplate)).toEqual({ Accept: "application/json" });
     expect(listed.bodyTemplate).toBe("");
     const deleted = buildOperationRequest(remove!, catalog.baseUrl, { "path.ticketId": "7", "header.X-Trace": "{{ vars.trace }}" });
     expect(deleted.method).toBe("DELETE");
-    expect(JSON.parse(deleted.headersTemplate)).toEqual({ "X-Trace": "{{ vars.trace }}", Accept: "application/json" });
+    expect(JSON.parse(deleted.headersTemplate)).toEqual({ "X-Trace": "{{ JSON.stringify(String(vars.trace)).slice(1, -1) }}", Accept: "application/json" });
   });
 
   it("reports required values that are missing", () => {
@@ -155,7 +158,7 @@ describe("buildOperationRequest", () => {
     expect(built.errors).toEqual({});
     expect(built.method).toBe("POST");
     expect(built.bodyTemplate).toContain('"priority": {{ webhook.priority }}');
-    const rendered = built.bodyTemplate.replace("{{ webhook.priority }}", "3").replace("{{ webhook.room }}", "B2");
+    const rendered = built.bodyTemplate.replace("{{ webhook.priority }}", "3").replace("{{ JSON.stringify(String(webhook.room)).slice(1, -1) }}", "B2");
     expect(JSON.parse(rendered)).toEqual({ title: 'Printer "jam" B2', priority: 3, urgent: true, labels: ["ops", "hw"], owner: { email: "a@example.com" } });
     expect(JSON.parse(built.headersTemplate)["Content-Type"]).toBe("application/json");
   });
@@ -205,7 +208,8 @@ describe("helpers", () => {
       specId: "s",
       operationId: "o",
       method: "GET",
-      path: "/x"
+      path: "/x",
+      baseUrl: ""
     });
     expect(readOpenApiOperationRef({ openapiOperation: { specId: "s" } })).toBeNull();
     expect(readHttpSecretAuth(undefined)).toBeNull();
@@ -238,5 +242,27 @@ describe("operationFormSchema", () => {
     // Started one level down (an operation body), c sits at level 3 and still has fields; one more level would be JSON.
     const deeper = { type: "object", properties: { a: { type: "object", properties: { b: { type: "object", properties: { c: { type: "object", properties: { d: { type: "object", properties: { e: { type: "string" } } } } } } } } } } };
     expect(JSON.parse(jsonTemplateFromForm(deeper, { "a.b.c.d": '{"e":"y"}' }, { startLevel: 1 }).template)).toEqual({ a: { b: { c: { d: { e: "y" } } } } });
+  });
+});
+
+describe("schemas that expand too far", () => {
+  it("refuses a small spec whose references grow exponentially", () => {
+    const schemas: Record<string, unknown> = {};
+    for (let level = 0; level < 7; level += 1) {
+      const properties: Record<string, unknown> = {};
+      for (let index = 0; index < 10; index += 1) properties[`p${index}`] = level < 6 ? { $ref: `#/components/schemas/S${level + 1}` } : { type: "string" };
+      schemas[`S${level}`] = { type: "object", properties };
+    }
+    const document = {
+      openapi: "3.0.3",
+      info: { title: "Bomb", version: "1" },
+      servers: [{ url: "https://bomb.example.com" }],
+      paths: { "/x": { post: { operationId: "x", requestBody: { content: { "application/json": { schema: { $ref: "#/components/schemas/S0" } } } } } } },
+      components: { schemas }
+    };
+    expect(JSON.stringify(document).length).toBeLessThan(5000);
+    const started = Date.now();
+    expect(() => parseOpenApiDocument(document)).toThrow(/expand too far/);
+    expect(Date.now() - started).toBeLessThan(3000);
   });
 });

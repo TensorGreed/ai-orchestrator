@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canUseIntegrationCatalog, catalogPresets, INTEGRATION_CATALOG_CATEGORY } from "./integration-catalog";
+import { canUseIntegrationCatalog, catalogPresets, INTEGRATION_CATALOG_CATEGORY, withMcpToolChoice } from "./integration-catalog";
 
 describe("catalogPresets", () => {
   it("turns catalog entries into palette presets of the MCP Tool and HTTP Request nodes", () => {
@@ -49,5 +49,18 @@ describe("catalogPresets", () => {
 
   it("is for builders and admins", () => {
     expect(["admin", "builder", "operator", "viewer", null].map(canUseIntegrationCatalog)).toEqual([true, true, false, false, false]);
+  });
+});
+
+describe("withMcpToolChoice", () => {
+  it("starts a form node's new tool with empty arguments, and leaves JSON nodes alone", () => {
+    expect(withMcpToolChoice({ toolName: "a", argValues: { x: "1" }, argsTemplate: '{"x":"1"}' }, "b")).toEqual({
+      toolName: "b",
+      allowedTools: ["b"],
+      argValues: {},
+      argsTemplate: "{}"
+    });
+    expect(withMcpToolChoice({ toolName: "a", argValues: { x: "1" }, argsTemplate: '{"x":"1"}' }, "a")).toMatchObject({ argValues: { x: "1" } });
+    expect(withMcpToolChoice({ toolName: "a", argsTemplate: '{"x":"1"}' }, "b")).toEqual({ toolName: "b", allowedTools: ["b"], argsTemplate: '{"x":"1"}' });
   });
 });

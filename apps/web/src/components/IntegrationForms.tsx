@@ -199,7 +199,12 @@ export function OpenApiOperationForm({ config, setConfig }: OpenApiOperationForm
   const schema = useMemo(() => (operation ? operationFormSchema(operation) : null), [operation]);
   const model = useMemo(() => (schema ? buildSchemaForm(schema) : null), [schema]);
   const values = readFormValues(config.operationValues);
-  const baseUrl = state.status === "ready" ? state.spec.baseUrl : "";
+  const apiBaseUrl = state.status === "ready" ? state.spec.baseUrl : "";
+  // The node keeps the base URL it was made with: a base URL changed on the API later is offered, never applied
+  // silently, so the node's secret does not go to a new host without someone choosing it.
+  const nodeBaseUrl = ref?.baseUrl ?? "";
+  const baseUrl = nodeBaseUrl || apiBaseUrl;
+  const baseChanged = Boolean(nodeBaseUrl && apiBaseUrl && nodeBaseUrl !== apiBaseUrl);
   const errors = useMemo(() => (operation ? buildOperationRequest(operation, baseUrl, values).errors : {}), [operation, baseUrl, values]);
 
   if (!ref) return null;
@@ -264,19 +269,24 @@ export function OpenApiOperationForm({ config, setConfig }: OpenApiOperationForm
           onChange={(path, value) =>
             setConfig((current) => {
               const nextValues = withValue(readFormValues(current.operationValues), path, value);
-              const request = buildOperationRequest(operation, baseUrl, nextValues);
-              return {
-                ...current,
-                operationValues: nextValues,
-                method: request.method,
-                urlTemplate: request.urlTemplate,
-                headersTemplate: request.headersTemplate,
-                bodyTemplate: request.bodyTemplate
-              };
+              return withOperationRequest(current, operation, baseUrl, nextValues);
             })
           }
         />
       )}
+      {baseChanged ? (
+        <div className="cfg-tip" data-testid="openapi-base-changed">
+          {state.status === "ready" ? state.spec.name : "The API"} now uses <code>{apiBaseUrl}</code>. This node still sends to{" "}
+          <code>{nodeBaseUrl}</code>.{" "}
+          <button
+            type="button"
+            className="insp-btn"
+            onClick={() => setConfig((current) => withOperationRequest(current, operation, apiBaseUrl, readFormValues(current.operationValues)))}
+          >
+            Use the new base URL
+          </button>
+        </div>
+      ) : null}
       <div className="cfg-tip">
         {EXPRESSION_HINT}
         {!baseUrl ? " The API has no base URL yet: set it under Add an API… in the palette." : null}
@@ -292,6 +302,21 @@ export function OpenApiOperationForm({ config, setConfig }: OpenApiOperationForm
       </details>
     </div>
   );
+}
+
+/** The node's request rebuilt from the operation's form, with the base URL it now sends to recorded on the node. */
+function withOperationRequest(current: Config, operation: OpenApiOperation, baseUrl: string, values: CatalogFormValues): Config {
+  const request = buildOperationRequest(operation, baseUrl, values);
+  const ref = isRecord(current.openapiOperation) ? current.openapiOperation : {};
+  return {
+    ...current,
+    openapiOperation: { ...ref, method: operation.method, path: operation.path, baseUrl },
+    operationValues: values,
+    method: request.method,
+    urlTemplate: request.urlTemplate,
+    headersTemplate: request.headersTemplate,
+    bodyTemplate: request.bodyTemplate
+  };
 }
 
 function toText(value: unknown): string {

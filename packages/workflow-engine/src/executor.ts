@@ -4732,9 +4732,11 @@ async function executeNodeHandler(
         } else if (auth.type === "query") {
           secretStaysOnOrigin = true;
           try {
+            // Appended to the query as written, so the URL's other parameters keep their encoding.
             const withKey = new URL(renderedUrl);
-            withKey.searchParams.append(auth.name, secretValue);
-            requestUrl = withKey.toString();
+            withKey.hash = "";
+            const pair = `${encodeURIComponent(auth.name)}=${encodeURIComponent(secretValue)}`;
+            requestUrl = `${withKey.origin}${withKey.pathname}${withKey.search ? `${withKey.search}&` : "?"}${pair}`;
           } catch {
             throw new Error(`HTTP Request ${safeMethod} ${urlForActivity(renderedUrl)}: the URL is not valid, so the secret could not be added to its query.`);
           }

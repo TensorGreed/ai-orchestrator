@@ -8863,7 +8863,7 @@ export class SqliteStore implements Store {
         input.createdBy,
         now,
         now,
-        now
+        input.fetchedAt ?? now
       ]
     );
     this.persist();
