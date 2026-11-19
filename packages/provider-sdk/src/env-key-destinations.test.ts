@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "@ai-orchestrator/shared";
-import { envKeyMayGoTo, parseEnvKeyBaseUrls } from "./default-base-urls";
+import { envKeyMayGoTo, parseEnvKeyBaseUrls, urlUnderBaseUrl } from "./default-base-urls";
 import { createGatedEmbeddingRegistry } from "./gated-registry";
 import { createDefaultEmbeddingRegistry } from "./embeddings";
 import { createDefaultProviderRegistry } from "./index";
@@ -90,6 +90,24 @@ describe("envKeyMayGoTo", () => {
     expect(envKeyMayGoTo("openai", "https://gateway.example.net/v1/acct-a/gw-evil/openai", env)).toBe(false);
     expect(envKeyMayGoTo("openai", "https://gateway.example.net/v1/acct-b/gw/openai", env)).toBe(false);
     expect(envKeyMayGoTo("openai", "https://gateway.example.net/", env)).toBe(false);
+  });
+
+  it("refuses percent-encoded separators under a listed path, which a gateway could decode into another path", () => {
+    const env = { PROVIDER_ENV_KEY_BASE_URLS: "https://gateway.example.net/tenant-a/v1" };
+    expect(envKeyMayGoTo("openai", "https://gateway.example.net/tenant-a/v1/deployments", env)).toBe(true);
+    for (const escape of ["..%2f..%2ftenant-b", "%2e%2e/%2e%2e/tenant-b", "..%2F..%2Ftenant-b", "..%5c..%5ctenant-b"]) {
+      expect(envKeyMayGoTo("openai", `https://gateway.example.net/tenant-a/v1/${escape}`, env), escape).toBe(false);
+    }
+    // An entry without a path covers its whole origin, so nothing to escape from.
+    expect(envKeyMayGoTo("openai", "https://gw.example.com/a%2fb", { PROVIDER_ENV_KEY_BASE_URLS: "https://gw.example.com" })).toBe(true);
+  });
+
+  it("refuses an entry with a user name or password, without echoing it", () => {
+    const parsed = parseEnvKeyBaseUrls("openai=https://user:hunter2@gw.example/v1");
+    expect(parsed.entries).toEqual([]);
+    expect(parsed.errors).toHaveLength(1);
+    expect(parsed.errors[0]).toMatch(/user name or password/);
+    expect(parsed.errors[0]).not.toContain("hunter2");
   });
 
   it("allows EVAL_JUDGE_BASE_URL only when EVAL_JUDGE_ALLOW_ENV_CREDENTIALS is on", () => {
@@ -295,5 +313,20 @@ describe("gated embedding registry", () => {
     expect(calls).toEqual(["ollama:embed", "ollama:embed"]);
     expect(global).toEqual([]);
     expect(gated.ids()).toEqual(base.ids());
+  });
+});
+
+describe("urlUnderBaseUrl (operator endpoints)", () => {
+  it("matches same origin under the base path at a segment boundary", () => {
+    expect(urlUnderBaseUrl("https://gw.example/tenant-a/v1/embeddings", "https://gw.example/tenant-a/v1")).toBe(true);
+    expect(urlUnderBaseUrl("https://gw.example/tenant-a/v1/embeddings?api-version=2024-02-01", "https://gw.example/tenant-a/v1")).toBe(true);
+    expect(urlUnderBaseUrl("https://gw.example/tenant-b/v1/embeddings", "https://gw.example/tenant-a/v1")).toBe(false);
+    expect(urlUnderBaseUrl("https://gw.example/tenant-a/v1x", "https://gw.example/tenant-a/v1")).toBe(false);
+    expect(urlUnderBaseUrl("https://other.example/tenant-a/v1", "https://gw.example/tenant-a/v1")).toBe(false);
+  });
+
+  it("never matches a URL whose path was cut short by a query or fragment", () => {
+    expect(urlUnderBaseUrl("http://localhost:11434/api/delete?/embeddings", "http://localhost:11434")).toBe(false);
+    expect(urlUnderBaseUrl("http://localhost:11434/api/x#/embeddings", "http://localhost:11434")).toBe(false);
   });
 });

@@ -5796,6 +5796,20 @@ async function executeNodeHandler(
       const embedderId = typeof config.embedderId === "string" ? config.embedderId : "token-embedder";
       const vectorStoreId = typeof config.vectorStoreId === "string" ? config.vectorStoreId : "in-memory-vector-store";
       const vectorStoreConfig = toRecord(config.vectorStoreConfig);
+      // An endpoint or base URL is text. Anything else set there is refused, so it can never be turned into a URL
+      // later while the node is treated as having none (and given the deployment's key).
+      for (const key of ["endpoint", "baseUrl"] as const) {
+        const value = vectorStoreConfig[key];
+        if (value !== undefined && value !== null && typeof value !== "string") {
+          throw new WorkflowError(
+            `The vector store setting "${key}" must be text.`,
+            ErrorCategory.NODE_CONFIG,
+            false,
+            { field: key },
+            `Set "${key}" in the node's vector store settings to a URL, or remove it.`
+          );
+        }
+      }
       // An endpoint or baseUrl set on the node (not a deployment env fallback) goes through the outbound URL checks.
       const nodeFetch = (key: "endpoint" | "baseUrl") =>
         typeof vectorStoreConfig[key] === "string" && String(vectorStoreConfig[key]).trim() ? guardedRagFetch(dependencies) : undefined;
@@ -5813,7 +5827,12 @@ async function executeNodeHandler(
         if (embedderId === "token-embedder") embedder = new TokenEmbeddingAdapter();
         else if (embedderId === "openai-embedder") {
            const apiKey = await ragKey("OPENAI_API_KEY", "baseUrl");
-           embedder = new OpenAIEmbeddingAdapter({ apiKey: apiKey || "", ...vectorStoreConfig, fetcher: nodeFetch("baseUrl") });
+           embedder = new OpenAIEmbeddingAdapter({
+             apiKey: apiKey || "",
+             baseUrl: typeof vectorStoreConfig.baseUrl === "string" && vectorStoreConfig.baseUrl.trim() ? vectorStoreConfig.baseUrl : undefined,
+             model: typeof vectorStoreConfig.model === "string" ? vectorStoreConfig.model : undefined,
+             fetcher: nodeFetch("baseUrl")
+           });
         } else if (embedderId === "azure-openai-embedder") {
            const apiKey = await ragKey("AZURE_OPENAI_API_KEY", "endpoint");
            const endpoint = typeof vectorStoreConfig.endpoint === "string" ? vectorStoreConfig.endpoint : process.env.AZURE_OPENAI_ENDPOINT;

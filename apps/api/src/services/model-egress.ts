@@ -1,5 +1,5 @@
 import type { DnsResolver } from "@ai-orchestrator/guard-sdk";
-import { parseEnvKeyBaseUrls, type ProviderExecutionContext, type ProviderFetch } from "@ai-orchestrator/provider-sdk";
+import { parseEnvKeyBaseUrls, providerDefaultBaseUrl, urlUnderBaseUrl, type ProviderExecutionContext, type ProviderFetch } from "@ai-orchestrator/provider-sdk";
 import { checkOutboundUrl, guardedFetch, nodeDnsResolver, OutboundUrlBlockedError, type OutboundGuardConfig } from "@ai-orchestrator/workflow-engine";
 
 /**
@@ -23,7 +23,7 @@ export interface ModelEgressOptions {
 
 export interface ModelEgress {
   /** The context a call with `provider` runs with (pinned `fetch` for a node-chosen URL), or a thrown block. */
-  contextFor<C extends ProviderExecutionContext | undefined>(provider: { baseUrl?: unknown; extra?: unknown }, context: C): Promise<C | ProviderExecutionContext>;
+  contextFor<C extends ProviderExecutionContext | undefined>(provider: { providerId?: unknown; baseUrl?: unknown; extra?: unknown }, context: C): Promise<C | ProviderExecutionContext>;
   /** The pinned, checked fetch (no redirects) for a URL a node or request chose. */
   fetch: ProviderFetch;
   /** Whether `url` is on an endpoint the operator set in the environment. */
@@ -51,18 +51,15 @@ export class ModelRedirectRefusedError extends Error {
 export function createModelEgress(options: ModelEgressOptions): ModelEgress {
   const resolver = options.resolver ?? nodeDnsResolver;
   const env = () => options.env ?? process.env;
-  const operatorOrigins = (): Set<string> => {
+  // The operator's own model endpoints: a base URL under one of them (same origin, under its path) is the operator's
+  // choice, not a builder's, and skips the per-call checks. A base URL with a query or fragment never matches.
+  const operatorBaseUrls = (): string[] => {
     const values = env();
-    return new Set(
-      [values.OLLAMA_BASE_URL, values.AZURE_OPENAI_ENDPOINT, values.EVAL_JUDGE_BASE_URL, ...parseEnvKeyBaseUrls(values.PROVIDER_ENV_KEY_BASE_URLS).entries.map((entry) => entry.url)]
-        .map((value) => originOf(value))
-        .filter(Boolean)
-    );
+    return [values.OLLAMA_BASE_URL, values.AZURE_OPENAI_ENDPOINT, values.EVAL_JUDGE_BASE_URL, ...parseEnvKeyBaseUrls(values.PROVIDER_ENV_KEY_BASE_URLS).entries.map((entry) => entry.url)]
+      .filter((value): value is string => Boolean(originOf(value)))
+      .map((value) => value.trim());
   };
-  const isOperatorUrl = (url: string): boolean => {
-    const origin = originOf(url);
-    return Boolean(origin) && operatorOrigins().has(origin);
-  };
+  const isOperatorUrl = (url: string): boolean => Boolean(originOf(url)) && operatorBaseUrls().some((base) => urlUnderBaseUrl(url.trim(), base));
   const pinnedFetch: ProviderFetch = async (url, init) =>
     await guardedFetch(url, init, {
       config: options.guard,
@@ -77,10 +74,16 @@ export function createModelEgress(options: ModelEgressOptions): ModelEgress {
     isOperatorUrl,
     async contextFor(provider, context) {
       const extra = provider.extra && typeof provider.extra === "object" ? (provider.extra as Record<string, unknown>) : {};
-      const targets = [provider.baseUrl, extra.endpoint]
+      // Ollama with no base URL and no OLLAMA_BASE_URL falls back to the adapter's localhost default: nobody chose that
+      // address, so it is checked (and pinned) like a URL a node names, and OUTBOUND_DENY_PRIVATE applies to it.
+      const hasBaseUrl = typeof provider.baseUrl === "string" && provider.baseUrl.trim().length > 0;
+      const ollamaDefault =
+        provider.providerId === "ollama" && !hasBaseUrl && !(env().OLLAMA_BASE_URL ?? "").trim() ? providerDefaultBaseUrl("ollama", {}) : undefined;
+      const targets = [provider.baseUrl, extra.endpoint, ollamaDefault]
         .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
         .map((value) => value.trim())
-        .filter((value) => !isOperatorUrl(value));
+        // A base URL is never meant to carry a query or fragment; one that does is not the operator's.
+        .filter((value) => /[?#]/.test(value) || !isOperatorUrl(value));
       if (targets.length === 0) return context;
       // Base URLs are never templated, so "{{" is literal text and is checked like any other URL. Checked here so a
       // block fails before any request (with the policy's message); the pinned fetch checks every request again.

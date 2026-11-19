@@ -151,6 +151,28 @@ describe("model egress pins model calls to the checked address", () => {
     expect(answer.content).toBe("pinned ok");
   });
 
+  it("an operator endpoint covers only its own path; another path or a base URL with a query is checked like any other", async () => {
+    const egress = createModelEgress({
+      guard: { denyPrivate: true, allowlist: [] },
+      resolver: rebindingResolver("127.0.0.1", 99, "127.0.0.1"),
+      env: { PROVIDER_ENV_KEY_BASE_URLS: "http://127.0.0.1:9/tenant-a/v1" }
+    });
+    expect(await egress.contextFor({ baseUrl: "http://127.0.0.1:9/tenant-a/v1" }, withSecret)).toBe(withSecret);
+    expect(egress.isOperatorUrl("http://127.0.0.1:9/tenant-a/v1/embeddings")).toBe(true);
+    expect(egress.isOperatorUrl("http://127.0.0.1:9/tenant-b/v1/embeddings")).toBe(false);
+    await expect(egress.contextFor({ baseUrl: "http://127.0.0.1:9/tenant-b/v1" }, withSecret)).rejects.toThrow(/OUTBOUND_DENY_PRIVATE/);
+    await expect(egress.contextFor({ baseUrl: "http://127.0.0.1:9/tenant-a/v1?" }, withSecret)).rejects.toThrow(/OUTBOUND_DENY_PRIVATE/);
+  });
+
+  it("checks Ollama's localhost fallback when no base URL and no OLLAMA_BASE_URL are set", async () => {
+    const egress = createModelEgress({ guard: { denyPrivate: true, allowlist: [] }, resolver: rebindingResolver("127.0.0.1", 99, "127.0.0.1"), env: {} });
+    await expect(egress.contextFor({ providerId: "ollama" }, withSecret)).rejects.toThrow(/loopback|blocked|OUTBOUND_DENY_PRIVATE/i);
+    // With OLLAMA_BASE_URL set, the operator chose it; other providers' defaults are public vendor hosts.
+    const operator = createModelEgress({ guard: { denyPrivate: true, allowlist: [] }, resolver: rebindingResolver("127.0.0.1", 99, "127.0.0.1"), env: { OLLAMA_BASE_URL: "http://127.0.0.1:9/v1" } });
+    expect(await operator.contextFor({ providerId: "ollama" }, withSecret)).toBe(withSecret);
+    expect(await egress.contextFor({ providerId: "openai" }, withSecret)).toBe(withSecret);
+  });
+
   it("checks extra.endpoint as well as the base URL", async () => {
     const egress = createModelEgress({ guard: { denyPrivate: false, allowlist: [] }, resolver: rebindingResolver("127.0.0.1", 99, "127.0.0.1"), env: {} });
     await expect(egress.contextFor({ extra: { endpoint: "http://169.254.169.254" } }, withSecret)).rejects.toThrow(/link local|metadata/i);

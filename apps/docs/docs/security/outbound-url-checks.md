@@ -43,12 +43,17 @@ host name, so TLS (SNI and the certificate check) and the `Host` header are
 the name's. Model calls never follow redirects. Base URLs that come from the
 server's environment (`OLLAMA_BASE_URL`, `AZURE_OPENAI_ENDPOINT`,
 `EVAL_JUDGE_BASE_URL`, `PROVIDER_ENV_KEY_BASE_URLS`) and each provider's own
-default endpoint are neither checked nor pinned.
+default endpoint are neither checked nor pinned. That covers only URLs under
+the configured URL's path: another path on the same host, or a base URL with a
+query or fragment, is checked like any other. Ollama's built-in localhost
+default (used when neither the node nor `OLLAMA_BASE_URL` names one) is
+checked too, so with `OUTBOUND_DENY_PRIVATE` on, set `OLLAMA_BASE_URL`.
 
 A server model key (`OPENAI_API_KEY` and the rest) is only ever sent to that
 provider's own endpoint, to `AZURE_OPENAI_ENDPOINT` for Azure OpenAI, to a
 base URL under one listed in `PROVIDER_ENV_KEY_BASE_URLS` (same origin, and a
-path under the listed path), or to `EVAL_JUDGE_BASE_URL` when
+path under the listed path, without percent-encoded `/`, `\` or `.` below
+it), or to `EVAL_JUDGE_BASE_URL` when
 `EVAL_JUDGE_ALLOW_ENV_CREDENTIALS` is on; a node with any other base URL must
 use a secret. A `PROVIDER_ENV_KEY_BASE_URLS` entry written
 `openai=https://gw.example/v1` is for that provider's key only. A bare URL

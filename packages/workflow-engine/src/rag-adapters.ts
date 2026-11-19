@@ -1,6 +1,23 @@
 import type { ConnectorDocument, LLMProviderConfig } from "@ai-orchestrator/shared";
 import type { EmbeddingProviderAdapter, EmbeddingProviderRegistry, EmbeddingResponse, ProviderExecutionContext } from "@ai-orchestrator/provider-sdk";
+import { readResponseText } from "@ai-orchestrator/provider-sdk";
 import pg from "pg";
+
+// Embedding, vector store and rerank services can sit at a URL a node chose: their answers are read with the same 8 MB
+// cap and time limit as model calls, and an error quotes at most 500 characters of the body.
+const RAG_READ_TIMEOUT_MS = 120_000;
+const RAG_ERROR_DETAIL_CHARS = 500;
+async function boundedJson(response: Response): Promise<any> {
+  return JSON.parse(await readResponseText(response, { timeoutMs: RAG_READ_TIMEOUT_MS, provider: "The embedding or vector store service" }));
+}
+async function errorDetail(response: Response): Promise<string> {
+  try {
+    const text = await readResponseText(response, { timeoutMs: RAG_READ_TIMEOUT_MS, provider: "The embedding or vector store service" });
+    return text.length > RAG_ERROR_DETAIL_CHARS ? `${text.slice(0, RAG_ERROR_DETAIL_CHARS)}…` : text;
+  } catch {
+    return "(the response body could not be read)";
+  }
+}
 
 /** One embedded text, with what the provider reported about the call when it reported it. */
 export interface EmbeddedText {
@@ -191,10 +208,10 @@ export class OpenAIEmbeddingAdapter implements EmbeddingAdapter {
     });
 
     if (!response.ok) {
-      throw new Error(`OpenAI Embedding API error: ${response.statusText} - ${await response.text()}`);
+      throw new Error(`OpenAI Embedding API error: ${response.statusText} - ${await errorDetail(response)}`);
     }
 
-    const data = (await response.json()) as { data: Array<{ embedding: number[] }>; usage?: { prompt_tokens?: unknown; total_tokens?: unknown }; model?: unknown };
+    const data = (await boundedJson(response)) as { data: Array<{ embedding: number[] }>; usage?: { prompt_tokens?: unknown; total_tokens?: unknown }; model?: unknown };
     return { vector: data.data[0]?.embedding || [], ...openAIShapedDetails(data) };
   }
 }
@@ -250,10 +267,10 @@ export class AzureOpenAIEmbeddingAdapter implements EmbeddingAdapter {
     );
 
     if (!response.ok) {
-      throw new Error(`Azure OpenAI Embedding API error: ${response.statusText} - ${await response.text()}`);
+      throw new Error(`Azure OpenAI Embedding API error: ${response.statusText} - ${await errorDetail(response)}`);
     }
 
-    const data = (await response.json()) as { data: Array<{ embedding: number[] }>; usage?: { prompt_tokens?: unknown; total_tokens?: unknown }; model?: unknown };
+    const data = (await boundedJson(response)) as { data: Array<{ embedding: number[] }>; usage?: { prompt_tokens?: unknown; total_tokens?: unknown }; model?: unknown };
     return { vector: data.data[0]?.embedding || [], ...openAIShapedDetails(data) };
   }
 }
@@ -344,7 +361,7 @@ export class PineconeVectorStoreAdapter implements VectorStoreAdapter {
     });
 
     if (!response.ok) {
-       throw new Error(`Pinecone upsert failed: ${await response.text()}`);
+       throw new Error(`Pinecone upsert failed: ${await errorDetail(response)}`);
     }
   }
 
@@ -367,10 +384,10 @@ export class PineconeVectorStoreAdapter implements VectorStoreAdapter {
     });
 
     if (!response.ok) {
-      throw new Error(`Pinecone query failed: ${await response.text()}`);
+      throw new Error(`Pinecone query failed: ${await errorDetail(response)}`);
     }
 
-    const json = (await response.json()) as any;
+    const json = (await boundedJson(response)) as any;
     return json.matches.map((match: any) => ({
       id: match.id,
       text: match.metadata.text,
@@ -522,7 +539,7 @@ export class AzureAiSearchVectorStoreAdapter implements VectorStoreAdapter {
     });
 
     if (!response.ok) {
-      throw new Error(`Azure AI Search upsert failed: ${await response.text()}`);
+      throw new Error(`Azure AI Search upsert failed: ${await errorDetail(response)}`);
     }
   }
 
@@ -557,10 +574,10 @@ export class AzureAiSearchVectorStoreAdapter implements VectorStoreAdapter {
     });
 
     if (!response.ok) {
-      throw new Error(`Azure AI Search query failed: ${await response.text()}`);
+      throw new Error(`Azure AI Search query failed: ${await errorDetail(response)}`);
     }
 
-    const json = (await response.json()) as Record<string, unknown>;
+    const json = (await boundedJson(response)) as Record<string, unknown>;
     const value = Array.isArray(json.value) ? (json.value as Array<Record<string, unknown>>) : [];
 
     return value.map((entry, index) => ({
@@ -642,7 +659,7 @@ export class QdrantVectorStoreAdapter implements VectorStoreAdapter {
     });
 
     if (!response.ok) {
-      throw new Error(`Qdrant upsert failed: ${await response.text()}`);
+      throw new Error(`Qdrant upsert failed: ${await errorDetail(response)}`);
     }
   }
 
@@ -666,10 +683,10 @@ export class QdrantVectorStoreAdapter implements VectorStoreAdapter {
     });
 
     if (!response.ok) {
-      throw new Error(`Qdrant search failed: ${await response.text()}`);
+      throw new Error(`Qdrant search failed: ${await errorDetail(response)}`);
     }
 
-    const json = (await response.json()) as Record<string, unknown>;
+    const json = (await boundedJson(response)) as Record<string, unknown>;
     const result = Array.isArray(json.result) ? (json.result as Array<Record<string, unknown>>) : [];
     return result.map((entry, index) => {
       const payload = asRecord(entry.payload);
@@ -710,7 +727,7 @@ export class CohereEmbeddingAdapter implements EmbeddingAdapter {
       body: JSON.stringify({ texts: [text], model, input_type: "search_document", truncate: "END" })
     });
     if (!res.ok) throw new Error(`Cohere embedding failed (${res.status})`);
-    const json = await res.json() as { embeddings?: number[][]; meta?: { billed_units?: { input_tokens?: unknown } } };
+    const json = await boundedJson(res) as { embeddings?: number[][]; meta?: { billed_units?: { input_tokens?: unknown } } };
     const inputTokens = json.meta?.billed_units?.input_tokens;
     return { vector: json.embeddings?.[0] ?? [], ...(typeof inputTokens === "number" ? { usage: { inputTokens } } : {}) };
   }
@@ -734,7 +751,7 @@ export class MistralEmbeddingAdapter implements EmbeddingAdapter {
       body: JSON.stringify({ model, input: [text] })
     });
     if (!res.ok) throw new Error(`Mistral embedding failed (${res.status})`);
-    const json = await res.json() as { data?: Array<{ embedding: number[] }>; usage?: { prompt_tokens?: unknown; total_tokens?: unknown }; model?: unknown };
+    const json = await boundedJson(res) as { data?: Array<{ embedding: number[] }>; usage?: { prompt_tokens?: unknown; total_tokens?: unknown }; model?: unknown };
     return { vector: json.data?.[0]?.embedding ?? [], ...openAIShapedDetails(json) };
   }
 }
@@ -754,7 +771,7 @@ export class GoogleVertexEmbeddingAdapter implements EmbeddingAdapter {
       body: JSON.stringify({ model: `models/${model}`, content: { parts: [{ text }] } })
     });
     if (!res.ok) throw new Error(`Google embedding failed (${res.status})`);
-    const json = await res.json() as { embedding?: { values: number[] } };
+    const json = await boundedJson(res) as { embedding?: { values: number[] } };
     return json.embedding?.values ?? [];
   }
 }
@@ -774,7 +791,7 @@ export class HuggingFaceEmbeddingAdapter implements EmbeddingAdapter {
       body: JSON.stringify({ inputs: text, options: { wait_for_model: true } })
     });
     if (!res.ok) throw new Error(`HuggingFace embedding failed (${res.status})`);
-    const json = await res.json() as number[] | number[][];
+    const json = await boundedJson(res) as number[] | number[][];
     return Array.isArray(json[0]) ? (json as number[][])[0] : json as number[];
   }
 }
@@ -813,7 +830,7 @@ export class ChromaVectorStoreAdapter implements VectorStoreAdapter {
       body: JSON.stringify({ query_embeddings: [queryEmbedding], n_results: topK })
     });
     if (!res.ok) return [];
-    const json = await res.json() as { ids?: string[][]; documents?: string[][]; metadatas?: Array<Array<Record<string, unknown>>> };
+    const json = await boundedJson(res) as { ids?: string[][]; documents?: string[][]; metadatas?: Array<Array<Record<string, unknown>>> };
     const ids = json.ids?.[0] ?? [];
     const texts = json.documents?.[0] ?? [];
     const metas = json.metadatas?.[0] ?? [];
@@ -846,7 +863,7 @@ export class WeaviateVectorStoreAdapter implements VectorStoreAdapter {
     const graphql = { query: `{ Get { ${this.config.className}(limit: ${topK}, nearVector: { vector: [${queryVector.join(",")}] }) { content metadata _additional { id distance } } } }` };
     const res = await (this.config.fetcher ?? fetch)(`${endpoint}/v1/graphql`, { method: "POST", headers, body: JSON.stringify(graphql) });
     if (!res.ok) return [];
-    const json = await res.json() as { data?: { Get?: Record<string, Array<{ content: string; metadata?: string; _additional?: { id: string } }>> } };
+    const json = await boundedJson(res) as { data?: { Get?: Record<string, Array<{ content: string; metadata?: string; _additional?: { id: string } }>> } };
     const results = json.data?.Get?.[this.config.className] ?? [];
     return results.map((r, i) => ({ id: r._additional?.id ?? `result-${i}`, text: r.content ?? "", metadata: r.metadata ? JSON.parse(r.metadata) : {} }));
   }
@@ -880,7 +897,7 @@ export class RedisVectorStoreAdapter implements VectorStoreAdapter {
       method: "POST", headers
     });
     if (!res.ok) return [];
-    const json = await res.json() as { results?: Array<{ id: string; extra_attributes?: { content?: string; metadata?: string } }> };
+    const json = await boundedJson(res) as { results?: Array<{ id: string; extra_attributes?: { content?: string; metadata?: string } }> };
     return (json.results ?? []).map(r => ({ id: r.id, text: r.extra_attributes?.content ?? "", metadata: r.extra_attributes?.metadata ? JSON.parse(r.extra_attributes.metadata) : {} }));
   }
 }
@@ -1323,7 +1340,7 @@ export class CohereRerankAdapter implements RerankAdapter {
     if (!res.ok) {
       throw new Error(`Cohere rerank ${res.status}: ${await safeText(res)}`);
     }
-    const data = (await res.json()) as { results: Array<{ index: number; relevance_score: number }> };
+    const data = (await boundedJson(res)) as { results: Array<{ index: number; relevance_score: number }> };
     return data.results.map((r) => annotateRerank(input.documents[r.index]!, r.relevance_score, "cohere", model));
   }
 }
@@ -1358,7 +1375,7 @@ export class JinaRerankAdapter implements RerankAdapter {
     if (!res.ok) {
       throw new Error(`Jina rerank ${res.status}: ${await safeText(res)}`);
     }
-    const data = (await res.json()) as { results: Array<{ index: number; relevance_score: number }> };
+    const data = (await boundedJson(res)) as { results: Array<{ index: number; relevance_score: number }> };
     return data.results.map((r) => annotateRerank(input.documents[r.index]!, r.relevance_score, "jina", model));
   }
 }
@@ -1392,7 +1409,7 @@ export class VoyageRerankAdapter implements RerankAdapter {
     if (!res.ok) {
       throw new Error(`Voyage rerank ${res.status}: ${await safeText(res)}`);
     }
-    const data = (await res.json()) as { data: Array<{ index: number; relevance_score: number }> };
+    const data = (await boundedJson(res)) as { data: Array<{ index: number; relevance_score: number }> };
     return data.data.map((r) => annotateRerank(input.documents[r.index]!, r.relevance_score, "voyage", model));
   }
 }
@@ -1415,7 +1432,7 @@ function annotateRerank(
 
 async function safeText(res: Response): Promise<string> {
   try {
-    return (await res.text()).slice(0, 200);
+    return (await errorDetail(res)).slice(0, 200);
   } catch {
     return "";
   }

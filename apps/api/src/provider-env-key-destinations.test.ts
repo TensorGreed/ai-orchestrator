@@ -199,6 +199,30 @@ describe("a builder-chosen base URL never receives a deployment env key", () => 
     expect(other.seen).toEqual([]);
   });
 
+  it("a model listing from a chosen URL is size-capped: an oversized answer lists nothing", async () => {
+    const server = http.createServer((request, response) => {
+      request.resume();
+      response.writeHead(200, { "content-type": "application/json" });
+      // Just over the 8 MB cap, sent in chunks.
+      const chunk = "x".repeat(1024 * 1024);
+      response.write('{"data":[{"id":"big"}],"pad":"');
+      for (let i = 0; i < 9; i += 1) response.write(chunk);
+      response.end('"}');
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    servers.push(server);
+    const context = await createTestContext();
+    const cookie = await login(context, "builder");
+    const listed = await context.app.inject({
+      method: "POST",
+      url: "/api/providers/models",
+      headers: { cookie },
+      payload: { providerId: "openai_compatible", baseUrl: `http://127.0.0.1:${(server.address() as { port: number }).port}/v1` }
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json()).toEqual({ models: [] });
+  });
+
   it("a knowledge base's custom embeddings endpoint gets no env key", async () => {
     const context = await createTestContext();
     const cookie = await login(context, "admin");

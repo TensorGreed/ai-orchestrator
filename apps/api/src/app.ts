@@ -37,6 +37,7 @@ import {
   createGatedProviderRegistry,
   envKeyMayGoTo,
   isModelNotAllowedError,
+  readResponseJson,
   type EmbeddingCallGate,
   type ModelCallGate,
   type ProviderRegistry
@@ -12046,7 +12047,10 @@ export async function createApp(
     // A base URL from the request is the caller's choice: it goes through the outbound URL checks (pinned, and auth
     // headers are dropped on a cross-origin redirect), and a deployment env key is never sent to it unless it is the
     // provider's own endpoint or one the operator allows (envKeyMayGoTo).
-    const listFetch = modelUrlFetch;
+    // A listing is small: it gets a time limit and the same 8 MB body cap as model calls.
+    const LIST_TIMEOUT_MS = 15_000;
+    const listFetch = async (url: string, init: RequestInit = {}) => await modelUrlFetch(url, { ...init, signal: AbortSignal.timeout(LIST_TIMEOUT_MS) });
+    const readList = async <T>(res: Response): Promise<T> => await readResponseJson<T>(res, { timeoutMs: LIST_TIMEOUT_MS, provider: providerId });
     const envKeyFor = (envName: string, target: string | undefined) =>
       envKeyMayGoTo(providerId, target) ? process.env[envName] : undefined;
 
@@ -12054,9 +12058,14 @@ export async function createApp(
       if (providerId === "gemini") {
         const apiKey = (await resolveSecretForUser(user)(secretRef)) || process.env.GEMINI_API_KEY;
         if (!apiKey) return { models: [] };
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+        // The key goes in a header (not the URL), and a redirect is not followed.
+        const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models", {
+          headers: { "x-goog-api-key": apiKey },
+          redirect: "manual",
+          signal: AbortSignal.timeout(LIST_TIMEOUT_MS)
+        });
         if (!res.ok) return { models: [] };
-        const json = await res.json() as { models?: Array<{ name?: string; displayName?: string; supportedGenerationMethods?: string[] }> };
+        const json = await readList<{ models?: Array<{ name?: string; displayName?: string; supportedGenerationMethods?: string[] }> }>(res);
         return {
           models: (json.models ?? [])
             .filter(m => m.supportedGenerationMethods?.includes("generateContent"))
@@ -12074,7 +12083,7 @@ export async function createApp(
           headers: { "Authorization": `Bearer ${apiKey}` }
         });
         if (!res.ok) return { models: [] };
-        const json = await res.json() as { data?: Array<{ id: string; owned_by?: string }> };
+        const json = await readList<{ data?: Array<{ id: string; owned_by?: string }> }>(res);
         const listedModels = json.data ?? [];
         const chatModels = (baseUrl ? listedModels : listedModels
           .filter(m => /^(gpt-|o[1-9]|chatgpt-)/.test(m.id) && !m.id.includes("instruct") && !m.id.includes("realtime") && !m.id.includes("audio") && !m.id.includes("transcribe")))
@@ -12091,7 +12100,7 @@ export async function createApp(
           headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01" }
         });
         if (!res.ok) return { models: [] };
-        const json = await res.json() as { data?: Array<{ id: string; display_name?: string }> };
+        const json = await readList<{ data?: Array<{ id: string; display_name?: string }> }>(res);
         return {
           models: (json.data ?? []).map(m => ({ id: m.id, label: m.display_name ?? m.id }))
         };
@@ -12104,7 +12113,7 @@ export async function createApp(
         const ollamaBase = configuredBase.replace(/\/v1\/?$/, "");
         const res = await listFetch(`${ollamaBase}/api/tags`);
         if (!res.ok) return { models: [] };
-        const json = await res.json() as { models?: Array<{ name: string; modified_at?: string }> };
+        const json = await readList<{ models?: Array<{ name: string; modified_at?: string }> }>(res);
         return {
           models: (json.models ?? []).map(m => ({ id: m.name, label: m.name }))
         };
@@ -12119,7 +12128,7 @@ export async function createApp(
         const modelEndpoint = modelBaseUrl.endsWith("/models") ? modelBaseUrl : `${modelBaseUrl}/models`;
         const res = await listFetch(modelEndpoint, { headers });
         if (!res.ok) return { models: [] };
-        const json = await res.json() as { data?: Array<{ id: string }> };
+        const json = await readList<{ data?: Array<{ id: string }> }>(res);
         return { models: (json.data ?? []).map(m => ({ id: m.id, label: m.id })) };
       }
 
@@ -12132,7 +12141,7 @@ export async function createApp(
           headers: { "api-key": apiKey }
         });
         if (!res.ok) return { models: [] };
-        const json = await res.json() as { data?: Array<{ id: string }> };
+        const json = await readList<{ data?: Array<{ id: string }> }>(res);
         return { models: (json.data ?? []).map(m => ({ id: m.id, label: m.id })) };
       }
     } catch (error) {

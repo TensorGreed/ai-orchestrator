@@ -74,6 +74,12 @@ export function parseEnvKeyBaseUrls(value: string | undefined): { entries: EnvKe
       errors.push(`'${entry}': not an http(s) URL`);
       continue;
     }
+    const parsed = new URL(url);
+    if (parsed.username || parsed.password) {
+      // Not echoed: the entry holds a credential.
+      errors.push(`entry ${entries.length + errors.length + 1}${providerId ? ` (${providerId})` : ""}: a URL with a user name or password is refused; the provider's key is sent as a header`);
+      continue;
+    }
     entries.push(providerId ? { providerId, url } : { url });
   }
   // "openai=https://x,https://y" most likely meant both for OpenAI, but a bare entry would carry every provider's key:
@@ -104,10 +110,28 @@ export function envKeyAllowedBaseUrls(providerId: string, env: Record<string, st
   return urls;
 }
 
+// Percent-encoded "/", "\" and "." could be decoded by the server behind an entry into a path outside it.
+const ENCODED_PATH_SEPARATOR = /%2f|%5c|%2e/i;
+
 function underAllowedBaseUrl(target: { origin: string; path: string }, entry: string): boolean {
   const allowed = originAndPath(entry);
   if (!allowed || allowed.origin !== target.origin) return false;
-  return allowed.path === "" || target.path === allowed.path || target.path.startsWith(`${allowed.path}/`);
+  if (allowed.path === "") return true;
+  if (ENCODED_PATH_SEPARATOR.test(target.path)) return false;
+  return target.path === allowed.path || target.path.startsWith(`${allowed.path}/`);
+}
+
+/**
+ * Whether `url` (a request URL) is on the same origin as `baseUrl` and under its path (at a segment boundary). A URL
+ * with a fragment, a query holding "/" or "?" (a base URL ending in "?" turns the appended path into a query), or
+ * percent-encoded path separators under a base URL with a path, never matches. A plain query such as api-version does.
+ */
+export function urlUnderBaseUrl(url: string, baseUrl: string): boolean {
+  if (url.includes("#")) return false;
+  const query = url.indexOf("?");
+  if (query >= 0 && /[/?]/.test(url.slice(query + 1))) return false;
+  const target = originAndPath(url);
+  return Boolean(target) && underAllowedBaseUrl(target!, baseUrl);
 }
 
 /**
