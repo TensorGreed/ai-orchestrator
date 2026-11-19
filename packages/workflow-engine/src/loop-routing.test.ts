@@ -349,6 +349,71 @@ describe("Loop with branch routing", () => {
     expect(taken.error).toContain("Approvals cannot pause inside a Loop body");
   });
 
+  it("never continues past a Human Approval in a body, even with Continue On Fail", async () => {
+    const workflow = flow(
+      [
+        node("src", "set_node", { assignments: [{ key: "xs", valueTemplate: "[1,2]", type: "json" }] }),
+        node("loop", "loop_node", { inputKey: "xs", itemVariable: "x", routeBranches: true }),
+        { ...node("ask", "human_approval", { approvalMessage: "ok?", timeoutMinutes: 30 }), errorConfig: { continueOnFail: true } } as WorkflowNode,
+        set("pay", "paid", "{{x}}")
+      ],
+      [edge("src", "loop"), edge("loop", "ask"), edge("ask", "pay")]
+    );
+    const result = await executeWorkflow({ workflow }, deps());
+    expect(result.status).toBe("error");
+    expect(statuses(result, "pay").filter((status) => status === "success")).toEqual([]);
+  });
+
+  it("keeps a nested body node's last result from an earlier outer pass", async () => {
+    const workflow = flow(
+      [
+        node("src", "set_node", { assignments: [{ key: "rows", valueTemplate: "[[1],[2]]", type: "json" }] }),
+        node("outer", "loop_node", { inputKey: "rows", itemVariable: "row", routeBranches: true }),
+        node("inner", "loop_node", { inputKey: "row", itemVariable: "cell", routeBranches: true }),
+        node("odd", "if_node", { condition: "{{ cell % 2 === 1 }}" }),
+        set("odd_cell", "odd", "{{cell}}"),
+        set("after", "seen", "{{results.odd_cell.odd}}")
+      ],
+      [edge("src", "outer"), edge("outer", "inner"), edge("inner", "odd"), edge("odd", "odd_cell", "true"), edge("odd_cell", "after")]
+    );
+    const result = await executeWorkflow({ workflow }, deps());
+    expect(result.status).toBe("success");
+    expect(outputOf(result, "after").seen).toBe(1);
+  });
+
+  it("leaves no routing state behind when a Loop fails and the run goes on", async () => {
+    // `first` fails (its Error output handles it) after its nested routed Loop ran; `second` later must not report
+    // `first`'s body nodes.
+    const workflow = flow(
+      [
+        node("src", "set_node", { assignments: [{ key: "rows", valueTemplate: '[["2"],["bad"]]', type: "json" }] }),
+        node("first", "loop_node", { inputKey: "rows", itemVariable: "row", routeBranches: true, onError: "branch" }),
+        node("inner", "loop_node", { inputKey: "row", itemVariable: "cell", routeBranches: true }),
+        node("odd", "if_node", { condition: "{{ cell === '1' }}" }),
+        set("odd_cell", "odd", "{{cell}}"),
+        node("num", "set_node", { assignments: [{ key: "n", valueTemplate: "{{row.0}}", type: "number" }] }),
+        node("handled", "set_node", { assignments: [{ key: "list", valueTemplate: "[1,2]", type: "json" }] }),
+        node("second", "loop_node", { inputKey: "list", itemVariable: "r", routeBranches: true }),
+        set("each", "e", "{{r}}")
+      ],
+      [
+        edge("src", "first"),
+        edge("first", "inner"),
+        edge("inner", "odd"),
+        edge("odd", "odd_cell", "true"),
+        edge("first", "num"),
+        edge("first", "handled", "error"),
+        edge("handled", "second"),
+        edge("second", "each")
+      ]
+    );
+    const result = await executeWorkflow({ workflow }, deps());
+    expect(statuses(result, "handled")).toEqual(["success"]);
+    expect(statuses(result, "each")).toEqual(["success", "success"]);
+    // Skipped once, by the failed Loop's Error output; the later Loop adds nothing for it.
+    expect(statuses(result, "odd_cell")).toEqual(["skipped"]);
+  });
+
   it("flags an Approval Gate on a branch inside a routed Loop body", () => {
     const workflow = ifFlow({ routeBranches: true }, { nodes: [node("gate", "approval_gate", {})], edges: [edge("if", "gate", "true")] });
     expect(validateWorkflowGraph(workflow).issues.map((issue) => issue.code)).toContain("approval_gate_in_loop");

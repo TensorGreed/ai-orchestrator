@@ -144,7 +144,9 @@ works as it does elsewhere, once per item:
 - On each pass, only the outputs it takes run. The nodes on the other outputs are skipped for that pass.
 - The nodes connected to its outputs are part of the body, so they run once per item too. The same holds for the
   outputs of a Content Rules or Chat Intent Router node in the body. A node joins the body this way only when all of
-  its incoming connections come from the Loop or from body nodes. Other nodes after the body run once, after the loop.
+  its incoming connections come from the Loop or from body nodes. Other nodes after the body run once, after the
+  loop. That includes a node on a body IF's output that also has a connection from outside the loop: it runs once,
+  after the loop, whichever outputs the passes took.
 - A body node's own **On Error** setting applies, as elsewhere. **Continue Anyway** gives the next nodes of that pass
   `{ error }`. With **Execute Fallback Branch**, the nodes on its Error output run for that pass, and the loop goes
   on with the next item. The nodes on its other outputs are in the body too. **Stop Execution** (the default)
@@ -153,7 +155,9 @@ works as it does elsewhere, once per item:
   the last pass that ran it.
 - After the loop, a body node that no pass ran shows as skipped, and so do the nodes after it, unless a body node
   that ran also leads to them. A Loop with no items skips nothing.
-- **Collect results** holds, per pass, the outputs of the body's last nodes that ran on it, by node id:
+- **Collect results** holds one entry per pass, read from the body's last nodes (the ones no other body node
+  follows). With one last node, the entry is its output, or `null` on a pass that skipped it. With several, the entry
+  holds the outputs of those that ran on the pass, by node id:
   <span v-pre>`{{results.<loopId>.collected.0.<nodeId>}}`</span>.
 - A Merge in **Collect loop passes** mode with several body nodes connected in (the IF's two outputs, for example)
   gathers their outputs pass by pass, in item order.

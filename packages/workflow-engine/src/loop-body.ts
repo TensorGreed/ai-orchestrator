@@ -1,4 +1,4 @@
-import { loopRoutesBranches, type Workflow, type WorkflowNode } from "@ai-orchestrator/shared";
+import { loopRoutesBranches, repairNodeErrorConfig, type Workflow, type WorkflowNode } from "@ai-orchestrator/shared";
 import { isExecutionEdge } from "./graph";
 
 /** The output a node's failure goes to when its On Error is "branch". */
@@ -24,8 +24,8 @@ function toRecord(value: unknown): Record<string, unknown> {
 
 /** A body node whose failure goes to its Error output (On Error is "branch" and no Continue On Fail overrides it). */
 function routesFailures(node: WorkflowNode): boolean {
-  const errorConfig = toRecord((node as { errorConfig?: unknown }).errorConfig);
-  return errorConfig.continueOnFail !== true && toRecord(node.config).onError === "branch";
+  // The same repaired errorConfig the run reads, so the body and the run agree.
+  return repairNodeErrorConfig(node.errorConfig).errorConfig?.continueOnFail !== true && toRecord(node.config).onError === "branch";
 }
 
 /**

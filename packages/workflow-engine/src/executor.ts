@@ -9785,11 +9785,12 @@ async function executeWorkflowRun(
   };
 
   /**
-   * Loop nodes that route branches (`routeBranches`): body nodes that ran on at least one pass, the body nodes of
+   * Loop nodes that route branches (`routeBranches`): body nodes that ran on at least one pass (with the output of
+   * the last pass that ran them, over every pass of the outer Loops too), the body nodes of
    * such Loops (nested ones included) and the Loops that had at least one pass. After the outermost Loop, a body node
    * no pass ran is recorded as skipped, and so are the nodes after it outside the body (see `runLoop`).
    */
-  const routedBodyRan = new Set<string>();
+  const routedBodyRan = new Map<string, unknown>();
 
   /**
    * Runs a Loop node's passes and returns its output and labels. The caller records the Loop's own result.
@@ -9809,6 +9810,16 @@ async function executeWorkflowRun(
     /** True for a Loop inside another Loop's body. */
     nested?: boolean;
   }): Promise<{ output: Record<string, unknown>; labels: DataLabels }> => {
+    if (args.nested) return runLoopPasses(args);
+    try {
+      return await runLoopPasses(args);
+    } catch (error) {
+      // A failed outermost Loop leaves no routing state for a later Loop of the run to settle.
+      clearRoutedBodies();
+      throw error;
+    }
+  };
+  const runLoopPasses = async (args: Parameters<typeof runLoop>[0]): Promise<{ output: Record<string, unknown>; labels: DataLabels }> => {
     const { node, nodeConfig, loopGlobals, templateData, labelScope, span: loopSpan } = args;
     const inputKey = typeof nodeConfig.inputKey === "string" ? nodeConfig.inputKey.trim() : "";
     const itemVariable =
@@ -9912,7 +9923,7 @@ async function executeWorkflowRun(
           passLabels.push(labels);
           if (routing) {
             lastRan.set(childNode.id, output);
-            routedBodyRan.add(childNode.id);
+            routedBodyRan.set(childNode.id, output);
           }
         };
         try {
@@ -10006,8 +10017,10 @@ async function executeWorkflowRun(
           const childErrorMessage = childError instanceof Error ? childError.message : "Loop iteration failed";
           // Branch routing: the body node's own On Error applies, as at the top level (a stop, a cancellation, a run
           // timeout, a nested Loop's failure or an approval still fail the Loop).
+          // An approval node never continues or branches past itself here: nobody could decide in a pass.
+          const isApprovalNode = childNode.type === "human_approval" || childNode.type === "approval_gate";
           const childOnError =
-            routing && !pauseAsked && childNode.type !== "loop_node" && !isCancellationError(caughtChildError) && !dependencies.abortSignal?.aborted
+            routing && !pauseAsked && !isApprovalNode && childNode.type !== "loop_node" && !isCancellationError(caughtChildError) && !dependencies.abortSignal?.aborted
               ? nodeErrorConfigOf(childNode)?.continueOnFail === true
                 ? "continue"
                 : getOnError(toRecord(childNode.config))
@@ -10105,12 +10118,14 @@ async function executeWorkflowRun(
    * reaches them. A Loop with no items skips nothing, as before.
    */
   const settleRoutedBodies = () => {
+    // A nested Loop's body node keeps the last pass that ran it, on whichever pass of the outer Loop that was.
+    for (const [childId, output] of routedBodyRan) nodeOutputs.set(childId, output);
     const neverRan = [...routedBodyNodes.entries()]
       .filter(([childId, loopId]) => routedLoopsWithPasses.has(loopId) && !routedBodyRan.has(childId))
       .map(([childId]) => childId);
     if (neverRan.length > 0) {
       // Only paths that leave the bodies from a node that ran protect a node.
-      const leftFromRan = [...routedBodyRan].flatMap((childId) => (graphIndexes.outgoingExecution.get(childId) ?? []).filter((target) => !routedBodyNodes.has(target)));
+      const leftFromRan = [...routedBodyRan.keys()].flatMap((childId) => (graphIndexes.outgoingExecution.get(childId) ?? []).filter((target) => !routedBodyNodes.has(target)));
       const protectedNodes = descendantCache.getReachableFromRoots(leftFromRan);
       for (const childId of neverRan) {
         nodeResults.push({
@@ -10128,6 +10143,9 @@ async function executeWorkflowRun(
         }
       }
     }
+    clearRoutedBodies();
+  };
+  const clearRoutedBodies = () => {
     routedBodyNodes.clear();
     routedLoopsWithPasses.clear();
     routedBodyRan.clear();
