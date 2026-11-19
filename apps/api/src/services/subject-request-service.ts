@@ -60,7 +60,7 @@ import {
 } from "@ai-orchestrator/shared";
 import type { SubjectStoreKind, SubjectTextRow } from "../db/database.js";
 import type { Store } from "../db/store.js";
-import { personSessionNamespace, projectSessionNamespace } from "../db/person-sessions.js";
+import { projectSessionNamespace, sessionOwnerKey } from "../db/person-sessions.js";
 import {
   SUBJECT_SCAN_KINDS,
   memorySessionRowId,
@@ -350,7 +350,7 @@ const MEMORY_NODE_TYPES = new Set(["local_memory", "session_artifact_load", "ses
  * person; otherwise the project's key, plus the bare namespace that rows from before project scoping use.
  */
 export function storedSessionKeys(namespace: string, projectId: string, sessionOwner: string | null): string[] {
-  if (sessionOwner) return [personSessionNamespace(sessionOwner, projectId, namespace)];
+  if (sessionOwner) return [sessionOwnerKey(sessionOwner, projectId, namespace)];
   return [namespace, projectSessionNamespace(projectId, namespace)];
 }
 

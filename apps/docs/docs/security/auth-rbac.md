@@ -216,9 +216,11 @@ sessions. Someone who may run a workflow only through a share with them keeps th
 own too. Builders and admins with access through their projects, other API keys and service accounts (whatever role
 the key has), schedules and webhooks keep the workflow's sessions, as before; their runs do not see the sessions kept to a person, and a person's
 runs do not see theirs. A run records whose sessions it used, and a retry or an MCP replay of it keeps them: the
-person's own retry continues their session; anyone else's retry runs under that person's key with a new session id, so
-it neither shows them that person's memory nor writes into the workflow's sessions or a session the person uses. A
-retry of a run that used the workflow's sessions runs as a new run of the person who retries it. A Simple Memory or
+person's own retry continues their sessions; anyone else's runs under that person's key in a namespace of its own, so
+it shows them none of that person's memory (whatever the nodes' session id templates are) and writes neither into the
+workflow's sessions nor anywhere the person reads. A run whose record lacks this (a canceled run) is judged by who
+started it. A run of a person whose account was deleted is not run again (`409`). A retry of a run that used the
+workflow's sessions runs as a new run of the person who retries it. A Simple Memory or
 Session Artifact namespace that starts with `~person:` is refused, since that prefix marks one person's sessions.
 
 A person's session rows stay inside the project's key, so project retention and project legal holds cover them, and a

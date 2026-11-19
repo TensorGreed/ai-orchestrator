@@ -15,6 +15,8 @@ import { parseConfig, type AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
 import { AuthService } from "./services/auth-service.js";
 import { QueueService } from "./services/queue-service.js";
+import { sessionOwnerUser } from "./db/person-sessions.js";
+import { testSql } from "./test-support/test-sql.js";
 import { SecretService } from "./services/secret-service.js";
 import { openTestStore } from "./test-support/test-store.js";
 
@@ -268,7 +270,7 @@ describe("a retry keeps the failed run's session scope (v79)", () => {
     return artifact === undefined || artifact === null ? "" : String(artifact);
   };
 
-  it("an operator's failed run retried by a builder stays in the operator's scope, on a new session id", async () => {
+  it("an operator's failed run retried by a builder stays in the operator's scope, in a namespace of its own", async () => {
     const context = await createTestContext();
     const olivia = await login(context, "operator", "olivia");
     const bea = await login(context, "builder", "bea");
@@ -285,8 +287,10 @@ describe("a retry keeps the failed run's session scope (v79)", () => {
     // The builder's retry does not read Olivia's note into their view...
     expect(loaded(retried.body)).toBe("");
     const retryId = retried.json<{ executionId: string }>().executionId;
-    // ...stays kept to Olivia (so a retry of the retry does too)...
-    expect(await context.store.getExecutionSessionOwner(retryId)).toBe(olivia.id);
+    // ...stays kept to Olivia, in a namespace of its own (so a retry of the retry does too)...
+    const retryOwner = await context.store.getExecutionSessionOwner(retryId);
+    expect(retryOwner).toMatch(/^repeat:/);
+    expect(sessionOwnerUser(retryOwner!)).toBe(olivia.id);
     // ...and wrote neither into the workflow's session nor into the session Olivia uses.
     expect(await runNote(context, bea.cookie, "wf-notes", "bea-1")).toBe("");
     const oliviaNext = await call(context, "POST", "/api/workflows/wf-fail/execute", olivia.cookie, { input: { note: "olivia-2" }, sessionId: "shared-session" });
@@ -340,5 +344,69 @@ describe("operators run the released version", () => {
     expect(operatorRun.body).not.toContain("unreleased draft");
     expect((await call(context, "POST", "/api/workflows/wf-rel/execute", bea.cookie, { input: {} })).body).toContain("unreleased draft");
     expect((await call(context, "POST", "/api/workflows/wf-rel/execute?channel=draft", olivia.cookie, { input: {} })).statusCode).toBe(403);
+  });
+});
+
+describe("a non-owner's retry reads none of the owner's memory (v79)", () => {
+  const fixedNotebook = (): Workflow => {
+    const flow = notebook("wf-fixed", "default");
+    return {
+      ...flow,
+      nodes: [
+        ...flow.nodes
+          .filter((node) => node.id !== "out")
+          .map((node) => (node.id === "load" || node.id === "save" ? { ...node, config: { ...node.config, sessionIdTemplate: "fixed" } } : node)),
+        { id: "boom", type: "stop_and_error", name: "Boom", position: { x: 600, y: 0 }, config: { message: "stop here" } }
+      ],
+      edges: [
+        { id: "e1", source: "start", target: "load" },
+        { id: "e2", source: "load", target: "save" },
+        { id: "e3", source: "save", target: "boom" }
+      ]
+    };
+  };
+  const loaded = (body: string): string => {
+    const parsed = JSON.parse(body) as { nodeResults?: Array<{ nodeId: string; output?: { artifact?: unknown } }> };
+    const artifact = parsed.nodeResults?.find((entry) => entry.nodeId === "load")?.output?.artifact;
+    return artifact === undefined || artifact === null ? "" : String(artifact);
+  };
+
+  it("with a fixed session template, and when the failed run's owner went unrecorded (a canceled run)", async () => {
+    const context = await createTestContext();
+    const olivia = await login(context, "operator", "olivia");
+    const bea = await login(context, "builder", "bea");
+    await context.store.upsertWorkflow(fixedNotebook());
+    const first = await call(context, "POST", "/api/workflows/wf-fixed/execute", olivia.cookie, { input: { note: "olivia-secret" } });
+    expect(first.json<{ status: string }>().status, first.body).toBe("error");
+    const second = await call(context, "POST", "/api/workflows/wf-fixed/execute", olivia.cookie, { input: { note: "olivia-2" } });
+    expect(loaded(second.body)).toBe("olivia-secret");
+    const failedId = second.json<{ executionId: string }>().executionId;
+
+    const retried = await call(context, "POST", `/api/executions/${failedId}/retry`, bea.cookie, { input: { note: "bea" } });
+    expect(retried.statusCode, retried.body).toBeLessThan(500);
+    expect(loaded(retried.body)).toBe("");
+
+    // A run whose owner was never recorded (a cancel skips the final write) is judged by who started it.
+    await testSql(context.store).run("UPDATE execution_history SET session_owner = NULL WHERE id = ?", failedId);
+    expect(await context.store.getExecutionSessionOwner(failedId)).toBeNull();
+    const again = await call(context, "POST", `/api/executions/${failedId}/retry`, bea.cookie, { input: { note: "bea-2" } });
+    expect(loaded(again.body)).toBe("");
+    // Nothing went into the workflow's sessions, and Olivia's session is as she left it.
+    const beaOwn = await call(context, "POST", "/api/workflows/wf-fixed/execute", bea.cookie, { input: { note: "bea-own" } });
+    expect(loaded(beaOwn.body)).toBe("");
+    const oliviaNext = await call(context, "POST", "/api/workflows/wf-fixed/execute", olivia.cookie, { input: { note: "olivia-3" } });
+    expect(loaded(oliviaNext.body)).toBe("olivia-2");
+  });
+
+  it("a run of a deleted person is not retried", async () => {
+    const context = await createTestContext();
+    const olivia = await login(context, "operator", "olivia");
+    const admin = await login(context, "admin", "ada");
+    await context.store.upsertWorkflow(fixedNotebook());
+    const first = await call(context, "POST", "/api/workflows/wf-fixed/execute", olivia.cookie, { input: { note: "olivia-1" } });
+    const failedId = first.json<{ executionId: string }>().executionId;
+    expect((await call(context, "DELETE", `/api/users/${olivia.id}`, admin.cookie)).statusCode).toBeLessThan(300);
+    const retried = await call(context, "POST", `/api/executions/${failedId}/retry`, admin.cookie, { input: { note: "x" } });
+    expect(retried.statusCode, retried.body).toBe(409);
   });
 });

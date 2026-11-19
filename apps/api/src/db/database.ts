@@ -5377,7 +5377,7 @@ export class SqliteStore implements Store {
     this.exec(`DELETE FROM user_invites WHERE user_id = ?`, [id]);
     // v79 — the session memory, tool cache and artifacts kept to the person go with them, except what a legal hold keeps.
     for (const table of PERSON_SESSION_TABLES) {
-      const keys = this.queryAll<{ namespace: string }>(`SELECT DISTINCT namespace FROM ${table} WHERE namespace LIKE ?`, [personSessionLikePattern(id)])
+      const keys = this.queryAll<{ namespace: string }>(`SELECT DISTINCT namespace FROM ${table} WHERE namespace LIKE ? ESCAPE '\\'`, [personSessionLikePattern(id)])
         .map((row) => String(row.namespace))
         .filter((namespace) => isPersonSessionOf(namespace, id));
       for (const namespace of keys) this.exec(`DELETE FROM ${table} WHERE namespace = ? AND ${notHeldSql(table)}`, [namespace]);

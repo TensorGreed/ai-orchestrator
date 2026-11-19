@@ -49,6 +49,7 @@ import { DISPATCH_SPEC_VERSION, type RunDispatcher } from "./services/run-dispat
 import { onceEachElicitationEvent, type RunEventName, type RunRelay } from "./services/run-event-relay.js";
 import { followExecution } from "./services/execution-follow.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
+import { repeatSessionOwner, sessionOwnerUser } from "./db/person-sessions.js";
 import type { ApprovalService } from "./services/approval-service.js";
 import type { BudgetService } from "./services/budget-service.js";
 import { clusterCancelReason } from "./services/cluster-signals.js";
@@ -135,24 +136,34 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     return owner ? { sessionOwner: owner } : {};
   };
   /**
-   * The session scope of a retry or an MCP replay of `sourceId`. A run kept to one person's sessions stays kept to that
-   * person, whoever repeats it: never the workflow's sessions or the repeating person's. Someone else repeating it gets
-   * a new session id under that person's key, so the run neither reads that person's existing memory into their view
-   * nor writes into a session the person uses. A run that used the workflow's sessions is repeated in the repeating
-   * person's scope, as a new run of theirs would be.
+   * The session scope of a retry or an MCP replay of `source`. A run kept to one person's sessions stays kept to that
+   * person, whoever repeats it: never the workflow's sessions or the repeating person's. The person's own repeat
+   * continues their sessions; anyone else's runs under the person's key in a namespace of its own (a repeat owner,
+   * db/person-sessions.ts), so it reads none of their memory, whatever its session templates say, and writes nowhere
+   * they read. A run whose owner went unrecorded (a canceled, expired or reconciled run) is judged by who started it,
+   * failing closed. A run that used the workflow's sessions is repeated in the repeating person's scope, as a new run
+   * of theirs would be. `null`: the person was deleted, so the run is not repeated (their sessions are gone).
    */
   const repeatSessionScope = async (
-    sourceId: string,
+    source: { id: string; triggeredBy?: string | null },
     user: SafeUser,
     workflow: Workflow,
-    executionId: string,
-    sessionId: string | undefined
-  ): Promise<{ sessionOwner?: string; sessionId?: string }> => {
-    const sourceOwner = await deps.store.getExecutionSessionOwner(sourceId);
-    if (!sourceOwner) return { ...(await sessionOwnerOption(user, workflow)), ...(sessionId !== undefined ? { sessionId } : {}) };
-    if (sourceOwner === user.id) return { sessionOwner: sourceOwner, ...(sessionId !== undefined ? { sessionId } : {}) };
-    return { sessionOwner: sourceOwner, sessionId: `repeat-${executionId}` };
+    executionId: string
+  ): Promise<{ sessionOwner?: string } | null> => {
+    let owner = await deps.store.getExecutionSessionOwner(source.id);
+    if (!owner && source.triggeredBy) {
+      const starter = await deps.store.getUserByEmail(source.triggeredBy.toLowerCase());
+      if (starter) {
+        owner = (await deps.sessionOwnerFor({ id: starter.id, email: starter.email, role: starter.role as SafeUser["role"], ...(starter.kind === "service" ? { serviceAccount: true as const } : {}) }, workflow)) ?? null;
+      }
+    }
+    if (!owner) return await sessionOwnerOption(user, workflow);
+    const ownerUser = sessionOwnerUser(owner);
+    if (!(await deps.store.getUserById(ownerUser))) return null;
+    if (ownerUser === user.id) return { sessionOwner: ownerUser };
+    return { sessionOwner: repeatSessionOwner(ownerUser, executionId) };
   };
+  const repeatOwnerGone = { error: "The person whose session memory this run used no longer has an account, so it cannot be run again." };
   const {
     app,
     store,
@@ -647,6 +658,11 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     // and records them again, so a retry of the retry keeps them.
     const gatewayGuard = parseGatewayGuardStack(asRecord(sourceExecution.customData)[GATEWAY_GUARD_CUSTOM_DATA_KEY]);
     const retryHistoryCustomData = gatewayGuard ? { ...(executionPayload.customData ?? {}), [GATEWAY_GUARD_CUSTOM_DATA_KEY]: gatewayGuard } : executionPayload.customData;
+    const retryScope = await repeatSessionScope(sourceExecution, user, workflow, executionId);
+    if (!retryScope) {
+      reply.code(409);
+      return repeatOwnerGone;
+    }
     await auditRunAction(request, user, "execution.retried", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { sourceExecutionId: sourceExecution.id });
     const result = await runDispatcher.run({
       v: DISPATCH_SPEC_VERSION,
@@ -666,8 +682,9 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       variables: executionPayload.variables,
       systemPrompt: executionPayload.system_prompt,
       userPrompt: executionPayload.user_prompt,
+      sessionId: normalizeSessionId(executionPayload.sessionId, executionPayload.session_id),
       // v79 — the failed run's session scope (see repeatSessionScope).
-      ...await repeatSessionScope(sourceExecution.id, user, workflow, executionId, normalizeSessionId(executionPayload.sessionId, executionPayload.session_id)),
+      ...retryScope,
       executionTimeoutMs: normalizeExecutionTimeoutMs(
         executionPayload.executionTimeoutMs,
         executionPayload.execution_timeout_ms,
@@ -737,6 +754,11 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const mode: McpReplayMode = parsed.data.mode ?? "strict";
     const mcpPlan = mcpCassetteService.planReplay(cassette, mode, mcpRegistry, resolveRegisteredMcpServer);
     const executionId = crypto.randomUUID();
+    const replayScope = await repeatSessionScope(source, user, workflow, executionId);
+    if (!replayScope) {
+      reply.code(409);
+      return repeatOwnerGone;
+    }
     await auditRunAction(request, user, "execution.replayed", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { sourceExecutionId: source.id, cassetteId: cassette.id, mode });
     const storedInput = asRecord(source.input);
     // 12.6 — a replay is not the gateway client's run: its usage is the replaying user's.
@@ -749,7 +771,6 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     // v74 — the source run's input and recorded MCP answers are its content.
     const sensitiveInput = await copiedRunSensitive(source.id, user);
     const replayRunInput = replayRunInputFor(source.triggerType, storedInput);
-    const replayScope = await repeatSessionScope(source.id, user, workflow, executionId, replayRunInput.sessionId);
     const result = await runDispatcher.run({
       v: DISPATCH_SPEC_VERSION,
       run: {

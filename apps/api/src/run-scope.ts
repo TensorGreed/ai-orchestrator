@@ -50,7 +50,7 @@ import type {
 } from "@ai-orchestrator/workflow-engine";
 import type { SafeUser } from "./services/auth-service.js";
 import { productionRefusalCode } from "./services/release-service.js";
-import { PERSON_SESSION_MARKER, personSessionNamespace, projectSessionNamespace } from "./db/person-sessions.js";
+import { PERSON_SESSION_MARKER, personSessionNamespace, projectSessionNamespace, sessionOwnerKey } from "./db/person-sessions.js";
 
 type MemoryStore = NonNullable<WorkflowExecutionDependencies["memoryStore"]>;
 type ToolDataStore = NonNullable<WorkflowExecutionDependencies["toolDataStore"]>;
@@ -222,7 +222,7 @@ export function createRunScope(deps: RunScopeDeps) {
   const sessionStoresFor = (workflow: Workflow, sessionOwner?: string) => {
     const projectId = workflow.projectId ?? DEFAULT_PROJECT_ID;
     const key = (namespace: string) => {
-      if (sessionOwner) return personSessionNamespace(sessionOwner, projectId, namespace);
+      if (sessionOwner) return sessionOwnerKey(sessionOwner, projectId, namespace);
       // A namespace written like a person's key would reach that person's sessions: refused.
       if (namespace.startsWith(PERSON_SESSION_MARKER)) {
         throw new Error(`Session namespaces may not start with '${PERSON_SESSION_MARKER}'; it marks one person's sessions. Choose another namespace.`);

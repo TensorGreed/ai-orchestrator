@@ -100,7 +100,7 @@ function notebook(id: string): Workflow {
 }
 
 async function run(context: TestContext, cookie: string, workflowId: string, sessionId: string): Promise<void> {
-  const response = await call(context, "POST", `/api/workflows/${workflowId}/execute`, cookie, { input: { note: `note-${sessionId}` }, sessionId });
+  const response = await call(context, "POST", `/api/workflows/${encodeURIComponent(workflowId)}/execute`, cookie, { input: { note: `note-${sessionId}` }, sessionId });
   expect(response.statusCode, response.body).toBe(200);
   expect(response.json<{ status: string }>().status, response.body).toBe("success");
 }
@@ -174,6 +174,23 @@ describe("person-keyed session rows", () => {
     expect(hers).toHaveLength(1);
     expect(hers[0]).toContain(":wf-held:save");
     expect(rows.filter((row) => isPersonSessionOf(row.namespace, otto.id))).toHaveLength(1);
+  });
+});
+
+describe("pattern characters in ids", () => {
+  it("a workflow hold covers person-keyed rows of a workflow whose id has a backslash, _ or %", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin", "ada");
+    const olivia = await login(context, "operator", "olivia");
+    const odd = "wf\\a_b%c";
+    await context.store.upsertWorkflow(notebook(odd));
+    await context.store.upsertWorkflow(notebook("wfXa_bYc"));
+    await run(context, olivia.cookie, odd, "s-1");
+    await run(context, olivia.cookie, "wfXa_bYc", "s-1");
+    await hold(context, admin.cookie, odd);
+    expect((await call(context, "DELETE", `/api/users/${olivia.id}`, admin.cookie)).statusCode).toBeLessThan(300);
+    const hers = (await artifactKeys(context)).filter((row) => isPersonSessionOf(row.namespace, olivia.id)).map((row) => row.namespace);
+    expect(hers).toEqual([expect.stringContaining(`:${odd}:save`)]);
   });
 });
 

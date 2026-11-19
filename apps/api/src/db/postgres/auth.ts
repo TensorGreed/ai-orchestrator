@@ -381,7 +381,7 @@ async function deleteUserRows(client: PgClient, id: string): Promise<boolean> {
   // (under the legal-hold lock, so a hold placed meanwhile binds it).
   await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
   for (const table of PERSON_SESSION_TABLES) {
-    const found = await client.query<{ namespace: string }>(`SELECT DISTINCT namespace FROM ${table} WHERE namespace LIKE $1`, [personSessionLikePattern(id)]);
+    const found = await client.query<{ namespace: string }>(`SELECT DISTINCT namespace FROM ${table} WHERE namespace LIKE $1 ESCAPE '\\'`, [personSessionLikePattern(id)]);
     for (const namespace of found.rows.map((row) => String(row.namespace)).filter((key) => isPersonSessionOf(key, id))) {
       await client.query(`DELETE FROM ${table} WHERE namespace = $1 AND ${notHeldSql(table)}`, [namespace]);
     }
