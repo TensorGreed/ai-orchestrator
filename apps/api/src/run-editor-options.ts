@@ -9,7 +9,7 @@
 import type { UserRole } from "./services/auth-service.js";
 import { roleRank } from "./services/key-scopes.js";
 
-/** The run request fields only a builder (or admin) may send. */
+/** The run request fields only someone who may edit the workflow may send (`mayEdit`). */
 export const EDITOR_RUN_OPTIONS = [
   "startNodeId",
   "runMode",

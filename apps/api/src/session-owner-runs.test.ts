@@ -534,6 +534,18 @@ describe("one rule for who may edit: a builder role and workflow:write on the wo
     expect(retried.body).toContain("v1-released stop");
     expect(retried.body).not.toContain("unreleased draft stop");
 
+    // The owner's failed draft run from a node: the guest's retry runs the released version from the start, with none
+    // of that run's editor options (start node, run mode, node outputs).
+    const ownerFromNode = await call(context, "POST", "/api/workflows/wf-rel/execute", owner.cookie, { input: {}, startNodeId: "boom" });
+    const ownerRun = ownerFromNode.json<{ executionId: string; nodeResults: Array<{ nodeId: string }> }>();
+    expect(ownerFromNode.body).toContain("unreleased draft stop");
+    expect(ownerRun.nodeResults.map((entry) => entry.nodeId)).not.toContain("start");
+    const guestRetry = await call(context, "POST", `/api/executions/${ownerRun.executionId}/retry`, guest.cookie, {});
+    expect([200, 400]).toContain(guestRetry.statusCode);
+    expect(guestRetry.body).toContain("v1-released stop");
+    expect(guestRetry.body).not.toContain("unreleased draft stop");
+    expect(guestRetry.json<{ nodeResults: Array<{ nodeId: string }> }>().nodeResults.map((entry) => entry.nodeId)).toContain("start");
+
     const replay = await call(context, "POST", `/api/executions/${manualRun}/replay`, guest.cookie, {});
     expect(replay.statusCode, replay.body).toBe(403);
     // The owner, who may edit it, still runs the draft from the manual trigger route.

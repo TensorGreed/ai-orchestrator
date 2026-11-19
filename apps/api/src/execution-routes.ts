@@ -697,11 +697,13 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       channel: retryChannel,
       policyActor: user,
       workflow,
-      startNodeId: executionPayload.startNodeId,
-      runMode: executionPayload.runMode,
+      // The source run's editor options (a start node, one node, its node outputs) carry over only for someone who may
+      // edit the workflow; anyone else retries the whole released workflow from the start.
+      ...(mayEdit
+        ? { startNodeId: executionPayload.startNodeId, runMode: executionPayload.runMode, nodeOutputs: prepared.nodeOutputs }
+        : { runMode: "workflow" as const }),
       usePinnedData: executionPayload.usePinnedData,
       pinnedData: executionPayload.pinnedData,
-      nodeOutputs: prepared.nodeOutputs,
       // v74 — content copied from a run that was sensitive work.
       ...(prepared.sensitiveInput ? { sensitiveInput: true } : {}),
       directInput: executionPayload.input,

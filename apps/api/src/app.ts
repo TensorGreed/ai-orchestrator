@@ -10838,6 +10838,7 @@ export async function createApp(
     // the owning project and the member-change step-up (workflowShareManager).
     const managed = await workflowShareManager(user, request.params.id);
     if (!managed.ok) return denyRunAccess(reply, managed);
+    if (!await requireStepUp(request, reply, "project_member.change")) return;
     const workflow = managed.workflow;
     const owningProject = workflow.projectId ?? DEFAULT_PROJECT_ID;
     const parsed = workflowShareSchema.safeParse(request.body);
@@ -10853,7 +10854,6 @@ export async function createApp(
       reply.code(400);
       return { error: "Cannot share a workflow to its owning project" };
     }
-    if (!await requireStepUp(request, reply, "project_member.change")) return;
     await rbacService.shareWorkflow({
       workflowId: workflow.id,
       projectId: parsed.data.projectId,
