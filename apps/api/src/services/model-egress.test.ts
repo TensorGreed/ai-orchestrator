@@ -1,5 +1,11 @@
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
 import http, { type IncomingHttpHeaders } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import https from "node:https";
+import os from "node:os";
+import path from "node:path";
+import tls from "node:tls";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   createDefaultEmbeddingRegistry,
   createDefaultProviderRegistry,
@@ -148,5 +154,112 @@ describe("model egress pins model calls to the checked address", () => {
   it("checks extra.endpoint as well as the base URL", async () => {
     const egress = createModelEgress({ guard: { denyPrivate: false, allowlist: [] }, resolver: rebindingResolver("127.0.0.1", 99, "127.0.0.1"), env: {} });
     await expect(egress.contextFor({ extra: { endpoint: "http://169.254.169.254" } }, withSecret)).rejects.toThrow(/link local|metadata/i);
+  });
+});
+
+describe("pinned model calls over HTTPS", () => {
+  // A self-signed certificate for model.internal.test, trusted for these tests only. The stub resolver is the only
+  // thing that knows the name, so a request that arrives went through the pinned lookup; TLS still checks the
+  // certificate against the URL's host name (sent as SNI), not against the address it connected to.
+  const NAME = "model.internal.test";
+  let cert = "";
+  let key = "";
+  let defaultCas: string[] = [];
+  const httpsServers: https.Server[] = [];
+
+  beforeAll(() => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-model-tls-"));
+    execFileSync("openssl", [
+      "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", `/CN=${NAME}`,
+      "-addext", `subjectAltName=DNS:${NAME}`, "-addext", "basicConstraints=critical,CA:TRUE",
+      "-keyout", path.join(dir, "key.pem"), "-out", path.join(dir, "cert.pem")
+    ], { stdio: "ignore" });
+    cert = fs.readFileSync(path.join(dir, "cert.pem"), "utf8");
+    key = fs.readFileSync(path.join(dir, "key.pem"), "utf8");
+    fs.rmSync(dir, { recursive: true, force: true });
+    defaultCas = tls.getCACertificates("default");
+    tls.setDefaultCACertificates([...defaultCas, cert]);
+  });
+
+  afterAll(async () => {
+    tls.setDefaultCACertificates(defaultCas);
+    for (const server of httpsServers.splice(0)) await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  async function tlsModelServer(statuses: number[] = [200]) {
+    const seen: Array<{ servername: string | false | null; host: string | undefined }> = [];
+    const names: string[] = [];
+    const server = https.createServer(
+      {
+        cert,
+        key,
+        SNICallback: (servername, done) => {
+          names.push(servername);
+          done(null, tls.createSecureContext({ cert, key }));
+        }
+      },
+      (request, response) => {
+        seen.push({ servername: (request.socket as tls.TLSSocket).servername, host: request.headers.host });
+        request.resume();
+        const status = statuses[Math.min(seen.length - 1, statuses.length - 1)]!;
+        if (status !== 200) {
+          response.writeHead(status, { "retry-after": "0", "content-type": "application/json" });
+          response.end(JSON.stringify({ error: { message: "busy" } }));
+          return;
+        }
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ choices: [{ message: { content: "tls ok" }, finish_reason: "stop" }] }));
+      }
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    httpsServers.push(server);
+    return { port: (server.address() as { port: number }).port, seen, names };
+  }
+
+  const call = (egress: ReturnType<typeof createModelEgress>, baseUrl: string, extra: Record<string, unknown> = {}) =>
+    registryWith(egress).get("openai_compatible").generate({ provider: { providerId: "openai_compatible", model: "m", baseUrl, secretRef, extra }, messages }, withSecret);
+
+  it("connects to the vetted address with the host name as SNI, and the certificate is checked against that name", async () => {
+    const target = await tlsModelServer();
+    const resolver = rebindingResolver("127.0.0.1", 99, "127.0.0.1");
+    const egress = createModelEgress({ guard: { denyPrivate: false, allowlist: [] }, resolver, env: {} });
+    const answer = await call(egress, `https://${NAME}:${target.port}/v1`);
+    expect(answer.content).toBe("tls ok");
+    expect(target.names).toEqual([NAME]);
+    expect(target.seen).toEqual([{ servername: NAME, host: `${NAME}:${target.port}` }]);
+    expect(resolver.calls.every((host) => host === NAME)).toBe(true);
+  });
+
+  it("refuses a certificate that does not name the URL's host, even on the vetted address", async () => {
+    const target = await tlsModelServer();
+    const other = "other.internal.test";
+    const egress = createModelEgress({ guard: { denyPrivate: false, allowlist: [] }, resolver: rebindingResolver("127.0.0.1", 99, "127.0.0.1"), env: {} });
+    await expect(call(egress, `https://${other}:${target.port}/v1`, { maxRetries: 0 })).rejects.toThrow(/altnames|does not match|certificate|fetch failed/i);
+    // The handshake named the URL's host, and no request was sent over the refused connection.
+    expect(target.names).toEqual([other]);
+    expect(target.seen).toEqual([]);
+  });
+
+  it("each retry is checked again and stays pinned: a name that rebinds before the retry never gets it", async () => {
+    const target = await tlsModelServer([503, 200]);
+    // Lookups: the gate's check, then the first attempt's check and pinned connect (all loopback, allowed here);
+    // from then on the name answers the metadata address, which is always refused.
+    const resolver = rebindingResolver("127.0.0.1", 3, "169.254.169.254");
+    const egress = createModelEgress({ guard: { denyPrivate: false, allowlist: [] }, resolver, env: {} });
+    await expect(call(egress, `https://${NAME}:${target.port}/v1`, { maxRetries: 2 })).rejects.toThrow(/169\.254|metadata|link-local|blocked/i);
+    expect(target.seen).toHaveLength(1);
+    expect(resolver.calls.length).toBeGreaterThan(3);
+  });
+
+  it("a retry on a stable name is checked and pinned again, and succeeds", async () => {
+    const target = await tlsModelServer([503, 200]);
+    const resolver = rebindingResolver("127.0.0.1", 99, "127.0.0.1");
+    const egress = createModelEgress({ guard: { denyPrivate: false, allowlist: [] }, resolver, env: {} });
+    const answer = await call(egress, `https://${NAME}:${target.port}/v1`, { maxRetries: 2 });
+    expect(answer.content).toBe("tls ok");
+    expect(target.seen).toHaveLength(2);
+    expect(target.seen.every((entry) => entry.servername === NAME)).toBe(true);
+    // One lookup for the gate, then a check and a pinned connect per attempt.
+    expect(resolver.calls.length).toBeGreaterThanOrEqual(5);
   });
 });

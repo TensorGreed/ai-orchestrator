@@ -370,3 +370,73 @@ describe("a request-supplied base URL goes through the outbound URL checks", () 
     expect(target.seen.length).toBeGreaterThan(0);
   });
 });
+
+describe("content rule embeddings go through the outbound URL checks", () => {
+  // A Content Rules node's semantic topic check embeds through the run's gated embedding registry, whether or not
+  // telemetry is on (it used to fall back to an ungated registry when it was off).
+  async function runTopicCheck(overrides: Record<string, string>) {
+    const context = await createTestContext(overrides);
+    const cookie = await login(context, "admin");
+    const target = await captureServer();
+    const profile = await context.app.inject({
+      method: "POST",
+      url: "/api/guard/profiles",
+      headers: { cookie },
+      payload: {
+        document: {
+          id: "topics-endpoint",
+          name: "Topics",
+          version: "1",
+          channels: {
+            final_output: {
+              detectors: [
+                {
+                  id: "output.topic",
+                  threshold: 0.5,
+                  options: { mode: "semantic", model: { providerId: "ollama", model: "embed-1", baseUrl: target.baseUrl }, deny: [{ name: "investing", examples: ["which stocks to buy"] }] }
+                }
+              ],
+              actions: {},
+              defaultAction: { action: "block" }
+            }
+          }
+        }
+      }
+    });
+    expect(profile.statusCode, profile.body).toBe(201);
+    const workflow = {
+      id: "wf-topic-embed",
+      name: "Topic embed",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "default",
+      nodes: [
+        { id: "in", type: "text_input", name: "In", position: { x: 0, y: 0 }, config: { text: "hello" } },
+        { id: "llm", type: "llm_call", name: "LLM", position: { x: 200, y: 0 }, config: { provider: { providerId: "echo", model: "echo-1" } } },
+        { id: "rules", type: "guard", name: "Rules", position: { x: 400, y: 0 }, config: { profileId: "topics-endpoint", channel: "final_output", inputField: "answer" } },
+        { id: "out", type: "output", name: "Out", position: { x: 600, y: 0 }, config: { responseTemplate: "{{answer}}", outputKey: "result" } }
+      ],
+      edges: [
+        { id: "e1", source: "in", target: "llm" },
+        { id: "e2", source: "llm", target: "rules" },
+        { id: "e3", source: "rules", target: "out" }
+      ]
+    };
+    const saved = await context.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie }, payload: workflow });
+    expect(saved.statusCode, saved.body).toBe(200);
+    const run = await context.app.inject({ method: "POST", url: "/api/workflows/wf-topic-embed/execute", headers: { cookie }, payload: {} });
+    return { run, target };
+  }
+
+  it("a private embedding endpoint is refused under OUTBOUND_DENY_PRIVATE, with telemetry off, before any request", async () => {
+    const { run, target } = await runTopicCheck({ OUTBOUND_DENY_PRIVATE: "true" });
+    expect(run.body).toMatch(/OUTBOUND_DENY_PRIVATE/);
+    expect(target.seen).toEqual([]);
+  });
+
+  it("the same endpoint is reached when private addresses are allowed (control)", async () => {
+    const { target } = await runTopicCheck({});
+    expect(target.seen.length).toBeGreaterThanOrEqual(1);
+    expect(target.seen[0]!.url).toMatch(/embed/);
+  });
+});
