@@ -190,7 +190,7 @@ in `MFA_REQUIRED_ROLES`, see [MFA required per role](#mfa-required-per-role)).
   no `+`, the inspector offers no <span v-pre>`{{`</span> suggestions, helper chips, Input fields to drag in or
   **Run node**, and the workflow settings in **More actions** are not offered.
   `GET /api/workflows/:id/access` answers what the signed-in user may do: `canEdit`, `canRun`, `canShare` (share with
-  people, as the share routes allow), `canShareWithProjects`, and `ownRunsOnly` (they see only their own runs: see
+  people or with other projects, as the share routes allow: `project:invite`), and `ownRunsOnly` (they see only their own runs: see
   [Own runs only](#own-runs-only)).
 - **Shared with this project.** The Workflows page lists the workflows other projects share to the active one, with
   the access members get there (`GET /api/projects/:id/shared-workflows`).
@@ -261,6 +261,10 @@ or `POST /api/workflows/:id/user-shares` with `{ "email": "...", "accessLevel": 
   `userShares` in `GET /api/workflows/:id/shares`), with each person's role and `effectiveAccess`.
 - **Audit.** `workflow.user_share` (with `targetUserId`, `targetEmail`, `accessLevel`, `effectiveAccess`) and
   `workflow.user_unshare`, in the `sharing` category.
+
+Sharing a workflow with another project (`POST /api/workflows/:id/shares`, `DELETE /api/workflows/:id/shares/:projectId`)
+takes the same as sharing with people: `project:invite` on the workflow's own project (or an admin) and the same
+step-up. Project editors cannot share workflows; a project admin can.
 
 ### Own runs only
 

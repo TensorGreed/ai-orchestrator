@@ -60,3 +60,27 @@ describe("WorkflowShareModal people", () => {
     expect(screen.queryByRole("heading", { name: "People" })).not.toBeInTheDocument();
   });
 });
+
+describe("WorkflowShareModal projects", () => {
+  const projects = [
+    { id: "default", name: "Default" },
+    { id: "ops", name: "Ops" }
+  ] as unknown as Parameters<typeof WorkflowShareModal>[0]["projects"];
+  const projectShare = { workflowId: "wf", projectId: "ops", accessLevel: "read" as const, sharedBy: "owner@example.com", createdAt: "2026-11-18T00:00:00.000Z" };
+
+  it("shows who may not manage shares the current project shares only, with no Share or Unshare", async () => {
+    vi.mocked(api.fetchWorkflowShares).mockResolvedValue({ shares: [projectShare] });
+    render(<WorkflowShareModal workflowId="wf" workflowName="Orders" owningProjectId="default" projects={projects} onClose={() => undefined} />);
+    expect(await screen.findByRole("cell", { name: "Ops" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Target project")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Unshare" })).not.toBeInTheDocument();
+    expect(screen.getByText(/Only someone who may add members to this workflow's project can share it/)).toBeInTheDocument();
+  });
+
+  it("lets someone who may manage shares share with a project and unshare", async () => {
+    vi.mocked(api.fetchWorkflowShares).mockResolvedValue({ shares: [projectShare], userShares: [] });
+    render(<WorkflowShareModal workflowId="wf" workflowName="Orders" owningProjectId="default" projects={projects} onClose={() => undefined} />);
+    expect(await screen.findByRole("button", { name: "Unshare" })).toBeInTheDocument();
+    expect(screen.queryByText(/Only someone who may add members/)).not.toBeInTheDocument();
+  });
+});

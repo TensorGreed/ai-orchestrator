@@ -92,7 +92,7 @@ See [Project access](./auth-rbac.md#project-access) before switching an existing
 | | Project share | Person share |
 |---|---|---|
 | Gives | `read` or `execute` to the members of another project | **Can view** (`read`) or **Can view and run** (`execute`) to one person |
-| Who manages it | `workflow:write` in the workflow's project, or an admin | `project:invite` in the workflow's project (who may add members), or an admin, with the same step-up |
+| Who manages it | `project:invite` in the workflow's project (who may add members), or an admin, with the member-change step-up | The same |
 | Running through it | Needs `workflow:execute` in the project it is shared to | Needs a role that may run (operator and up). A viewer's run share only reads |
 | Runs they see | All runs | Only their own, when the share is all they have |
 | Not allowed | Sharing to the owning project | Yourself, service accounts, people without an account (invite them first) |
