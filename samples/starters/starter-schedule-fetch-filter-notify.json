@@ -4,7 +4,7 @@
   "workflow": {
     "id": "starter-schedule-fetch-filter-notify",
     "name": "Schedule: fetch, filter and notify",
-    "description": "On a weekday schedule (off until you turn it on), fetches orders from the built-in sample API, keeps the pending ones and posts a summary to the built-in sample notifier. Run it now to try it.",
+    "description": "On a weekday schedule, fetches orders from the built-in sample API, keeps the pending ones and posts a summary to the built-in sample notifier. The schedule starts switched off: turn it on in the schedule node. Run it now to try it.",
     "schemaVersion": "1.0.0",
     "workflowVersion": 1,
     "nodes": [

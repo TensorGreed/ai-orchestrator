@@ -42,6 +42,7 @@ A used-up block budget stops a run before it starts, whatever started it:
 | Schedules, app and polling triggers | Nothing waits for an answer, so a failed run is recorded: `Budget "…" exceeded for the current month. The run did not start.` |
 | Replays that may call models or tools live | HTTP 402, as above (see below) |
 | MCP gateway tool calls | JSON-RPC error `-31032` (see [MCP gateway](./mcp-gateway.md#budgets-and-rate-limits)) |
+| **Describe it…** (drafting a workflow with a model) | HTTP 402 with `code: "budget_exceeded"` and a message naming the budget, before any model call. Project, user and global budgets apply; its usage is recorded as **Describe it (builds)** |
 
 Runs dispatched to queue workers are checked on the instance that takes the request, before they are queued.
 

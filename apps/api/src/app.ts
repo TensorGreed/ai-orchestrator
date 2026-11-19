@@ -223,6 +223,7 @@ import {
 import { ExternalSecretsService } from "./services/external-secrets-service";
 import { GIT_SYNC_LOCK_WAIT_MS, GitSyncService } from "./services/git-sync-service.js";
 import { LeaderElectionService, NEVER_LEAD } from "./services/leader-election-service";
+import { ExecutionStarterFillService } from "./services/execution-starter-fill-service.js";
 import { RetentionService, captureStep, redactionStep, ruleSimulationStep, usageRetentionWarning } from "./services/retention-service.js";
 import { reconcileInterruptedRuns } from "./services/run-reconcile-service.js";
 import type { ClusterBus } from "./services/cluster-bus.js";
@@ -291,8 +292,9 @@ import type { SensitiveValuesMarker } from "@ai-orchestrator/shared";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { registerUserInviteRoutes } from "./user-invite-routes.js";
-import { registerWorkflowBuilderRoutes } from "./workflow-builder-routes.js";
+import { WORKFLOW_BUILDER_TRIGGER_TYPE, WORKFLOW_BUILDER_USAGE_LABEL, WORKFLOW_BUILDER_USAGE_WORKFLOW_ID, registerWorkflowBuilderRoutes } from "./workflow-builder-routes.js";
 import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
+import { LIVE_ENTRY_OFF_CODE, isLiveEntryOff, liveEntryOffMessage } from "@ai-orchestrator/shared";
 import { envModelProviders } from "@ai-orchestrator/shared";
 import {
   CONTENT_FILTER_CODE,
@@ -1231,7 +1233,9 @@ function listWebhookEndpoints(workflow: Workflow): WebhookEndpoint[] {
 async function listWebhookEndpointMatchesByPath(
   store: Store,
   path: string,
-  load: WorkflowLoader = async (id) => await store.getWorkflow(id)
+  load: WorkflowLoader = async (id) => await store.getWorkflow(id),
+  /** Leave out webhooks switched off (production listings: an off webhook is not advertised). */
+  liveOnly = false
 ): Promise<Array<{ workflowId: string; workflowName: string; nodeId: string; path: string; method: string }>> {
   const normalizedPath = normalizeWebhookPath(path, "").toLowerCase();
   const matches: Array<{ workflowId: string; workflowName: string; nodeId: string; path: string; method: string }> = [];
@@ -1244,6 +1248,7 @@ async function listWebhookEndpointMatchesByPath(
     }
 
     for (const endpoint of listWebhookEndpoints(workflow)) {
+      if (liveOnly && endpoint.config.active === false) continue;
       if (endpoint.path.toLowerCase() !== normalizedPath) {
         continue;
       }
@@ -1297,7 +1302,9 @@ async function listMcpServerUsages(
 
 async function listAllWebhookEndpoints(
   store: Store,
-  load: WorkflowLoader = async (id) => await store.getWorkflow(id)
+  load: WorkflowLoader = async (id) => await store.getWorkflow(id),
+  /** Leave out webhooks switched off (production listings: an off webhook is not advertised). */
+  liveOnly = false
 ): Promise<Array<{ workflowId: string; workflowName: string; nodeId: string; path: string; method: string }>> {
   const endpoints: Array<{ workflowId: string; workflowName: string; nodeId: string; path: string; method: string }> = [];
   const workflows = await store.listWorkflows();
@@ -1309,6 +1316,7 @@ async function listAllWebhookEndpoints(
     }
 
     for (const endpoint of listWebhookEndpoints(workflow)) {
+      if (liveOnly && endpoint.config.active === false) continue;
       endpoints.push({
         workflowId: workflow.id,
         workflowName: workflow.name,
@@ -5763,6 +5771,20 @@ export async function createApp(
   app.addHook("onClose", async () => {
     await retention.stop();
   });
+  // v80 — who started the runs recorded before the upgrade: filled in the background after start-up, in short batches,
+  // by one instance at a time (the leader holding the fill's lease). Until a run is reached it is nobody's own.
+  const starterFill = new ExecutionStarterFillService({
+    store,
+    instanceId: leaderElection.getInstanceId(),
+    isLeader: () => leaderElection.isLeader(),
+    logger: { info: (fields, message) => app.log.info(fields, message), warn: (fields, message) => app.log.warn(fields, message) }
+  });
+  app.addHook("onReady", async () => {
+    starterFill.start();
+  });
+  app.addHook("onClose", async () => {
+    await starterFill.stop();
+  });
 
   const notificationService = new NotificationService(config, async () =>
     (await store.listNotificationConfigs()).map(c => ({
@@ -5800,11 +5822,11 @@ export async function createApp(
   });
 
   /**
-   * v80 — who started a paused run that recorded no starter's user id: its history's (migration 80 set it on the runs
-   * recorded before, or left it empty when it could tell nobody). A run paused with no history row follows migration
-   * 80's rule: its first approval request's requester (`firstRequester`, by user id, else by email) or, with no request,
-   * the paused row's `triggeredBy`; that names the account with that user id, or with that email when the account is
-   * older than the run.
+   * v80 — who started a paused run that recorded no starter's user id: its history's (the v80 fill set it on the runs
+   * recorded before, or left it empty when it could tell nobody). A run paused with no history row, or one the fill has
+   * not reached yet, follows the fill's rule: its first approval request's requester (`firstRequester`, by user id,
+   * else by email) or, with no request, the paused row's `triggeredBy`; that names the account with that user id, or
+   * with that email when the account is older than the run.
    */
   const pausedRunStarter = async (
     executionId: string,
@@ -5813,7 +5835,11 @@ export async function createApp(
     triggeredBy: string | null,
     startedAt: string | null
   ): Promise<string | null> => {
-    if (hasHistory) return await store.getExecutionStarter(executionId);
+    if (hasHistory) {
+      const recorded = await store.getExecutionStarter(executionId);
+      // A run recorded before v80 that the background fill has not reached yet: the fill's rule, applied here.
+      if (recorded || (await store.getExecutionStarterFill()).done) return recorded;
+    }
     if (firstRequester?.userId) return (await store.getUserById(firstRequester.userId))?.id ?? null;
     const ref = firstRequester ? firstRequester.email : triggeredBy;
     if (!ref) return null;
@@ -13321,6 +13347,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         return deactivated ? `<h1>${escapeHtml(DEACTIVATED_MESSAGE)}</h1>` : "<h1>Form not found</h1>";
       }
       const cfg = asRecord(found.node.config);
+      if (isLiveEntryOff(found.node)) {
+        reply.code(404);
+        reply.type("text/html");
+        return `<h1>${escapeHtml(liveEntryOffMessage("form_trigger"))}</h1>`;
+      }
       if (cfg.authMode === "session") {
         const user = await requireRole(request, reply, ["viewer"]);
         if (!user) return;
@@ -13347,6 +13378,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         return { error: deactivated ? DEACTIVATED_MESSAGE : "Form not found" };
       }
       const cfg = asRecord(found.node.config);
+      if (isLiveEntryOff(found.node)) {
+        reply.code(404);
+        return { error: liveEntryOffMessage("form_trigger"), code: LIVE_ENTRY_OFF_CODE };
+      }
       // A signed-in submission is the submitter's own run, kept to their sessions where theirs are kept apart.
       let submitter: { triggeredByUserId?: string; sessionOwner?: string } = {};
       if (cfg.authMode === "session") {
@@ -13408,6 +13443,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       if (!chatNode) {
         reply.code(400);
         return { error: "Workflow has no chat_trigger node" };
+      }
+      if (isLiveEntryOff(chatNode)) {
+        reply.code(404);
+        return { error: liveEntryOffMessage("chat_trigger"), code: LIVE_ENTRY_OFF_CODE };
       }
       const cfg = asRecord(chatNode.config);
       const authMode = typeof cfg.authMode === "string" ? cfg.authMode : "public";
@@ -13516,9 +13555,16 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     return { error: deactivated ? DEACTIVATED_MESSAGE : "MCP server not found" };
   };
 
+  /** An MCP trigger switched off: no manifest and no calls until it is turned on. */
+  const mcpServerOff = (reply: FastifyReply): { error: string; code: string } => {
+    reply.code(404);
+    return { error: liveEntryOffMessage("mcp_server_trigger"), code: LIVE_ENTRY_OFF_CODE };
+  };
+
   app.get<{ Params: { path: string } }>("/api/mcp-server/:path/manifest", async (request, reply) => {
     const found = await findMcpServerWorkflow(request.params.path);
     if (!found) return await mcpServerMissing(reply, request.params.path);
+    if (isLiveEntryOff(found.node)) return mcpServerOff(reply);
     const cfg = asRecord(found.node.config);
     return {
       name: cfg.toolName ?? "",
@@ -13532,6 +13578,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     async (request, reply) => {
       const found = await findMcpServerWorkflow(request.params.path);
       if (!found) return await mcpServerMissing(reply, request.params.path);
+      if (isLiveEntryOff(found.node)) return mcpServerOff(reply);
       const cfg = asRecord(found.node.config);
       if (cfg.authMode === "bearer") {
         const secret = await secretService.resolveSecret(toSecretReference(cfg.secretRef));
@@ -14001,7 +14048,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
               return { error: DEACTIVATED_MESSAGE, path: request.params.path };
             }
           }
-          const pathMatches = await listWebhookEndpointMatchesByPath(store, request.params.path, loadForRoute);
+          const pathMatches = await listWebhookEndpointMatchesByPath(store, request.params.path, loadForRoute, !isTestRoute);
           if (pathMatches.length > 0) {
             const allowedMethods = [...new Set(pathMatches.map((entry) => entry.method))];
             reply.code(405);
@@ -14014,7 +14061,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
               matches: pathMatches
             };
           }
-          const allEndpoints = await listAllWebhookEndpoints(store, loadForRoute);
+          const allEndpoints = await listAllWebhookEndpoints(store, loadForRoute, !isTestRoute);
           const methodMatches = allEndpoints.filter((entry) => entry.method === request.method).slice(0, 20);
           reply.code(404);
           return {
@@ -14024,6 +14071,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             hint: "Ensure workflow is saved and webhook node path/method match this request.",
             availableEndpoints: methodMatches
           };
+        }
+
+        // A webhook switched off (a starter's, until its owner turns it on) takes no production calls; /webhook-test/ and
+        // the editor's runs still work.
+        if (!isTestRoute && match.endpoint.config.active === false) {
+          reply.code(404);
+          return { error: liveEntryOffMessage("webhook_input"), code: LIVE_ENTRY_OFF_CODE, path: request.params.path };
         }
 
         // Phase 13.2 — the trigger's own address list (optional), checked before its auth.
@@ -16983,6 +17037,42 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       // Like a duplicate or a template: trigger paths nobody uses, and no setting only an admin may make.
       const withPaths = withUniqueTriggerPaths(workflow, await releaseService.usedRoutingKeys());
       return { ...workflow, nodes: withoutTriggerTrust(withPaths).nodes };
+    },
+    checkBudget: async (user, projectId) => {
+      const blocked = await budgetService.checkBlock({ workflowId: null, projectId, userEmail: user.email, userId: user.id });
+      return blocked
+        ? { budgetId: blocked.budget.id, budgetName: blocked.budget.name, period: blocked.budget.period, periodStart: blocked.periodStart }
+        : null;
+    },
+    recordUsage: async ({ user, projectId, buildId, status, durationMs, calls }) => {
+      const totals = await usageService.recordExecution({
+        executionId: buildId,
+        workflowId: WORKFLOW_BUILDER_USAGE_WORKFLOW_ID,
+        workflowName: WORKFLOW_BUILDER_USAGE_LABEL,
+        userId: user.id,
+        userEmail: user.email,
+        projectId,
+        triggerType: WORKFLOW_BUILDER_TRIGGER_TYPE,
+        status,
+        durationMs,
+        nodeResults: {},
+        liveModelCalls: calls.map((call) => ({
+          providerId: call.providerId,
+          model: call.model,
+          inputTokens: call.usage.inputTokens ?? null,
+          outputTokens: call.usage.outputTokens ?? null,
+          cachedInputTokens: call.usage.cachedInputTokens ?? null
+        }))
+      });
+      await budgetService.recordExecution({
+        executionId: buildId,
+        workflowId: null,
+        projectId,
+        userEmail: user.email,
+        userId: user.id,
+        spentUsd: totals.costUsd,
+        spentTokens: totals.totalTokens
+      });
     },
     isModelNotAllowed: (error) => isModelNotAllowedError(error),
     redact: (text) => String(secretService.redact(text))

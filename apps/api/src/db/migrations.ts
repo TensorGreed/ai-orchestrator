@@ -1,3 +1,5 @@
+import { STARTER_FILL_DONE_MARKER, STARTER_FILL_UPTO_PREFIX } from "./execution-starter-fill.js";
+
 export interface Migration {
   version: number;
   description: string;
@@ -3128,69 +3130,22 @@ export const MIGRATIONS: Migration[] = [
     // form or chat), or NULL (a webhook, a schedule, a public trigger). Set once and kept: a resume by an approver does
     // not change it. "Own runs" (run-access.ts) judge by it and by session_owner only.
     //
-    // Runs recorded before v80 get it here, once. Who started a run: for a run that asked for an approval, its first
-    // request's requester (an older build wrote the approver into triggered_by when it resumed), by user id, else by
-    // email; a resumed run with no request names nobody; any other run, its triggered_by. That reference names the
-    // account with that user id, or with that email (in any case) when the account was created before the run started.
-    // A reference that names no account, one created after the run (the email was given to someone new), or two
-    // accounts leaves NULL: nobody's own run. Done now, so renaming an account later neither brings it other people's
-    // runs nor takes its own away. In batches of 5000 runs by id, so a large table is not joined in one statement.
+    // Runs recorded before v80 get it from a background job after start-up (services/execution-starter-fill-service.ts),
+    // in short batches, not here: the fill used to run in this transaction and locked the table for about 12 s per
+    // million runs. Here only the runs to visit are recorded: those up to the highest `seq` now (or, with no runs, the
+    // fill is done at once). A database that took v80 when it still filled the runs here has no marker, so the job
+    // leaves it alone. The rule the job applies is in db/postgres/execution-starter-fill.ts.
     up: `
       ALTER TABLE execution_history ADD COLUMN IF NOT EXISTS triggered_by_user_id TEXT;
-      DO $$
-      DECLARE
-        last_id TEXT := '';
-        batch_ids TEXT[];
-        step BIGINT;
-        matched BIGINT := 0;
-      BEGIN
-        LOOP
-          SELECT array_agg(b.id ORDER BY b.id) INTO batch_ids FROM (
-            SELECT id FROM execution_history
-            WHERE id > last_id AND triggered_by_user_id IS NULL
-            ORDER BY id LIMIT 5000
-          ) b;
-          EXIT WHEN batch_ids IS NULL;
-          -- Three equality joins (by the request's user id, by id, by email) instead of one join on OR, so each is a
-          -- hash join: the OR form compared every run of a batch with every account.
-          UPDATE execution_history eh SET triggered_by_user_id = m.user_id
-          FROM (
-            WITH s AS (
-              SELECT h.id, h.started_at,
-                fr.requested_by_user_id AS ref_id,
-                CASE WHEN fr.execution_id IS NOT NULL THEN fr.requested_by
-                     WHEN h.trigger_type = 'approval_resume' THEN NULL
-                     ELSE h.triggered_by END AS ref
-              FROM execution_history h
-              LEFT JOIN LATERAL (
-                SELECT a.execution_id, a.requested_by_user_id, a.requested_by FROM approval_requests a
-                WHERE a.execution_id = h.id ORDER BY a.created_at, a.id LIMIT 1
-              ) fr ON TRUE
-              WHERE h.id = ANY(batch_ids)
-            ),
-            c AS (
-              SELECT s.id, u.id AS user_id FROM s JOIN users u ON u.id = s.ref_id
-              UNION
-              SELECT s.id, u.id FROM s JOIN users u ON u.id = s.ref WHERE s.ref_id IS NULL
-              UNION
-              SELECT s.id, u.id FROM s JOIN users u ON LOWER(u.email) = LOWER(s.ref)
-              WHERE s.ref_id IS NULL AND u.created_at <= s.started_at
-            )
-            SELECT c.id, MIN(c.user_id) AS user_id FROM c GROUP BY c.id HAVING COUNT(*) = 1
-          ) m
-          WHERE eh.id = m.id;
-          GET DIAGNOSTICS step = ROW_COUNT;
-          matched := matched + step;
-          last_id := batch_ids[array_length(batch_ids, 1)];
-        END LOOP;
-        IF matched > 0 THEN
-          RAISE NOTICE 'L2M v80: recorded the starter''s user id on % earlier runs', matched;
-        END IF;
-      END $$;
+      INSERT INTO schema_markers (name, created_at)
+      SELECT CASE WHEN top IS NULL OR top <= 0 THEN '${STARTER_FILL_DONE_MARKER}' ELSE '${STARTER_FILL_UPTO_PREFIX}' || top::text END, CURRENT_TIMESTAMP
+      FROM (SELECT MAX(seq) AS top FROM execution_history) t
+      ON CONFLICT (name) DO NOTHING;
     `,
-    // An older build ignores the column; going forward again runs the backfill again.
+    // An older build ignores the column; going forward again fills it again.
     down: `
       ALTER TABLE execution_history DROP COLUMN IF EXISTS triggered_by_user_id;
+      DELETE FROM schema_markers WHERE name = '${STARTER_FILL_DONE_MARKER}' OR left(name, length('execution_starter_fill_')) = 'execution_starter_fill_';
     `
   },
   {

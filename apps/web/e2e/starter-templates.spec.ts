@@ -168,4 +168,42 @@ test("the document search starter runs on the local embedder and shows typed vec
   await expect(inspector.getByLabel("Vector Store Extra Config (JSON)")).toHaveCount(0);
   await page.screenshot({ path: path.join(SHOT_DIR, "after-08-vector-store-settings.png") });
   await inspector.getByRole("button", { name: "Close inspector" }).click();
+  await page.getByRole("alertdialog", { name: "Unsaved changes" }).getByRole("button", { name: "Discard" }).click();
+  await expect(inspector).toHaveCount(0);
+});
+
+test("the webhook starter's production URL answers not found until its trigger is turned on; the editor runs it either way", async () => {
+  test.setTimeout(120_000);
+  const before = await workflowIds();
+  await useStarter("Webhook: reshape and reply");
+  await runAndExpectAllOk();
+
+  let id = "";
+  await expect
+    .poll(async () => {
+      id = [...(await workflowIds())].find((candidate) => !before.has(candidate)) ?? "";
+      return id;
+    }, { timeout: 15_000 })
+    .not.toBe("");
+  const stored = async () =>
+    (await (await page.request.get(`/api/workflows/${id}`)).json()) as { nodes: Array<{ type: string; config: Record<string, unknown> }> };
+  const hookConfig = (await stored()).nodes.find((node) => node.type === "webhook_input")!.config;
+  expect(hookConfig.active).toBe(false);
+  const url = `/webhook/${String(hookConfig.path)}`;
+  const off = await page.request.post(url, { data: { name: "Ada Lovelace" } });
+  expect(off.status()).toBe(404);
+  expect(await off.json()).toMatchObject({ code: "trigger_off" });
+
+  const inspector = await inspect("Incoming request");
+  await expect(inspector.getByTestId("live-entry-off")).toContainText("Run in the editor works either way.");
+  await page.screenshot({ path: path.join(SHOT_DIR, "after-09-webhook-off.png") });
+  await inspector.getByTestId("live-entry-off").getByRole("button", { name: "Turn on" }).click();
+  await expect(inspector.getByTestId("live-entry-on")).toBeVisible();
+  await inspector.getByRole("button", { name: "Save changes" }).click();
+  await page.getByRole("banner").getByRole("button", { name: "Save", exact: true }).click();
+  await expect.poll(async () => (await stored()).nodes.find((node) => node.type === "webhook_input")!.config.active, { timeout: 15_000 }).toBeUndefined();
+
+  const on = await page.request.post(url, { data: { first_name: "Ada", last_name: "Lovelace", email: "ADA@example.com", plan: "enterprise" } });
+  expect(on.status()).toBe(200);
+  expect(await on.text()).toContain("Ada Lovelace");
 });

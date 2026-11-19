@@ -9,7 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import type { Workflow } from "@ai-orchestrator/shared";
+import { LIVE_ENTRY_NODE_TYPES, type Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
@@ -18,6 +18,7 @@ import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
 import { STARTER_API_BASE_TOKEN, STARTER_TEMPLATE_CATEGORY, seedTemplatesIfEmpty, selfApiBaseUrl } from "./services/seed-service.js";
 import { SAMPLE_ORDERS } from "./sample-data-routes.js";
+import { buildGatewayCatalog } from "./services/mcp-gateway-catalog.js";
 
 const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const starterDir = path.join(workspaceRoot, "samples", "starters");
@@ -292,6 +293,126 @@ describe("starter templates", () => {
     expect(own?.category).toBe("Mine");
     expect(own?.workflowJson).toBe(workflowJson);
     expect((await store.getTemplate(builtIn.id))?.category).toBe(STARTER_TEMPLATE_CATEGORY);
+  });
+});
+
+describe("starters start switched off", () => {
+  const anonymous = (method: "GET" | "POST", url: string, payload?: unknown, headers: Record<string, string> = {}) =>
+    context.app.inject({ method, url, headers, ...(payload !== undefined ? { payload: payload as object } : {}) });
+  const turnOn = async (workflow: Workflow, nodeId: string) => {
+    const nodes = workflow.nodes.map((node) => {
+      if (node.id !== nodeId) return node;
+      const { active: _off, ...config } = node.config as Record<string, unknown>;
+      return { ...node, config };
+    });
+    const saved = await context.app.inject({ method: "PUT", url: `/api/workflows/${workflow.id}`, headers: { cookie: context.cookie }, payload: { ...workflow, nodes } });
+    expect(saved.statusCode, saved.body).toBe(200);
+  };
+
+  it("every webhook, form, chat, MCP trigger and schedule in a starter is off, and its description says so", () => {
+    let entries = 0;
+    for (const file of starterFiles) {
+      const exported = JSON.parse(fs.readFileSync(path.join(starterDir, file), "utf8")) as { workflow: Workflow; companions?: Array<{ workflow: Workflow }> };
+      for (const workflow of [exported.workflow, ...(exported.companions ?? []).map((companion) => companion.workflow)]) {
+        const live = workflow.nodes.filter((node) => LIVE_ENTRY_NODE_TYPES.has(node.type));
+        for (const node of live) expect((node.config as Record<string, unknown>).active, `${file} ${node.id}`).toBe(false);
+        if (live.length > 0) expect(workflow.description, file).toMatch(/switched off/);
+        entries += live.length;
+      }
+    }
+    expect(entries).toBe(3);
+    const approval = JSON.parse(fs.readFileSync(path.join(starterDir, "starter-approval.json"), "utf8")) as { workflow: Workflow };
+    const gate = approval.workflow.nodes.find((node) => node.type === "approval_gate")!;
+    expect(gate.config).toMatchObject({ allowSelfApproval: true });
+    expect(String((gate.config as Record<string, unknown>).message)).toMatch(/Self-approval is on/);
+    expect(approval.workflow.description).toMatch(/Self-approval is on: whoever starts a run may approve it themselves/);
+  });
+
+  it("the webhook starter's production URL answers not found until it is turned on; the editor and the test URL run it", async () => {
+    const { workflow } = await useStarter("Webhook: reshape and reply");
+    const hook = workflow.nodes.find((node) => node.type === "webhook_input")!;
+    expect(hook.config).toMatchObject({ active: false });
+    const webhookPath = String((hook.config as Record<string, unknown>).path);
+    const body = { first_name: "Ada", last_name: "Lovelace", email: "ADA@example.com", plan: "enterprise" };
+    const off = await anonymous("POST", `/webhook/${webhookPath}`, body);
+    expect(off.statusCode).toBe(404);
+    expect(off.json()).toMatchObject({ code: "trigger_off", error: "This webhook is turned off. Turn it on in the workflow editor to accept live calls." });
+    // Another method or path does not advertise it either.
+    const wrongMethod = await anonymous("GET", `/webhook/${webhookPath}`);
+    expect(wrongMethod.statusCode).toBe(404);
+    expect(JSON.stringify(wrongMethod.json().availableEndpoints ?? [])).not.toContain(`"${webhookPath}"`);
+    const elsewhere = await anonymous("POST", `/webhook/no-such-${webhookPath}`, body);
+    expect(JSON.stringify(elsewhere.json().availableEndpoints ?? [])).not.toContain(`"${webhookPath}"`);
+    // The editor's runs: Run, Webhook run and the test URL.
+    expect((await run(workflow)).status).toBe("success");
+    expect((await webhookRun(workflow)).status).toBe("success");
+    const test = await anonymous("POST", `/webhook-test/${webhookPath}`, body);
+    expect(test.statusCode, test.body).toBe(200);
+
+    await turnOn(workflow, hook.id);
+    const on = await anonymous("POST", `/webhook/${webhookPath}`, body);
+    expect(on.statusCode, on.body).toBe(200);
+    expect(on.body).toContain("Ada Lovelace");
+  });
+
+  it("the form starter's page and submissions answer not found until it is turned on", async () => {
+    const { workflow } = await useStarter("Form intake: route requests");
+    const form = workflow.nodes.find((node) => node.type === "form_trigger")!;
+    const formPath = String((form.config as Record<string, unknown>).path);
+    const page = await anonymous("GET", `/api/forms/${formPath}`);
+    expect(page.statusCode).toBe(404);
+    expect(page.body).toContain("This form is turned off");
+    const submit = await anonymous("POST", `/api/forms/${formPath}`, { name: "Grace", email: "grace@example.com", topic: "Support", message: "Help" });
+    expect(submit.statusCode).toBe(404);
+    expect(submit.json()).toMatchObject({ code: "trigger_off" });
+    expect((await webhookRun(workflow)).status).toBe("success");
+
+    await turnOn(workflow, form.id);
+    expect((await anonymous("GET", `/api/forms/${formPath}`)).statusCode).toBe(200);
+    const accepted = await anonymous("POST", `/api/forms/${formPath}`, { name: "Grace", email: "grace@example.com", topic: "Support", message: "Help" });
+    expect(accepted.statusCode, accepted.body).toBe(200);
+  });
+
+  it("an off chat or MCP trigger answers not found, and the MCP gateway leaves its tool out", async () => {
+    const echo = { id: "reply", type: "output", name: "Reply", position: { x: 300, y: 0 }, config: {} };
+    const workflow = (id: string, trigger: Record<string, unknown>): Workflow =>
+      ({
+        id,
+        name: `Off ${id}`,
+        schemaVersion: "1.0.0",
+        workflowVersion: 1,
+        nodes: [{ id: "start", name: "Start", position: { x: 0, y: 0 }, ...trigger }, echo],
+        edges: [{ id: "e1", source: "start", target: "reply" }]
+      }) as unknown as Workflow;
+    await context.store.upsertWorkflow(workflow("wf-chat-off", { type: "chat_trigger", config: { path: "chat-off", authMode: "public", active: false } }));
+    const chat = await anonymous("POST", "/api/chat/wf-chat-off", { message: "hi" });
+    expect(chat.statusCode).toBe(404);
+    expect(chat.json()).toMatchObject({ code: "trigger_off", error: "This chat is turned off. Turn it on in the workflow editor to accept live calls." });
+
+    const mcpOff = workflow("wf-mcp-off", { type: "mcp_server_trigger", config: { path: "mcp-off", toolName: "off_tool", authMode: "public", active: false } });
+    await context.store.upsertWorkflow(mcpOff);
+    expect((await anonymous("GET", "/api/mcp-server/mcp-off/manifest")).statusCode).toBe(404);
+    const invoke = await anonymous("POST", "/api/mcp-server/mcp-off/invoke", { arguments: {} });
+    expect(invoke.statusCode).toBe(404);
+    expect(invoke.json()).toMatchObject({ code: "trigger_off" });
+
+    const catalogStore = {
+      getWorkflow: async (id: string) => await context.store.getWorkflow(id),
+      listMcpServers: async () => [],
+      getMcpToolSnapshot: async () => null,
+      listMcpToolPolicies: async () => [],
+      listMcpToolClassifications: async () => [],
+      listMcpToolOpenWorldOverrides: async () => [],
+      listDataDestinations: async () => []
+    };
+    const toolset = { id: "ts", slug: "ts", name: "TS", description: null, projectId: null, enabled: true, members: [{ kind: "workflow", workflowId: "wf-mcp-off" }] };
+    const off = await buildGatewayCatalog({ toolset: toolset as never, role: "admin" as never, store: catalogStore as never });
+    expect(off.tools.map((tool) => tool.name)).toEqual([]);
+    expect(off.warnings.join(" ")).toMatch(/'off_tool' is turned off/);
+    await context.store.upsertWorkflow({ ...mcpOff, nodes: mcpOff.nodes.map((node) => (node.id === "start" ? { ...node, config: { path: "mcp-off", toolName: "off_tool", authMode: "public" } } : node)) });
+    const on = await buildGatewayCatalog({ toolset: toolset as never, role: "admin" as never, store: catalogStore as never });
+    expect(on.tools.map((tool) => tool.name)).toEqual(["off_tool"]);
+    expect((await anonymous("GET", "/api/mcp-server/mcp-off/manifest")).statusCode).toBe(200);
   });
 });
 

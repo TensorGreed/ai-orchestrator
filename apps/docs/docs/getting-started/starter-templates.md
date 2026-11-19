@@ -9,13 +9,15 @@ The **Starters** in **Templates** are ten small workflows you can run the moment
 
 To find them, open **Templates** and pick **Starters**, or turn on **Runs without setup** to see every template, starter or not, that needs nothing set up. Click **Use Template**: the workflow opens as a new draft. Nothing changes in the template.
 
+A starter's webhook, form and schedule **start switched off**: nothing outside the editor can start a run until you turn them on. **Run** and **Webhook run** in the editor work straight away. To take live calls, open the trigger node and click **Turn on** in the line above its form, then save. Until then its production address answers `404` with `"code": "trigger_off"`.
+
 | Starter | What it shows | How to try it |
 |---|---|---|
-| Webhook: reshape and reply | Webhook Input, Set, Webhook Response | **Webhook run** (the sample request is filled in) |
-| Schedule: fetch, filter and notify | Schedule Trigger, HTTP Request, Filter (items), a POST | **Run**. The schedule is off until you turn **Active** on |
-| Form intake: route requests | Form Trigger, Switch, one Set per team | **Webhook run** with the sample answers, or open the form URL |
+| Webhook: reshape and reply | Webhook Input, Set, Webhook Response | **Webhook run** (the sample request is filled in). The webhook is off until you turn it on |
+| Schedule: fetch, filter and notify | Schedule Trigger, HTTP Request, Filter (items), a POST | **Run**. The schedule is off until you turn it on |
+| Form intake: route requests | Form Trigger, Switch, one Set per team | **Webhook run** with the sample answers. The form is off until you turn it on |
 | CSV to JSON: parse, sort and total | Extract from File, Sort, Summarize, Convert to File | **Run**; paste your own CSV into **Parse CSV** |
-| Approval before it goes out | Approval Gate with an editable amount | **Run**, then decide in **Approvals**. Self-approval is on, so you can try it alone; before real use, clear **Let the person who started the run approve it** on its **Approve refund** node |
+| Approval before it goes out | Approval Gate with an editable amount | **Run**, then decide in **Approvals**. Self-approval is on: whoever starts a run may approve it themselves, so you can try it alone. The request says so, and so does the **Approve refund** node; before real use, clear **Let the person who started the run approve it** there |
 | Retry, then fall back | HTTP Request retries and its **Error** output | **Run**; change `503` to `200` in the URL to see the success path |
 | Loop over items and collect | Loop, a Set per item, Merge (collect loop passes) | **Run** |
 | Call a sub-workflow | Execute Workflow with an input mapping | **Run**. Using the template also creates the sub-workflow it calls |
@@ -34,7 +36,7 @@ The HTTP starters call the API's own sample endpoints, so they work with no netw
 
 They need no sign-in, store nothing and answer the same to everyone. When the starters are loaded, their URLs get the API's own address (`http://127.0.0.1:<API_PORT>`, or `API_HOST` when the API listens on one address). If the deployment blocks private addresses for outbound requests (`OUTBOUND_DENY_PRIVATE=true`), add that address to `OUTBOUND_ALLOWLIST` or point the nodes at your own service. If `NETWORK_ALLOW_UI` limits which addresses may reach the studio, include `127.0.0.1`: the starters' requests carry no sign-in, so they are checked as studio traffic.
 
-Using the **Webhook** or **Form intake** starter makes its address live straight away, like any workflow without a release gate: anyone who can reach the API can call `/webhook/starter-reshape-…` or open `/api/forms/starter-contact-…`. Neither does anything outside the run. Delete the workflow when you are done trying it.
+Once you turn on the **Webhook** or **Form intake** starter's trigger, its address is live, like any workflow without a release gate: anyone who can reach the API can call `/webhook/starter-reshape-…` or open `/api/forms/starter-contact-…`. Neither does anything outside the run. Turn it off again under **More** (**Live calls**), or delete the workflow, when you are done trying it.
 
 The MCP starter uses the built-in sample MCP server (`mock-mcp`, with a calculator and a clock), and the search starter keeps its five help articles in the node and uses the local token embedder. That embedder is fine for a demo; pick a real embedder for real documents.
 
@@ -42,5 +44,5 @@ The MCP starter uses the built-in sample MCP server (`mock-mcp`, with a calculat
 
 - Replace the sample URLs in the HTTP Request nodes with your service, and add its key as a secret.
 - Swap the sample notify call for **Slack: Send Message**, **Microsoft Teams: Send Message** or **SMTP: Send Email** when you have those credentials.
-- Turn on **Active** on the Schedule Trigger to run it on its schedule.
+- Turn on the Schedule Trigger to run it on its schedule, and the Webhook or Form Trigger to take live calls.
 - Edit Switch cases, Form Trigger fields and sub-workflow mappings as rows in the inspector; no JSON needed.

@@ -83,6 +83,12 @@ An admin can turn the builder off with `WORKFLOW_BUILDER_ENABLED=false` on the A
 time per person (and a few at a time per server), for at most two minutes; closing the dialog stops it. The project's
 model allowlist applies, and a model's error message is redacted before it is shown.
 
+A build's model calls count toward [model spending limits](./budgets.md) like a run's: they are recorded as usage of the
+project and the person who asked, and show in **Settings**, **FinOps** as **Describe it (builds)** (trigger type
+`workflow_builder`). A build that fails or is stopped is charged for the calls it made. While a **block** budget on the
+project, the person or the whole deployment is used up, a build is refused before any model call: the dialog says which
+limit, and the API answers `402` with `code: "budget_exceeded"`. On Echo nothing is spent and nothing is refused.
+
 ## Undo and redo
 
 `Ctrl+Z` undoes the last canvas change and `Ctrl+Shift+Z` or `Ctrl+Y` redoes it (`Cmd` on macOS). Every change is

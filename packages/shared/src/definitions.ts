@@ -51,7 +51,9 @@ const baseNodeDefinitions: NodeDefinition[] = [
         responseBody: { type: "string" },
         inputTrust: { type: "string", enum: ["user", "untrusted_external"] },
         // 13.2 — optional: only these addresses (IPs / CIDR ranges) may call the trigger; empty = any address.
-        allowedIps: { type: "array", items: { type: "string" } }
+        allowedIps: { type: "array", items: { type: "string" } },
+        // false: production calls answer "not found" until it is turned on (see LIVE_ENTRY_NODE_TYPES); unset = on.
+        active: { type: "boolean" }
       }
     },
     sampleConfig: {
@@ -2616,6 +2618,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
         submitLabel: { type: "string" },
         authMode: { type: "string", enum: ["public", "session"] },
         successMessage: { type: "string" },
+        active: { type: "boolean" },
         fields: {
           type: "array",
           items: {
@@ -2662,7 +2665,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
         secretRef: { type: "object" },
         persistMessages: { type: "boolean" },
         sessionNamespace: { type: "string" },
-        welcomeMessage: { type: "string" }
+        welcomeMessage: { type: "string" },
+        active: { type: "boolean" }
       }
     },
     sampleConfig: {
@@ -2767,7 +2771,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
         authMode: { type: "string", enum: ["public", "bearer"] },
         secretRef: { type: "object" },
         /** Phase 6.4 — this workflow changes nothing outside its run: as an agent's Workflow Tool, the caller's write-tool gate skips it. Off unless set. */
-        readOnly: { type: "boolean" }
+        readOnly: { type: "boolean" },
+        active: { type: "boolean" }
       },
       required: ["path", "toolName"]
     },
@@ -3466,4 +3471,29 @@ export const ENTRY_NODE_TYPES: ReadonlySet<string> = new Set(
 
 export function isEntryNodeType(type: string): boolean {
   return ENTRY_NODE_TYPES.has(type);
+}
+
+/**
+ * The triggers anyone can reach from outside once a workflow is saved: webhooks, forms, chats, MCP triggers and
+ * schedules. Each can be switched off with `config.active: false`; for a webhook, form, chat or MCP trigger unset means
+ * on, as nodes saved before it had no such setting (a schedule's `active` is required, and fires only when true):
+ * production calls to an off webhook, form, chat or MCP trigger answer "not found", the MCP gateway
+ * leaves an off trigger's tool out, and an off schedule never fires. Runs from the editor (Run, Webhook run, the
+ * `/webhook-test/` URL) work either way. Starter templates ship with theirs off.
+ */
+export const LIVE_ENTRY_NODE_TYPES: ReadonlySet<string> = new Set(["webhook_input", "form_trigger", "chat_trigger", "mcp_server_trigger", "schedule_trigger"]);
+
+/** Whether `node` is a live entry point that is switched off (see LIVE_ENTRY_NODE_TYPES). */
+export function isLiveEntryOff(node: { type: string; config?: unknown }): boolean {
+  if (!LIVE_ENTRY_NODE_TYPES.has(node.type)) return false;
+  const config = node.config;
+  return Boolean(config && typeof config === "object" && (config as Record<string, unknown>).active === false);
+}
+
+/** What an off live entry point answers to a production call. */
+export const LIVE_ENTRY_OFF_CODE = "trigger_off";
+export function liveEntryOffMessage(type: string): string {
+  const what =
+    type === "form_trigger" ? "form" : type === "chat_trigger" ? "chat" : type === "mcp_server_trigger" ? "MCP tool" : type === "schedule_trigger" ? "schedule" : "webhook";
+  return `This ${what} is turned off. Turn it on in the workflow editor to accept live calls.`;
 }

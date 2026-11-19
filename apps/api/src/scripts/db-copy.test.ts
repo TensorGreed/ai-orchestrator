@@ -195,6 +195,17 @@ describe("source refusals (before any connection)", () => {
     expect(message).toContain(`DB_SQLITE_PATH=${sourcePath} pnpm --filter @ai-orchestrator/api start`);
   });
 
+  it("v80: a source whose background starter fill is still under way is refused until it finishes", async () => {
+    await sqliteSource();
+    const raw = new Database(sourcePath);
+    raw.exec(`DELETE FROM schema_markers WHERE name = 'execution_starter_backfill'`);
+    raw.prepare(`INSERT INTO schema_markers (name, created_at) VALUES (?, ?), (?, ?)`).run(
+      "execution_starter_fill_upto:40", new Date().toISOString(), "execution_starter_fill_after:20", new Date().toISOString()
+    );
+    raw.close();
+    expect(await refusal()).toMatch(/still filling in who started its older runs/);
+  });
+
   it("a missing trigger or schema marker (a data-only migration) is older too; an index this build does not know is newer", async () => {
     await sqliteSource();
     let raw = new Database(sourcePath);

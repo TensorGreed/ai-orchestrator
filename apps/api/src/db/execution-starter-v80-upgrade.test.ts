@@ -1,9 +1,12 @@
 /**
- * v80 — upgrading a database with runs to `execution_history.triggered_by_user_id`: the column is added and filled once
- * for the runs already there (the account with that user id, or with that email in any case when the account was
- * created before the run; else nobody), in batches, so a deleted account's email, an email given to a new account and
- * a later rename bring no runs to anybody. A run written right after records its starter, kept by later writes. v80 down
- * drops only the column. SQLite always; Postgres when TEST_POSTGRES_URL is set.
+ * v80 — upgrading a database with runs to `execution_history.triggered_by_user_id`: the column is added at once and the
+ * runs already there are filled in afterwards by the background fill (services/execution-starter-fill-service.ts), in
+ * batches that each save how far they got: the account with that user id, or with that email in any case when the
+ * account was created before the run; else nobody. A deleted account's email, an email given to a new account and a
+ * later rename bring no runs to anybody. Until the fill reaches a run it is nobody's own; a run recorded after the
+ * upgrade is never touched by it. The fill resumes after an interruption without visiting a run twice, and only one
+ * instance runs it at a time. v80 down drops only the column (and the fill's markers). SQLite always; Postgres when
+ * TEST_POSTGRES_URL is set.
  */
 import Database from "better-sqlite3";
 import fs from "node:fs";
@@ -16,6 +19,8 @@ import { MIGRATIONS, rollbackMigrations, runMigrations } from "./migrations.js";
 import { createStore, postgresStoreConfig } from "./create-store.js";
 import { PostgresStore } from "./postgres-store.js";
 import type { Store } from "./store.js";
+import { ExecutionStarterFillService } from "../services/execution-starter-fill-service.js";
+import { STARTER_FILL_AFTER_PREFIX, STARTER_FILL_DONE_MARKER, STARTER_FILL_UPTO_PREFIX } from "./execution-starter-fill.js";
 import { testSql } from "../test-support/test-sql.js";
 import { dropTestSchema, randomTestSchema, testPostgresPool, testPostgresSettings, testPostgresUrl } from "../test-support/test-store.js";
 
@@ -31,7 +36,7 @@ afterAll(() => {
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
-/** More runs than one backfill batch (5000), all Ana's. */
+/** More runs than two fill batches (5000 each here), all Ana's. */
 const BULK = 12_001;
 
 /** Runs a statement with `?` placeholders on the store's database. */
@@ -82,6 +87,57 @@ async function seed(store: Store, raw: RawSql): Promise<void> {
 
 const own = async (store: Store, userId: string, email: string) =>
   (await store.listExecutionHistory({ workflowIds: [], ownRunsOnly: { workflowIds: ["wf-keep"], userId, email }, pageSize: 50 })).items.map((item) => item.id).sort();
+
+const fillService = (store: Store, instanceId: string, extra: Partial<ConstructorParameters<typeof ExecutionStarterFillService>[0]> = {}) =>
+  new ExecutionStarterFillService({ store, instanceId, isLeader: () => true, batchSize: 5000, pauseMs: 0, ...extra });
+
+/**
+ * Before the fill: nobody's runs, the fill to do. A first batch, then an interruption: progress is saved; a run the
+ * batch visited and then lost its starter (reset by hand) is not visited again; a run written after the upgrade that
+ * names Ana by email only is never filled; a second instance (another id) finishes it.
+ */
+async function fillInterrupted(store: Store, raw: RawSql): Promise<void> {
+  expect(await store.getExecutionStarter("run-ana")).toBeNull();
+  expect(await own(store, "usr_ana", "ana@example.com")).toEqual([]);
+  const before = await store.getExecutionStarterFill();
+  expect(before.done).toBe(false);
+  expect(before.after).toBe(0);
+  expect(before.upTo).toBeGreaterThanOrEqual(BULK + 12);
+  await store.saveExecutionHistory({ id: "run-after-upgrade", workflowId: "wf-keep", status: "success", startedAt: day(6), triggerType: "form", triggeredBy: "ana@example.com" });
+
+  // Not the leader: nothing happens.
+  expect(await fillService(store, "standby", { isLeader: () => false }).runOnce()).toEqual({ status: "skipped", why: "not_leader" });
+  const batches: number[] = [];
+  const first = await fillService(store, "instance-a", { afterBatch: (batch) => { batches.push(batch.transactionMs); return false; } }).runOnce();
+  expect(first).toMatchObject({ status: "stopped", visited: 5000, batches: 1 });
+  const midway = await store.getExecutionStarterFill();
+  expect(midway.done).toBe(false);
+  expect(midway.after).toBeGreaterThan(0);
+  expect(await store.getExecutionStarter("run-ana")).toBe("usr_ana");
+  expect(await store.getExecutionStarter("bulk-1")).toBe("usr_ana");
+  await raw(`UPDATE execution_history SET triggered_by_user_id = NULL WHERE id = ?`, ["bulk-1"]);
+
+  const rest = await fillService(store, "instance-b").runOnce();
+  expect(rest).toMatchObject({ status: "done", visited: BULK + 12 - 5000, batches: 2 });
+  expect(await store.getExecutionStarterFill()).toEqual({ done: true, upTo: null, after: 0 });
+  expect(await store.getSchemaMarker(STARTER_FILL_DONE_MARKER)).not.toBeNull();
+  // Visited before the interruption: not judged again.
+  expect(await store.getExecutionStarter("bulk-1")).toBeNull();
+  await raw(`UPDATE execution_history SET triggered_by_user_id = ? WHERE id = ?`, ["usr_ana", "bulk-1"]);
+  // Recorded after the upgrade: the run's own record stands.
+  expect(await store.getExecutionStarter("run-after-upgrade")).toBeNull();
+  // Done: another start does nothing.
+  expect(await fillService(store, "instance-c").runOnce()).toMatchObject({ status: "done", visited: 0, batches: 0 });
+}
+
+/** Two instances at once: one takes the lease and fills every run; the other finds the lease held (or the fill done). */
+async function fillRace(stores: [Store, Store], runs: number): Promise<void> {
+  const outcomes = await Promise.all([fillService(stores[0], "node-1", { batchSize: 1000 }).runOnce(), fillService(stores[1], "node-2", { batchSize: 1000 }).runOnce()]);
+  const visited = outcomes.map((outcome) => ("visited" in outcome ? outcome.visited : 0));
+  expect(visited.filter((count) => count > 0)).toEqual([runs]);
+  expect(outcomes.some((outcome) => outcome.status === "skipped" && outcome.why === "lease_held")).toBe(true);
+  expect((await stores[0].getExecutionStarterFill()).done).toBe(true);
+}
 
 async function expectUpgraded(store: Store, raw: RawSql): Promise<void> {
   expect((await store.getExecutionHistory("run-ana"))?.status).toBe("success");
@@ -135,10 +191,39 @@ describe("v80 on SQLite", () => {
 
     const store = await createStore({ env: { DB_SQLITE_PATH: file } });
     try {
-      await expectUpgraded(store, async (sql, params = []) => {
+      const raw: RawSql = async (sql, params = []) => {
         await testSql(store).run(sql, ...params);
-      });
+      };
+      await fillInterrupted(store, raw);
+      await expectUpgraded(store, raw);
       expect(await store.getSchemaMarker("execution_starter_backfill")).not.toBeNull();
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("a fresh database has nothing to fill; an upgraded one is filled by one of two instances at once", async () => {
+    const fresh = await createStore({ env: { DB_SQLITE_PATH: path.join(tempDir, "fresh.db") } });
+    try {
+      expect(await fresh.getExecutionStarterFill()).toEqual({ done: true, upTo: null, after: 0 });
+    } finally {
+      await fresh.close();
+    }
+
+    const file = path.join(tempDir, "race.db");
+    const seeded = await SqliteStore.create(file);
+    await seeded.close();
+    const db = new Database(file);
+    db.exec(`DELETE FROM schema_markers WHERE name = 'execution_starter_backfill'`);
+    db.prepare(
+      `WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 4999)
+       INSERT INTO execution_history (id, workflow_id, status, started_at, triggered_by) SELECT 'race-' || i, 'wf-keep', 'success', ?, 'nobody@example.com' FROM n`
+    ).run(day(6));
+    db.close();
+    const store = await createStore({ env: { DB_SQLITE_PATH: file } });
+    try {
+      expect((await store.getExecutionStarterFill()).upTo).toBe(5000);
+      await fillRace([store, store], 5000);
     } finally {
       await store.close();
     }
@@ -153,7 +238,7 @@ describe.skipIf(!postgresUrl)("v80 on Postgres", () => {
     return result.rows[0].version;
   }
 
-  it("a v79 schema with runs migrates on boot; v80 down drops only the column", async () => {
+  it("a v79 schema with runs migrates on boot and is filled in the background; v80 down drops only the column", async () => {
     const schema = randomTestSchema();
     const admin = testPostgresPool();
     await admin.query(`CREATE SCHEMA "${schema}"`);
@@ -193,6 +278,7 @@ describe.skipIf(!postgresUrl)("v80 on Postgres", () => {
       try {
         expect(await chainVersion(pool)).toBe(LATEST);
         expect(await columnExists()).toBe(true);
+        await fillInterrupted(store, raw);
         await expectUpgraded(store, raw);
       } finally {
         await store.close();
@@ -200,7 +286,44 @@ describe.skipIf(!postgresUrl)("v80 on Postgres", () => {
 
       await rollbackMigrations(run, current, setRolledBack, 79);
       expect(await columnExists()).toBe(false);
-      expect((await pool.query(`SELECT COUNT(*)::int AS n FROM execution_history`)).rows[0].n).toBe(BULK + 13);
+      expect((await pool.query(`SELECT COUNT(*)::int AS n FROM execution_history`)).rows[0].n).toBe(BULK + 14);
+      expect((await pool.query(`SELECT name FROM schema_markers WHERE name LIKE 'execution_starter%'`)).rows).toEqual([]);
+
+      // Upgraded again by two instances at once: one fills every run, the other finds the lease held.
+      const first = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema, maxConnections: 2 }));
+      const second = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema, maxConnections: 2 }));
+      try {
+        const marker = (await pool.query<{ name: string }>(`SELECT name FROM schema_markers WHERE name LIKE $1`, [`${STARTER_FILL_UPTO_PREFIX}%`])).rows;
+        expect(marker).toHaveLength(1);
+        await fillRace([first, second], BULK + 14);
+        expect(await first.getExecutionStarter("run-ana")).toBe("usr_ana");
+        expect((await pool.query(`SELECT name FROM schema_markers WHERE left(name, length($1)) = $1`, [STARTER_FILL_AFTER_PREFIX])).rows).toEqual([]);
+      } finally {
+        await first.close();
+        await second.close();
+      }
+
+      // Once more, with two runners' batches interleaved and no lease at all: they take turns, so each run is visited once.
+      await rollbackMigrations(run, current, setRolledBack, 79);
+      const third = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema, maxConnections: 2 }));
+      const fourth = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema, maxConnections: 2 }));
+      try {
+        const loop = async (store: Store) => {
+          let visited = 0;
+          for (;;) {
+            const batch = await store.fillExecutionStarters(700);
+            if (batch.done) return visited;
+            visited += batch.visited;
+          }
+        };
+        const counts = await Promise.all([loop(third), loop(fourth)]);
+        expect(counts[0]! + counts[1]!).toBe(BULK + 14);
+        expect((await third.getExecutionStarterFill()).done).toBe(true);
+        expect(await third.getExecutionStarter("run-ana")).toBe("usr_ana");
+      } finally {
+        await third.close();
+        await fourth.close();
+      }
     } finally {
       await pool.end();
       await admin.end();

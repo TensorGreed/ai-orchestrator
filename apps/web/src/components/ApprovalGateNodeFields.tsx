@@ -86,6 +86,12 @@ export function ApprovalGateNodeFields({ config, setConfig }: { config: Config; 
 
   return (
     <>
+      {bool(config.allowSelfApproval, false) ? (
+        <div className="cfg-tip" data-testid="self-approval-on">
+          Self-approval is on: whoever starts a run may approve it themselves. Clear &ldquo;Let the person who started the run
+          approve it&rdquo; below when a second person must decide.
+        </div>
+      ) : null}
       <div className="cfg-field">
         <label className="cfg-label" htmlFor="gate-message">
           Message to the approver

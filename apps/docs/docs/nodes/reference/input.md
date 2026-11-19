@@ -32,6 +32,7 @@ Receive chat messages via POST /api/chat/:workflowId. Pairs naturally with agent
 | `persistMessages` | `boolean` | no | — |
 | `sessionNamespace` | `string` | no | — |
 | `welcomeMessage` | `string` | no | — |
+| `active` | `boolean` | no | — |
 
 **Example config**
 
@@ -132,6 +133,7 @@ Public HTML form that starts a workflow. GET /api/forms/:path renders the form, 
 | `submitLabel` | `string` | no | — |
 | `authMode` | `string` | no | `public` \| `session` |
 | `successMessage` | `string` | no | — |
+| `active` | `boolean` | no | — |
 | `fields` | `array<object>` | yes | — |
 
 **Example config**
@@ -342,6 +344,7 @@ Turn this workflow into an MCP tool that other agents (including other L2M agent
 | `authMode` | `string` | no | `public` \| `bearer` |
 | `secretRef` | `object` | no | — |
 | `readOnly` | `boolean` | no | — |
+| `active` | `boolean` | no | — |
 
 **Example config**
 
@@ -736,6 +739,7 @@ Injects webhook payload into workflow context.
 | `responseBody` | `string` | no | — |
 | `inputTrust` | `string` | no | `user` \| `untrusted_external` |
 | `allowedIps` | `array<string>` | no | — |
+| `active` | `boolean` | no | — |
 
 **Example config**
 

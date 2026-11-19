@@ -20,6 +20,20 @@ Compatibility API route:
 - `bearer_token`
 - `hmac_sha256`
 
+## Switched off (`active: false`)
+
+A webhook, form, chat or MCP trigger whose node has `active: false` takes no production calls: `/webhook/:path`,
+`/api/forms/:path`, `/api/chat/:workflowId` and `/api/mcp-server/:path/*` answer `404` with `"code": "trigger_off"`,
+and the MCP gateway leaves the tool out. `/webhook-test/:path` and the editor's **Run** and **Webhook run** still work.
+Unset means on, so nodes saved before the setting are unchanged. Starter templates ship with theirs off; the node's
+inspector says so in one line with **Turn on**, and **Live calls** under **More** switches it off again.
+
+The switch covers the anonymous entry points. The signed-in run API (`POST /api/webhooks/execute` and
+`/api/workflows/:id/execute`, which the editor's runs use) still runs the workflow for an operator, a builder or an API
+key with that role. With a release gate, production uses the published version, so turning a trigger on takes effect
+once that version is published. An off webhook is also left out of the endpoint lists that `/webhook/` returns with a
+`404` or `405`.
+
 ## Allowed addresses (optional)
 
 A trigger's `allowedIps` (the **Allowed Addresses** field, one IP or CIDR range per line) limits who can call it;

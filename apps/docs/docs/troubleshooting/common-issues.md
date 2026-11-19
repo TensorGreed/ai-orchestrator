@@ -34,6 +34,11 @@ These errors come from MCP servers, the protocol or the model, not from L2M's ow
 
 Set `SECRET_MASTER_KEY_BASE64` in `.env` with a base64-encoded 32-byte value.
 
+## Webhook 404 with `"code": "trigger_off"`
+
+The webhook (or form, chat or MCP trigger) is switched off, as a starter template's is until you turn it on. Open the
+trigger node, click **Turn on** and save. The editor's **Run** and the `/webhook-test/` URL work while it is off.
+
 ## Webhook 404 on `/webhook-test/:path`
 
 - Ensure `webhook_input` node `path` matches exactly.

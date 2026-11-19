@@ -205,6 +205,16 @@ describe("WorkflowBuilderDialog", () => {
     expect(signal?.aborted).toBe(true);
   });
 
+  it("says so when a model spending limit refuses the build", async () => {
+    const message =
+      'The model spending limit "Default project tokens" is used up for this month, and describing a workflow uses the model too. Try again when the limit resets, or ask an admin to raise it.';
+    vi.mocked(api.buildWorkflowFromDescription).mockRejectedValue(new api.ApiError(message, 402, { error: message, code: "budget_exceeded" }));
+    render(<WorkflowBuilderDialog {...defaults} onCreate={vi.fn()} onUseTemplate={vi.fn()} />);
+    await userEvent.type(screen.getByLabelText("What should the workflow do?"), "orders");
+    await userEvent.click(screen.getByRole("button", { name: "Build" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+  });
+
   it("labels models", () => {
     expect(builderModelLabel({ providerId: "echo", model: "echo" })).toBe("Echo (built-in demo, no key)");
     expect(builderModelLabel({ providerId: "anthropic", model: "claude-x" })).toBe("Anthropic · claude-x");

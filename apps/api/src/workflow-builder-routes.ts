@@ -10,10 +10,16 @@
  * schema and graph rules (with up to WORKFLOW_BUILDER_MAX_ATTEMPTS submissions) and nothing in it runs. The studio
  * saves the preview through POST /api/workflows as a new workflow, which runs every save check again.
  * WORKFLOW_BUILDER_ENABLED=false turns the route off.
+ *
+ * Spending: a build's model calls count toward the model spending limits as a run's do. A used-up `block` budget that
+ * applies to the person or the project (or the deployment) refuses the build before any model call (402). The calls a
+ * build made, also one that failed or was stopped, are recorded as usage of the project and the person, under the
+ * usage row "Describe it (builds)" (trigger type `workflow_builder`), so they show in the usage and cost views and
+ * count toward the next budget check.
  */
 import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
+import { createMeteredProviderRegistry, type MeteredModelCall, type ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import {
   DEFAULT_PROJECT_ID,
   envModelProviders,
@@ -33,6 +39,19 @@ import type { SafeUser, UserRole } from "./services/auth-service.js";
 export const WORKFLOW_BUILDER_TIMEOUT_MS = 120_000;
 
 export const WORKFLOW_BUILDER_DISABLED_CODE = "workflow_builder_disabled";
+
+/** The usage row builds are recorded under (`usage_events.workflow_id`; no workflow has this id) and its label. */
+export const WORKFLOW_BUILDER_USAGE_WORKFLOW_ID = "workflow-builder";
+export const WORKFLOW_BUILDER_USAGE_LABEL = "Describe it (builds)";
+export const WORKFLOW_BUILDER_TRIGGER_TYPE = "workflow_builder";
+
+/** A used-up `block` budget that applies to a build. */
+export interface WorkflowBuilderBudgetRefusal {
+  budgetId: string;
+  budgetName: string;
+  period: "day" | "week" | "month";
+  periodStart: string;
+}
 
 type Denial = { ok: false; status: number; error: string };
 
@@ -58,6 +77,20 @@ export interface WorkflowBuilderRoutesDeps {
   listTemplates: () => Promise<Array<{ id: string; name: string; description?: string; category?: string; tags?: string[]; featured?: boolean; needsModel?: boolean }>>;
   /** Gives the draft trigger paths nobody uses and takes out settings only an admin sets. */
   prepareDraft: (workflow: Workflow) => Promise<Workflow>;
+  /**
+   * A used-up `block` budget that applies to a build by this person in this project (a project, person or deployment
+   * budget), or null. Throws when the budgets cannot be read.
+   */
+  checkBudget: (user: SafeUser, projectId: string) => Promise<WorkflowBuilderBudgetRefusal | null>;
+  /** Records a build's model calls as usage of the project and the person (and tells budget alerts). */
+  recordUsage: (input: {
+    user: SafeUser;
+    projectId: string;
+    buildId: string;
+    status: "success" | "error";
+    durationMs: number;
+    calls: MeteredModelCall[];
+  }) => Promise<void>;
   isModelNotAllowed: (error: unknown) => boolean;
   redact: (text: string) => string;
   timeoutMs?: number;
@@ -142,6 +175,37 @@ export function registerWorkflowBuilderRoutes(deps: WorkflowBuilderRoutesDeps): 
       return result;
     }
 
+    // Model spending limits apply to builds as to runs: checked before any model call.
+    let refusal: WorkflowBuilderBudgetRefusal | null;
+    try {
+      refusal = await deps.checkBudget(user, projectId);
+    } catch (error) {
+      request.log.warn({ err: error }, "A build was refused because its budgets could not be checked");
+      reply.header("retry-after", "5");
+      reply.code(503);
+      return { error: "Model spending limits could not be checked. Try again shortly." };
+    }
+    if (refusal) {
+      await deps.audit(request, user, {
+        category: "workflow",
+        eventType: "workflow.builder.build",
+        action: "build",
+        resourceType: "workflow",
+        projectId,
+        outcome: "denied",
+        metadata: { status: "budget_exceeded", budgetId: refusal.budgetId, period: refusal.period, periodStart: refusal.periodStart, providerId: provider.providerId, model: provider.model }
+      });
+      reply.code(402);
+      return {
+        error:
+          `The model spending limit "${refusal.budgetName}" is used up for this ${refusal.period}, and describing a workflow uses the model too. ` +
+          "Try again when the limit resets, or ask an admin to raise it.",
+        code: "budget_exceeded",
+        budgetId: refusal.budgetId,
+        periodStart: refusal.periodStart
+      };
+    }
+
     if (building.has(user.id)) {
       reply.code(409);
       return { error: "A workflow is already being built for you. Wait for it to finish." };
@@ -159,11 +223,15 @@ export function registerWorkflowBuilderRoutes(deps: WorkflowBuilderRoutesDeps): 
     };
     reply.raw.once("close", onClose);
     const startedAt = Date.now();
+    // Every call that answers is recorded below, whatever the build's outcome.
+    const calls: MeteredModelCall[] = [];
+    const meteredRegistry = createMeteredProviderRegistry(registry, (call) => calls.push(call));
+    let succeeded = false;
     try {
       const outcome = await runWorkflowBuilder({
         prompt: parsed.data.prompt,
         provider,
-        providerRegistry: registry,
+        providerRegistry: meteredRegistry,
         resolveSecret: deps.resolveSecretForUser(user),
         workflowId: crypto.randomUUID(),
         projectId,
@@ -198,6 +266,7 @@ export function registerWorkflowBuilderRoutes(deps: WorkflowBuilderRoutesDeps): 
           ...(result.status === "ready" ? { nodes: result.workflow.nodes.length } : {})
         }
       });
+      succeeded = result.status === "ready";
       return result;
     } catch (error) {
       if (deps.isModelNotAllowed(error)) {
@@ -215,6 +284,20 @@ export function registerWorkflowBuilderRoutes(deps: WorkflowBuilderRoutesDeps): 
       clearTimeout(timer);
       reply.raw.off("close", onClose);
       building.delete(user.id);
+      if (calls.length > 0) {
+        try {
+          await deps.recordUsage({
+            user,
+            projectId,
+            buildId: `build_${crypto.randomUUID()}`,
+            status: succeeded ? "success" : "error",
+            durationMs: Date.now() - startedAt,
+            calls
+          });
+        } catch (error) {
+          request.log.warn({ err: error, calls: calls.length }, "A build's model usage was not recorded");
+        }
+      }
     }
   });
 }

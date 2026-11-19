@@ -4,7 +4,7 @@
   "workflow": {
     "id": "starter-webhook-reshape-reply",
     "name": "Webhook: reshape and reply",
-    "description": "Receives a JSON request, reshapes it with a Set node and answers the caller with a Webhook Response. Click Webhook run to try it with the sample request, or call its webhook URL.",
+    "description": "Receives a JSON request, reshapes it with a Set node and answers the caller with a Webhook Response. Click Webhook run to try it with the sample request. Its webhook starts switched off, so its URL answers \"not found\" until you turn it on in the Incoming request node.",
     "schemaVersion": "1.0.0",
     "workflowVersion": 1,
     "nodes": [
@@ -20,7 +20,8 @@
           "path": "starter-reshape",
           "method": "POST",
           "responseMode": "responseNode",
-          "authMode": "none"
+          "authMode": "none",
+          "active": false
         }
       },
       {

@@ -234,6 +234,16 @@ import {
   type LostJobReasons
 } from "./queue-leases.js";
 import { ownHistoryRunSql } from "./own-runs-sql.js";
+import {
+  STARTER_FILL_AFTER_PREFIX,
+  STARTER_FILL_BATCH_SIZE,
+  STARTER_FILL_DONE_MARKER,
+  isStarterFillProgressMarker,
+  starterFillStartMarker,
+  starterFillState,
+  type ExecutionStarterFillBatch,
+  type ExecutionStarterFillState
+} from "./execution-starter-fill.js";
 
 type BindParams = unknown[];
 
@@ -3961,10 +3971,10 @@ export class SqliteStore implements Store {
     this.ensureColumn("execution_history", "release_channel", "TEXT");
     // v79 — the person whose session memory the run used.
     this.ensureColumn("execution_history", "session_owner", "TEXT");
-    // v80 — the user id of the person who started the run, and once, for the runs recorded before it, the starter as
-    // migration 80 finds them (db/migrations.ts).
+    // v80 — the user id of the person who started the run. The runs recorded before it get it from a background job
+    // after start-up (db/execution-starter-fill.ts); here only the runs it is to visit are recorded.
     this.ensureColumn("execution_history", "triggered_by_user_id", "TEXT");
-    this.backfillExecutionStarters();
+    this.markExecutionStarterFill();
     this.ensureColumn("execution_history", "release_version", "INTEGER");
     this.exec(`
       CREATE TABLE IF NOT EXISTS release_gates (
@@ -4661,27 +4671,58 @@ export class SqliteStore implements Store {
   }
 
   /**
-   * v80 — once: the runs recorded before their starter's user id was get it, by migration 80's rule (db/migrations.ts):
-   * the first approval request's requester for a run that asked for one (an older build wrote the approver into
-   * `triggered_by` on resume), nobody for a resumed run without one, else `triggered_by`; that names the account with
-   * that user id, or with that email (any case) created before the run started. No account, or two: NULL (nobody's own
-   * run). In batches of 5000 runs, each its own transaction.
+   * v80 — the first start of this build on a database: the runs recorded so far (up to the highest rowid) are the
+   * ones the background fill visits (db/execution-starter-fill.ts). With no runs, or once a fill was recorded (done or
+   * under way), nothing is written.
    */
-  private backfillExecutionStarters(): void {
-    if (this.queryOne<{ name: string }>(`SELECT name FROM schema_markers WHERE name = 'execution_starter_backfill'`)) return;
-    let lastRowid = 0;
-    for (;;) {
-      const done = this.transaction(() => {
-        const batch = this.queryAll<{ rowid: number }>(
-          `SELECT rowid FROM execution_history WHERE rowid > ? AND triggered_by_user_id IS NULL ORDER BY rowid LIMIT 5000`,
-          [lastRowid]
-        );
-        if (batch.length === 0) return true;
-        const first = toNumber(batch[0]!.rowid);
-        const last = toNumber(batch[batch.length - 1]!.rowid);
-        const firstRequest = (column: string) =>
-          `(SELECT a.${column} FROM approval_requests a WHERE a.execution_id = h.id ORDER BY a.created_at, a.id LIMIT 1)`;
-        this.exec(
+  private markExecutionStarterFill(): void {
+    const names = this.queryAll<{ name: string }>(`SELECT name FROM schema_markers`).map((row) => toString(row.name));
+    if (names.some((name) => name === STARTER_FILL_DONE_MARKER || isStarterFillProgressMarker(name))) return;
+    const top = this.queryOne<{ top: number | null }>(`SELECT MAX(rowid) AS top FROM execution_history`);
+    const upTo = top?.top === null || top?.top === undefined ? null : toNumber(top.top);
+    this.exec(`INSERT OR IGNORE INTO schema_markers (name, created_at) VALUES (?, ?)`, [starterFillStartMarker(upTo), new Date().toISOString()]);
+  }
+
+  private starterFillStateSync(): ExecutionStarterFillState {
+    return starterFillState(this.queryAll<{ name: string }>(`SELECT name FROM schema_markers`).map((row) => toString(row.name)));
+  }
+
+  /** v80 — see Store.getExecutionStarterFill. */
+  async getExecutionStarterFill(): Promise<ExecutionStarterFillState> {
+    return this.starterFillStateSync();
+  }
+
+  /**
+   * v80 — see Store.fillExecutionStarters. Migration 80's rule (db/migrations.ts): the first approval request's
+   * requester for a run that asked for one (an older build wrote the approver into `triggered_by` on resume), nobody
+   * for a resumed run without one, else `triggered_by`; that names the account with that user id, or with that email
+   * (any case) created before the run started. No account, or two: NULL (nobody's own run). One transaction per batch,
+   * with the progress marker.
+   */
+  async fillExecutionStarters(limit: number = STARTER_FILL_BATCH_SIZE): Promise<ExecutionStarterFillBatch> {
+    const size = Math.max(1, Math.min(Math.floor(limit), 50_000));
+    const began = performance.now();
+    const outcome = this.transaction(() => {
+      const state = this.starterFillStateSync();
+      if (state.done || state.upTo === null) return { visited: 0, filled: 0, done: true };
+      const batch = this.queryAll<{ rowid: number }>(
+        `SELECT rowid FROM execution_history WHERE rowid > ? AND rowid <= ? AND triggered_by_user_id IS NULL ORDER BY rowid LIMIT ?`,
+        [state.after, state.upTo, size]
+      );
+      const now = new Date().toISOString();
+      if (batch.length === 0) {
+        for (const name of this.queryAll<{ name: string }>(`SELECT name FROM schema_markers`).map((row) => toString(row.name))) {
+          if (isStarterFillProgressMarker(name)) this.exec(`DELETE FROM schema_markers WHERE name = ?`, [name]);
+        }
+        this.exec(`INSERT OR IGNORE INTO schema_markers (name, created_at) VALUES (?, ?)`, [STARTER_FILL_DONE_MARKER, now]);
+        return { visited: 0, filled: 0, done: true };
+      }
+      const first = toNumber(batch[0]!.rowid);
+      const last = toNumber(batch[batch.length - 1]!.rowid);
+      const firstRequest = (column: string) =>
+        `(SELECT a.${column} FROM approval_requests a WHERE a.execution_id = h.id ORDER BY a.created_at, a.id LIMIT 1)`;
+      const filled = this.db
+        .prepare(
           // Three equality joins (by the request's user id, by id, by email) instead of one join on OR, which compared
           // every run of a batch with every account.
           `UPDATE execution_history SET triggered_by_user_id = m.user_id
@@ -4708,15 +4749,18 @@ export class SqliteStore implements Store {
              )
              SELECT c.id, MIN(c.user_id) AS user_id FROM c GROUP BY c.id HAVING COUNT(*) = 1
            ) m
-           WHERE execution_history.id = m.id`,
-          [first, last]
-        );
-        lastRowid = last;
-        return false;
-      });
-      if (done) break;
-    }
-    this.exec(`INSERT OR IGNORE INTO schema_markers (name, created_at) VALUES ('execution_starter_backfill', ?)`, [new Date().toISOString()]);
+           WHERE execution_history.id = m.id AND execution_history.triggered_by_user_id IS NULL`
+        )
+        .run(first, last).changes;
+      for (const name of this.queryAll<{ name: string }>(`SELECT name FROM schema_markers`).map((row) => toString(row.name))) {
+        if (name.startsWith(STARTER_FILL_AFTER_PREFIX)) this.exec(`DELETE FROM schema_markers WHERE name = ?`, [name]);
+      }
+      this.exec(`INSERT OR IGNORE INTO schema_markers (name, created_at) VALUES (?, ?)`, [`${STARTER_FILL_AFTER_PREFIX}${last}`, now]);
+      return { visited: batch.length, filled, done: false };
+    });
+    const transactionMs = performance.now() - began;
+    if (outcome.visited > 0 || outcome.done) this.persist();
+    return { ...outcome, transactionMs };
   }
 
   private ensureColumn(table: string, column: string, type: string, defaultExpr?: string): void {

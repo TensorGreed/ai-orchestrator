@@ -27,6 +27,7 @@ import * as misc from "./postgres/misc.js";
 import * as model_allowlist from "./postgres/model-allowlist.js";
 import * as queue from "./postgres/queue.js";
 import * as release from "./postgres/release.js";
+import * as starterFill from "./postgres/execution-starter-fill.js";
 import * as replay from "./postgres/replay.js";
 import * as retention from "./postgres/retention.js";
 import * as legalHolds from "./postgres/legal-holds.js";
@@ -86,6 +87,8 @@ export interface PostgresStoreConfig {
  *                     purge batch and hold-checked delete, exclusive while a hold is placed; see db/legal-hold-sql.ts.
  *   0x4c3250 ("L2P")  MCP gateway approval requests — key: hashtext(schema:client id), held for the creating
  *                     transaction (pg_advisory_xact_lock) so the per-client pending cap holds; see postgres/mcp.ts.
+ *   0x4c3246 ("L2F")  v80 run-starter fill — key: hashtext(schema), held for each batch's transaction so two runners
+ *                     take turns; see postgres/execution-starter-fill.ts.
  * Add a new class here rather than reusing one.
  */
 export const ADVISORY_LOCK_CLASS_MIGRATIONS = 0x4c324d;
@@ -723,6 +726,12 @@ export class PostgresStore implements Store {
   }
   async getExecutionStarter(...args: Parameters<Store["getExecutionStarter"]>): ReturnType<Store["getExecutionStarter"]> {
     return release.getExecutionStarter(this.ctx, ...args);
+  }
+  async getExecutionStarterFill(): ReturnType<Store["getExecutionStarterFill"]> {
+    return starterFill.getExecutionStarterFill(this.ctx);
+  }
+  async fillExecutionStarters(...args: Parameters<Store["fillExecutionStarters"]>): ReturnType<Store["fillExecutionStarters"]> {
+    return starterFill.fillExecutionStarters(this.ctx, ...args);
   }
   async getExecutionRelease(...args: Parameters<Store["getExecutionRelease"]>): ReturnType<Store["getExecutionRelease"]> {
     return release.getExecutionRelease(this.ctx, ...args);
