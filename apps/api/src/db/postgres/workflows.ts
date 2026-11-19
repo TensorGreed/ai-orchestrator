@@ -397,6 +397,8 @@ export async function deleteProject(ctx: PgContext, id: string): Promise<boolean
     if (Object.values(counts).some((value) => value > 0)) throw new ProjectNotEmptyError(counts);
     await client.query(`DELETE FROM folders WHERE project_id = $1`, [id]);
     await client.query(`DELETE FROM variables WHERE project_id = $1`, [id]);
+    // v81 — and its OpenAPI specs (project configuration, like variables).
+    await client.query(`DELETE FROM openapi_specs WHERE project_id = $1`, [id]);
     await client.query(`DELETE FROM guard_bindings WHERE scope = 'project' AND scope_id = $1`, [id]);
     // 12.6 — a re-created project with the same id starts with no model allowlist.
     await client.query(`DELETE FROM model_allowlist_entries WHERE scope = 'project' AND project_id = $1`, [id]);

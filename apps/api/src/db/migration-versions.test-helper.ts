@@ -8,9 +8,9 @@
  * migration to main's highest version + 1 (a one-line change of its `version`) and empties this set; a branch never
  * merges with a version at or below main's highest. Postgres refuses to start on a database that recorded a version
  * above one it never applied (MigrationGapError), so a mistake is loud rather than a silently skipped migration.
- * Reserved now: none.
+ * Reserved now: v80 (lane c1owner, execution_history.triggered_by_user_id), which merges in the same train as v81.
  */
-const RESERVED_UNTIL_MERGED = new Set<number>([]);
+const RESERVED_UNTIL_MERGED = new Set<number>([80]);
 
 /**
  * Versions no migration will ever use. v70 was reserved for the run trace id, which merged after v71 had shipped and

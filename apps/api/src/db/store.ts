@@ -52,6 +52,7 @@ import type {
   WorkflowListItem
 } from "@ai-orchestrator/shared";
 import type { BudgetScopeType, McpGatewayRateLimit } from "@ai-orchestrator/shared";
+import type { OpenApiCatalog } from "@ai-orchestrator/shared";
 import type { McpGatewayLabelMark, McpGatewayLabelMarkKey, McpGatewayLabelMarkRaise } from "./gateway-label-marks.js";
 import type {
   ApprovalReadScope,
@@ -488,6 +489,34 @@ export interface WorkflowUserShareRecord {
   accessLevel: WorkflowShareAccessLevel;
   sharedBy: string | null;
   createdAt: string;
+}
+
+/** v81 — an OpenAPI spec offered in the palette. No credentials: nodes made from it pick a secret themselves. */
+export interface OpenApiSpecRecord {
+  id: string;
+  projectId: string;
+  name: string;
+  /** The URL it was read from; null for an upload. */
+  sourceUrl: string | null;
+  baseUrl: string;
+  /** The parsed operations (see @ai-orchestrator/shared OpenApiCatalog). */
+  catalog: OpenApiCatalog;
+  operationCount: number;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  fetchedAt: string;
+}
+
+export interface OpenApiSpecWrite {
+  id: string;
+  projectId: string;
+  name: string;
+  sourceUrl: string | null;
+  baseUrl: string;
+  specText: string;
+  catalog: OpenApiCatalog;
+  createdBy: string | null;
 }
 
 export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentRedactionStore {
@@ -1533,6 +1562,14 @@ export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentR
   /** v78 — adds or changes a user share; false when the workflow or the user does not exist. */
   upsertWorkflowUserShare(input: { workflowId: string; userId: string; accessLevel: WorkflowShareAccessLevel; sharedBy?: string | null }): Promise<boolean>;
   removeWorkflowUserShare(workflowId: string, userId: string): Promise<boolean>;
+  /** v81 — the OpenAPI specs of one project (every project's when unset), by name. */
+  listOpenApiSpecs(projectId?: string): Promise<OpenApiSpecRecord[]>;
+  getOpenApiSpec(id: string): Promise<OpenApiSpecRecord | null>;
+  /** v81 — the stored spec body, for a refresh or an export. */
+  getOpenApiSpecText(id: string): Promise<string | null>;
+  /** v81 — adds a spec or replaces one (an existing id keeps its project, creator and creation time). */
+  saveOpenApiSpec(input: OpenApiSpecWrite): Promise<OpenApiSpecRecord>;
+  deleteOpenApiSpec(id: string): Promise<boolean>;
   listSecretShares(secretId: string): Promise<Array<{
     secretId: string;
     projectId: string;

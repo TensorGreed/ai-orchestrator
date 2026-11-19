@@ -214,8 +214,11 @@ import type {
   StoredUserKind,
   StoredUserSummary,
   UserInviteCreate,
-  UserInviteRecord
+  UserInviteRecord,
+  OpenApiSpecRecord,
+  OpenApiSpecWrite
 } from "./store.js";
+import { mapOpenApiSpecRow, OPENAPI_SPEC_COLUMNS, type OpenApiSpecRow } from "./openapi-spec-rows.js";
 import {
   decideLostJob,
   lostJobEffects,
@@ -4573,6 +4576,24 @@ export class SqliteStore implements Store {
       );
       CREATE INDEX IF NOT EXISTS idx_workflow_user_shares_user_id ON workflow_user_shares(user_id);
     `);
+    // v81 — OpenAPI specs offered in the palette.
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS openapi_specs (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        source_url TEXT,
+        base_url TEXT NOT NULL DEFAULT '',
+        spec_text TEXT NOT NULL,
+        catalog_json TEXT NOT NULL,
+        operation_count INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        fetched_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_openapi_specs_project ON openapi_specs(project_id);
+    `);
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -7900,6 +7921,8 @@ export class SqliteStore implements Store {
     this.exec(`DELETE FROM folders WHERE project_id = ?`, [id]);
     // Variables are project configuration; they must not revive with a re-created id.
     this.exec(`DELETE FROM variables WHERE project_id = ?`, [id]);
+    // v81 — and its OpenAPI specs (project configuration, like variables).
+    this.exec(`DELETE FROM openapi_specs WHERE project_id = ?`, [id]);
     this.exec(`DELETE FROM guard_bindings WHERE scope = 'project' AND scope_id = ?`, [id]);
     // 12.6 — a re-created project with the same id starts with no model allowlist.
     this.exec(`DELETE FROM model_allowlist_entries WHERE scope = 'project' AND project_id = ?`, [id]);
@@ -8795,6 +8818,60 @@ export class SqliteStore implements Store {
 
   async removeWorkflowUserShare(workflowId: string, userId: string): Promise<boolean> {
     const changes = this.db.prepare(`DELETE FROM workflow_user_shares WHERE workflow_id = ? AND user_id = ?`).run(workflowId, userId).changes;
+    this.persist();
+    return changes > 0;
+  }
+
+  // ---------------------------------------------------------------------------
+  // v81 — OpenAPI specs
+  // ---------------------------------------------------------------------------
+
+  async listOpenApiSpecs(projectId?: string): Promise<OpenApiSpecRecord[]> {
+    const rows = projectId
+      ? this.queryAll<OpenApiSpecRow>(`SELECT ${OPENAPI_SPEC_COLUMNS} FROM openapi_specs WHERE project_id = ? ORDER BY name, id`, [projectId])
+      : this.queryAll<OpenApiSpecRow>(`SELECT ${OPENAPI_SPEC_COLUMNS} FROM openapi_specs ORDER BY name, id`);
+    return rows.map(mapOpenApiSpecRow);
+  }
+
+  async getOpenApiSpec(id: string): Promise<OpenApiSpecRecord | null> {
+    const row = this.queryOne<OpenApiSpecRow>(`SELECT ${OPENAPI_SPEC_COLUMNS} FROM openapi_specs WHERE id = ?`, [id]);
+    return row ? mapOpenApiSpecRow(row) : null;
+  }
+
+  async getOpenApiSpecText(id: string): Promise<string | null> {
+    const row = this.queryOne<{ spec_text: string }>(`SELECT spec_text FROM openapi_specs WHERE id = ?`, [id]);
+    return row ? toString(row.spec_text) : null;
+  }
+
+  async saveOpenApiSpec(input: OpenApiSpecWrite): Promise<OpenApiSpecRecord> {
+    const now = new Date().toISOString();
+    this.exec(
+      `INSERT INTO openapi_specs (id, project_id, name, source_url, base_url, spec_text, catalog_json, operation_count, created_by, created_at, updated_at, fetched_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET name = excluded.name, source_url = excluded.source_url, base_url = excluded.base_url,
+         spec_text = excluded.spec_text, catalog_json = excluded.catalog_json, operation_count = excluded.operation_count,
+         updated_at = excluded.updated_at, fetched_at = excluded.fetched_at`,
+      [
+        input.id,
+        input.projectId,
+        input.name,
+        input.sourceUrl,
+        input.baseUrl,
+        input.specText,
+        JSON.stringify(input.catalog),
+        input.catalog.operations.length,
+        input.createdBy,
+        now,
+        now,
+        now
+      ]
+    );
+    this.persist();
+    return (await this.getOpenApiSpec(input.id))!;
+  }
+
+  async deleteOpenApiSpec(id: string): Promise<boolean> {
+    const changes = this.db.prepare(`DELETE FROM openapi_specs WHERE id = ?`).run(id).changes;
     this.persist();
     return changes > 0;
   }

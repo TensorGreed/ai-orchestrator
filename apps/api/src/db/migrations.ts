@@ -3120,6 +3120,34 @@ export const MIGRATIONS: Migration[] = [
     down: `
       ALTER TABLE execution_history DROP COLUMN IF EXISTS session_owner;
     `
+  },
+  {
+    version: 81,
+    description: "OpenAPI specs offered as palette entries (one row per spec, kept to a project)",
+    // openapi_specs: a spec a builder added from a URL or a file. spec_text is the body as read (at most 2 MB);
+    // catalog_json the operations parsed from it, which the palette and the operation forms read. No credentials:
+    // nodes made from it pick a secret (secretRef) themselves. Removed with its project (deleteProject).
+    up: `
+      CREATE TABLE IF NOT EXISTS openapi_specs (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        source_url TEXT,
+        base_url TEXT NOT NULL DEFAULT '',
+        spec_text TEXT NOT NULL,
+        catalog_json TEXT NOT NULL,
+        operation_count INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        fetched_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_openapi_specs_project ON openapi_specs(project_id);
+    `,
+    // An older build ignores the table; dropping it removes every stored spec (nodes made from one keep working).
+    down: `
+      DROP TABLE IF EXISTS openapi_specs;
+    `
   }
 ];
 
