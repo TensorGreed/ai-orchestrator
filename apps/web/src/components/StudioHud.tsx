@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, ty
 import type { Project, WorkflowListItem } from "@ai-orchestrator/shared";
 import type { AuthUser } from "../lib/api";
 import { SidebarMenuButton } from "./AppSidebar";
+import { workflowPickerLabels } from "../lib/workflow-names";
 import { CommandPalette } from "./CommandPalette";
 import { DocsIcon, HelpIcon, MoonIcon, MoreIcon, PlayIcon, SunIcon } from "./shell-icons";
 import { STUDIO_MODE_ITEMS, studioModeLabel, type CommandPaletteItem, type RunStatus, type StudioMode } from "./studio-layout-types";
@@ -281,6 +282,7 @@ export function StudioHud({
   ]);
 
   const status = runStatus ?? { state: "idle" as const, label: "no runs yet" };
+  const workflowLabels = useMemo(() => workflowPickerLabels(workflowList), [workflowList]);
 
   return (
     <header className="hud" role="banner">
@@ -295,6 +297,8 @@ export function StudioHud({
             <input
               className="hud-workflow-name"
               aria-label="Workflow name"
+              title="Rename this workflow"
+              placeholder="Name this workflow"
               value={currentWorkflowName}
               onChange={(event) => onWorkflowNameChange(event.target.value)}
               spellCheck={false}
@@ -313,7 +317,7 @@ export function StudioHud({
             {!currentWorkflowExists && <option value="">{currentWorkflowName || "Current (unsaved)"}</option>}
             {workflowList.map((workflow) => (
               <option key={workflow.id} value={workflow.id}>
-                {workflow.name}
+                {workflowLabels.get(workflow.id) ?? workflow.name}
               </option>
             ))}
           </select>

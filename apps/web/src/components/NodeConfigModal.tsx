@@ -1240,11 +1240,14 @@ function ExpressionField({
   rows = 3,
   mode = "expression",
   previewContext,
-  help
+  help,
+  placeholder
 }: {
   label: string;
   value: string;
   onChange: (next: string) => void;
+  /** Grey example text while the field is empty. */
+  placeholder?: string;
   rows?: number;
   /** `condition`: the preview shows true or false, judged as an IF node judges the text. */
   mode?: "expression" | "template" | "condition";
@@ -1387,6 +1390,7 @@ function ExpressionField({
           });
         }}
         rows={rows}
+        placeholder={placeholder}
       />
       {autocomplete.list}
       {formatError && <div className="cfg-field-error">{formatError}</div>}
@@ -6634,10 +6638,15 @@ export function NodeInspector({
           <>
             <TextField
               label="Input Key"
-              value={toStringValue(config.inputKey, "items")}
+              value={toStringValue(config.inputKey)}
               onChange={(next) => setConfig((current) => ({ ...current, inputKey: next }))}
               placeholder="items"
             />
+            {!toStringValue(config.inputKey).trim() && (
+              <div className="cfg-help" data-testid="loop-input-key-hint">
+                The list to repeat over: a field of this node&apos;s input, such as <code>items</code> or <code>body.orders</code>.
+              </div>
+            )}
             {/* New Loops collect and route; the switches are offered only on a Loop saved without them. */}
             {switchesAtOpen.includes("loop_collect") && (
               <ToggleField
@@ -6987,8 +6996,9 @@ export function NodeInspector({
             />
             <ExpressionField
               label="URL Template"
-              value={toStringValue(config.urlTemplate, "https://api.example.com/resource/{{id}}")}
+              value={toStringValue(config.urlTemplate)}
               onChange={(next) => setConfig((current) => ({ ...current, urlTemplate: next }))}
+              placeholder="https://api.example.com/v1/orders/{{item.id}}"
               rows={2}
               mode="template"
               previewContext={expressionPreviewContext}
@@ -7067,6 +7077,7 @@ export function NodeInspector({
                       label="Value Template"
                       mode="template"
                       previewContext={expressionPreviewContext}
+                      placeholder="{{item.id}} or plain text"
                       value={toStringValue(assignment.valueTemplate)}
                       onChange={(next) =>
                         setConfig((current) => {
@@ -9950,6 +9961,12 @@ export function NodeInspector({
                 { value: "bearer", label: "Bearer token" }
               ]}
             />
+            {toStringValue(config.authMode, "public") === "bearer" && !toStringValue(asRecord(config.secretRef).secretId) && (
+              <div className="cfg-tip" data-testid="mcp-trigger-needs-secret">
+                Pick the secret that holds the token. Until then its REST route refuses every call. MCP clients reach the tool
+                through a toolset with their own client token either way.
+              </div>
+            )}
             {toStringValue(config.authMode, "public") === "bearer" &&
               renderCredentialSecretField({
                 fieldKey: "mcp_server_bearer",

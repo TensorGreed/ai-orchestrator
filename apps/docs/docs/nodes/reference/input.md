@@ -364,7 +364,7 @@ Turn this workflow into an MCP tool that other agents (including other L2M agent
       "question"
     ]
   },
-  "authMode": "public"
+  "authMode": "bearer"
 }
 ```
 

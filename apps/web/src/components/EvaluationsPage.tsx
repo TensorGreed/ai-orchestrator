@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { workflowPickerLabel } from "../lib/workflow-names";
 import type { ReplayJobEstimate, WorkflowListItem } from "@ai-orchestrator/shared";
 import {
   ApiError,
@@ -415,9 +416,9 @@ function CreateGoldenSetForm({ workflows, onCancel, onCreated }: { workflows: Wo
           <span>Workflow</span>
           <select value={workflowId} onChange={(event) => setWorkflowId(event.target.value)}>
             {workflows.length === 0 && <option value="">No workflows in this project</option>}
-            {workflows.map((workflow) => (
+            {workflows.map((workflow, _index, list) => (
               <option key={workflow.id} value={workflow.id}>
-                {workflow.name}
+                {workflowPickerLabel(list, workflow)}
               </option>
             ))}
           </select>

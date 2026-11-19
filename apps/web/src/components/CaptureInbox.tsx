@@ -9,6 +9,7 @@
  * empty and production runs are not recorded.
  */
 
+import { workflowPickerLabel } from "../lib/workflow-names";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { REPLAY_CAPTURE_DEFAULT_SET_NAME, REPLAY_CAPTURE_STATUSES, type ReplayCaptureStatus, type WorkflowListItem } from "@ai-orchestrator/shared";
 import {
@@ -82,9 +83,9 @@ export function CaptureInbox({ workflows, activeProjectId, canEdit, isAdmin, ini
           <label className="capture-workflow">
             <span className="cfg-label">Workflow</span>
             <select className="cfg-input" value={workflowId} onChange={(event) => setWorkflowId(event.target.value)} aria-label="Capture workflow">
-              {workflows.map((workflow) => (
+              {workflows.map((workflow, _index, list) => (
                 <option key={workflow.id} value={workflow.id}>
-                  {workflow.name}
+                  {workflowPickerLabel(list, workflow)}
                 </option>
               ))}
             </select>

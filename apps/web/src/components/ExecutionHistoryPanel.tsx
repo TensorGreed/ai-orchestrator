@@ -1,4 +1,5 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
+import { workflowPickerLabels } from "../lib/workflow-names";
 import { fetchMcpElicitations, inBackground, type ExecutionHistoryDetail, type ExecutionHistorySummary, type ExecutionRunLink, type McpReplayMode } from "../lib/api";
 import type { McpElicitationView, WorkflowListItem } from "@ai-orchestrator/shared";
 import { displayNodeStatus } from "../lib/run-data";
@@ -237,6 +238,7 @@ export function ExecutionHistoryPanel({
   mayEditWorkflow = everyWorkflow,
   onOpenExecution
 }: ExecutionHistoryPanelProps) {
+  const workflowLabels = useMemo(() => workflowPickerLabels(workflowList), [workflowList]);
   const [expandedTraceKey, setExpandedTraceKey] = useState<string | null>(null);
   const [viewer, setViewer] = useState<{ cassetteId: string; executionId: string; workflowId: string } | null>(null);
   const [saveGolden, setSaveGolden] = useState<ExecutionHistorySummary | null>(null);
@@ -300,7 +302,7 @@ export function ExecutionHistoryPanel({
             <option value="">All workflows</option>
             {workflowList.map((workflow) => (
               <option key={workflow.id} value={workflow.id}>
-                {workflow.name}
+                {workflowLabels.get(workflow.id) ?? workflow.name}
               </option>
             ))}
           </select>

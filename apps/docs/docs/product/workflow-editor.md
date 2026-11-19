@@ -42,6 +42,12 @@ Open the palette with **Add node**, a double-click on empty canvas, or the `+` b
 
 The canvas pans to show a node it adds when the node would land out of view.
 
+A node you add starts with what it needs filled in empty, with an example as a grey placeholder: an HTTP Request's
+URL, one Set row, one Filter condition (empty, it keeps every item), a Loop's input key. A Merge appends (or collects
+a loop's passes when added straight after a Loop body node). A **Schedule Trigger** starts off, in your browser's time
+zone; an **Expose as MCP Tool** trigger asks for a bearer token. A webhook, form, chat or MCP trigger or a schedule
+that is off says **Off** on its card: click it to open the node, then **Turn on**.
+
 ## Describe a workflow
 
 Builders and admins can say what a workflow should do and get a draft to review. **Describe it…** is on the Workflows
@@ -178,7 +184,7 @@ While the run is going the cards update live (running time, the step a node is o
 
 ### The node inspector
 
-Double-click a node to open it. The inspector opens as a panel over the dimmed editor; click the dimmed area, press
+Double-click a node to open it, or click a selected node again. The inspector opens as a panel over the dimmed editor; click the dimmed area, press
 `Esc` or use the close button to return to the canvas (unsaved edits are confirmed first). On a wide window the
 inspector shows **Input | Parameters | Output** side by side,
 for every node, so it keeps its shape while you move between nodes; on a narrow window the same parts are tabs

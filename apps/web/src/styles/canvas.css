@@ -965,6 +965,33 @@
   z-index: 3;
 }
 
+.wf-node-off-badge {
+  position: absolute;
+  top: 6px;
+  right: 26px;
+  z-index: 3;
+  padding: 1px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  background: var(--bg);
+  color: var(--fg-muted);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+}
+
+button.wf-node-off-badge {
+  cursor: pointer;
+}
+
+button.wf-node-off-badge:hover,
+button.wf-node-off-badge:focus-visible {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+
 .wf-node-pinned-badge {
   position: absolute;
   top: 6px;

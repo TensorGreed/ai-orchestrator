@@ -3,6 +3,7 @@
  * fails, with the failed run's details as its input. Off when none is picked.
  */
 import { useEffect, useId, useRef } from "react";
+import { workflowPickerLabels } from "../lib/workflow-names";
 
 export interface ErrorWorkflowOption {
   id: string;
@@ -43,6 +44,7 @@ export function ErrorWorkflowDialog({ workflowId, errorWorkflowId, workflows, on
   const options = workflows.filter((workflow) => workflow.id !== workflowId);
   // A saved id that is not in the list (another project's shared workflow, or one deleted since) stays visible.
   const unknownCurrent = current !== "" && !options.some((workflow) => workflow.id === current);
+  const labels = workflowPickerLabels(options);
 
   return (
     <div className="pg-modal-backdrop" role="presentation" onClick={onClose}>
@@ -84,7 +86,7 @@ export function ErrorWorkflowDialog({ workflowId, errorWorkflowId, workflows, on
               {unknownCurrent && <option value={current}>{current} (not in this project&apos;s list)</option>}
               {options.map((workflow) => (
                 <option key={workflow.id} value={workflow.id}>
-                  {workflow.name}
+                  {labels.get(workflow.id) ?? workflow.name}
                 </option>
               ))}
             </select>

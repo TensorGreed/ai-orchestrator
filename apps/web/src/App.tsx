@@ -131,7 +131,8 @@ import {
 import { ORBIT, attachedNodeIds, computeAttachmentSlots, orbitPositions } from "./lib/stages";
 import { chooseSourceHandle, findFreePosition, insertPositionAfter, planInsertConnection } from "./lib/canvas-insert";
 import { canvasRunPreview, displayNodeStatus, hasTestData, loopPassResults } from "./lib/run-data";
-import { newNodeConfig } from "./lib/trigger-paths";
+import { isDirectLoopBodyNode, newNodeConfig } from "./lib/new-node-config";
+import { copyWorkflowName, nextNewWorkflowName, workflowPickerLabels } from "./lib/workflow-names";
 import {
   deleteTabWipWorkflow,
   preferTabWip,
@@ -179,6 +180,7 @@ import type { McpNavTarget } from "./lib/mcp-control-plane";
 import { useMcpCanvasStatus } from "./lib/use-mcp-canvas-status";
 import { TemplateGallery } from "./components/TemplateGallery";
 import { WelcomeModal, isWelcomeDismissed, markWelcomeDismissed } from "./components/WelcomeModal";
+import { HomeStarters } from "./components/HomeStarters";
 import { AcceptInviteCard } from "./components/AcceptInviteCard";
 import { IdleSessionWarning } from "./components/IdleSessionWarning";
 import { INVITE_SIGNED_IN_NOTICE, inviteTokenFromLocation, stripInviteParam } from "./lib/user-invite";
@@ -2496,12 +2498,18 @@ function StudioApp() {
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
+      const projectsRequest = fetchProjects().catch(() => null);
       const [workflowItems, projectPayload, folderPayload, sharedPayload, projectSharedPayload] = await Promise.all([
         fetchWorkflows({ projectId: activeProjectId }),
-        fetchProjects().catch(() => null),
+        projectsRequest,
         fetchFolders(activeProjectId).catch(() => ({ folders: [] })),
         fetchWorkflowsSharedWithMe().catch(() => ({ workflows: [] })),
-        fetchProjectSharedWorkflows(activeProjectId).catch(() => ({ workflows: [] }))
+        // Only for a project the person is in: someone whose access comes only from shares has none to ask about.
+        projectsRequest.then((payload) =>
+          payload && !payload.projects.some((project) => project.id === activeProjectId)
+            ? { workflows: [] }
+            : fetchProjectSharedWorkflows(activeProjectId).catch(() => ({ workflows: [] }))
+        )
       ]);
       // A slower answer for a project the person has already left must not replace the lists of the one they chose.
       if (activeProjectIdRef.current !== null && activeProjectIdRef.current !== activeProjectId) return;
@@ -3331,9 +3339,15 @@ function StudioApp() {
   }, []);
 
   const handleWelcomeTryTemplate = useCallback(() => {
-    setTemplateInitialCategory(undefined);
+    setTemplateInitialCategory("Starters");
     setActiveMode("templates");
     handleWelcomeDismiss();
+  }, [handleWelcomeDismiss, setActiveMode]);
+
+  const handleWelcomeDescribe = useCallback(() => {
+    handleWelcomeDismiss();
+    setActiveMode("dashboard");
+    setWorkflowBuilderOpen(true);
   }, [handleWelcomeDismiss, setActiveMode]);
 
   const handleWelcomeBuildAgent = useCallback(() => {
@@ -4307,7 +4321,8 @@ function StudioApp() {
 
   /**
    * A workflow made with "New workflow" lives only in the editor until its first edit (or a save or run): then it is
-   * saved. Opening another workflow first discards it, so abandoned clicks leave no empty workflows behind.
+   * saved. Opening another workflow first discards it, so abandoned clicks leave no empty workflows behind. An edit
+   * that leaves the canvas empty (Clear) does not save it either: it saves once it has a node again, or on Save.
    */
   const unsavedNewWorkflowRef = useRef<{ id: string; baseline: string | null; saving: boolean } | null>(null);
 
@@ -4324,7 +4339,8 @@ function StudioApp() {
     const outputNodeId = createNodeId("output", "Output", blankIds);
     const workflow: Workflow = {
       ...draft,
-      name: `Workflow ${workflowList.length + 1}`,
+      // A name no workflow in the list has, so pickers never show two "Workflow N".
+      name: nextNewWorkflowName(workflowList.map((item) => item.name)),
       nodes: [
         {
           id: userPromptNodeId,
@@ -4362,7 +4378,7 @@ function StudioApp() {
     pendingWorkflowLoadIdRef.current = null;
     hydrateWorkflow(workflow);
     setActiveMode("editor");
-  }, [canManageWorkflows, hydrateWorkflow, workflowList.length]);
+  }, [canManageWorkflows, hydrateWorkflow, workflowList]);
 
   // The first edit of a new workflow saves it.
   useEffect(() => {
@@ -4385,6 +4401,7 @@ function StudioApp() {
       return;
     }
     if (pending.saving || signature === pending.baseline) return;
+    if (nodes.length === 0) return;
     pending.saving = true;
     persistWorkflow()
       .then(() => {
@@ -4406,7 +4423,7 @@ function StudioApp() {
       }
 
       const source = workflowList.find((workflow) => workflow.id === workflowId);
-      const suggestedName = source ? `${source.name} Copy` : "Workflow Copy";
+      const suggestedName = copyWorkflowName(source?.name ?? "Workflow", workflowList.map((item) => item.name));
       const requestedName = window.prompt("Name for duplicated workflow", suggestedName);
       if (requestedName === null) {
         return;
@@ -4997,7 +5014,9 @@ function StudioApp() {
           // A new model node starts on a configured provider (a server key, else a saved secret) or on Echo.
           config: withDefaultModelProvider(
             definition.type,
-            newNodeConfig(definition.type, definition.sampleConfig),
+            newNodeConfig(definition.type, definition.sampleConfig, {
+              afterLoopBodyNode: Boolean(connectAfter && isDirectLoopBodyNode(connectAfter.node.id, nodes as EditorNode[], edges))
+            }),
             pickDefaultModelProvider({ envProviders: envModelProviders, secrets })
           )
         }
@@ -5447,6 +5466,7 @@ function StudioApp() {
         docsUrl={docsUrl}
         onTryTemplate={handleWelcomeTryTemplate}
         onBuildAgent={handleWelcomeBuildAgent}
+        onDescribe={canManageWorkflows && !inNoProject && workflowBuilderEnabled ? handleWelcomeDescribe : undefined}
         onDismiss={handleWelcomeDismiss}
       />
       <LeftMenuBar
@@ -5664,6 +5684,17 @@ function StudioApp() {
                 </div>
               </header>
 
+              {canManageWorkflows && !inNoProject && (
+                <HomeStarters
+                  projectId={activeProjectId}
+                  onWorkflowCreated={handleTemplateWorkflowCreated}
+                  onBrowseStarters={() => {
+                    setTemplateInitialCategory("Starters");
+                    setActiveMode("templates");
+                  }}
+                />
+              )}
+
               <div className="dashboard-toolbar" style={inNoProject ? { display: "none" } : undefined}>
                 <label className="page-search">
                   <span className="page-search-icon" aria-hidden="true">
@@ -5771,7 +5802,9 @@ function StudioApp() {
               {!inNoProject && filteredWorkflowItems.length === 0 && (
                 <div className="page-empty">
                   {workflowList.length === 0
-                    ? "No workflows in this project yet. Create one, or start from a template."
+                    ? canManageWorkflows
+                      ? "No workflows in this project yet. Use a starter above, or click New workflow."
+                      : "No workflows in this project yet."
                     : "No workflows match your filters."}
                 </div>
               )}
@@ -6464,6 +6497,7 @@ function StudioApp() {
             <TemplateGallery
               onWorkflowCreated={handleTemplateWorkflowCreated}
               initialCategory={templateInitialCategory}
+              projectId={inNoProject ? undefined : activeProjectId}
             />
           )}
 

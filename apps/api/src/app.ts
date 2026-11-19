@@ -294,7 +294,7 @@ import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { registerUserInviteRoutes } from "./user-invite-routes.js";
 import { WORKFLOW_BUILDER_TRIGGER_TYPE, WORKFLOW_BUILDER_USAGE_LABEL, WORKFLOW_BUILDER_USAGE_WORKFLOW_ID, registerWorkflowBuilderRoutes } from "./workflow-builder-routes.js";
 import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
-import { LIVE_ENTRY_OFF_CODE, isLiveEntryOff, liveEntryOffMessage } from "@ai-orchestrator/shared";
+import { LIVE_ENTRY_OFF_CODE, isLiveEntryOff, liveEntryOffMessage, publicEntryWarnings } from "@ai-orchestrator/shared";
 import { envModelProviders } from "@ai-orchestrator/shared";
 import {
   CONTENT_FILTER_CODE,
@@ -11912,7 +11912,9 @@ export async function createApp(
     const validation = validateWorkflowGraph(workflow);
     // 12.6 — a model the allowlist refuses is a warning: the workflow saves and validates, its runs fail at that node.
     const modelWarnings = await modelAllowlistService.warningsFor(workflow);
-    const result = modelWarnings.length > 0 ? { ...validation, issues: [...validation.issues, ...modelWarnings] } : validation;
+    // A live webhook, form or MCP tool anyone can call is a warning: it saves and runs, and the editor notes it after a save.
+    const extraWarnings = [...modelWarnings, ...publicEntryWarnings(workflow)];
+    const result = extraWarnings.length > 0 ? { ...validation, issues: [...validation.issues, ...extraWarnings] } : validation;
     // Production's version has unfinished settings: its webhooks, schedules and app triggers do not run it.
     const liveTriggersPaused = (await releaseService.unfinishedProductionWorkflow(workflow.id)) !== null;
     return { ...result, liveTriggersPaused };
@@ -13574,6 +13576,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       if (isLiveEntryOff(found.node)) return mcpServerOff(reply);
       const cfg = asRecord(found.node.config);
       if (cfg.authMode === "bearer") {
+        // A new trigger asks for a token before its secret is picked: every call is refused, as an unauthorised one.
+        if (typeof asRecord(cfg.secretRef).secretId !== "string" || !String(asRecord(cfg.secretRef).secretId).trim()) {
+          reply.code(401);
+          return { error: "This tool asks for a bearer token, but no token secret is picked on its trigger yet", code: "token_not_set" };
+        }
         const secret = await secretService.resolveSecret(toSecretReference(cfg.secretRef));
         if (!secret) {
           reply.code(500);

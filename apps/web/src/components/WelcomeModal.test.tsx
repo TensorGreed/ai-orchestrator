@@ -57,6 +57,23 @@ describe("WelcomeModal", () => {
     expect(onBuildAgent).toHaveBeenCalledTimes(1);
   });
 
+  it("points at the starters, which run without setup", () => {
+    renderModal();
+    const starter = screen.getByTestId("welcome-try-template");
+    expect(starter).toHaveTextContent("Run a starter");
+    expect(starter).toHaveTextContent("no model, key or server needed");
+    expect(screen.getByRole("dialog")).not.toHaveTextContent("Basic LLM Flow");
+  });
+
+  it("offers Describe it in place of the agent templates when it is available", async () => {
+    const user = userEvent.setup();
+    const onDescribe = vi.fn();
+    renderModal({ onDescribe });
+    expect(screen.queryByTestId("welcome-build-agent")).not.toBeInTheDocument();
+    await user.click(screen.getByTestId("welcome-describe"));
+    expect(onDescribe).toHaveBeenCalledTimes(1);
+  });
+
   it("renders the docs CTA as an external link with the supplied URL", () => {
     renderModal({ docsUrl: "https://docs.l2m.example/start" });
     const link = screen.getByTestId("welcome-open-docs") as HTMLAnchorElement;

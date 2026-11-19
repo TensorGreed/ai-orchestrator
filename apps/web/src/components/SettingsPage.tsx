@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { workflowPickerLabel } from "../lib/workflow-names";
 import { NOTIFICATION_EVENT_LABELS, NOTIFICATION_EVENT_TYPES, type Project } from "@ai-orchestrator/shared";
 import {
   activateMfa,
@@ -4239,7 +4240,7 @@ function EvalDatasetDetail({
             <span>Workflow</span>
             <select value={selectedWorkflow} onChange={(e) => setSelectedWorkflow(e.target.value)} disabled={busy}>
               <option value="">— pick a workflow —</option>
-              {workflows.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+              {workflows.map((w, _index, list) => <option key={w.id} value={w.id}>{workflowPickerLabel(list, w)}</option>)}
             </select>
           </label>
           <button

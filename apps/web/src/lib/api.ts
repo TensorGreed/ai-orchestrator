@@ -3018,10 +3018,12 @@ export async function fetchTemplate(id: string) {
   return apiRequest<TemplateListItem & { workflowJson: string }>(`/api/templates/${id}`);
 }
 
-export async function useTemplate(templateId: string) {
+export async function useTemplate(templateId: string, options: { projectId?: string } = {}) {
   // `companions`: the workflows the template brought along (a sub-workflow it calls), created next to it.
+  // The new workflow goes into `projectId` (the project open in the studio); without one, the default project.
   return apiRequest<{ workflowId: string; name: string; companions?: Array<{ workflowId: string; name: string }> }>(`/api/templates/${templateId}/use`, {
-    method: "POST"
+    method: "POST",
+    ...(options.projectId ? { body: JSON.stringify({ projectId: options.projectId }) } : {})
   });
 }
 

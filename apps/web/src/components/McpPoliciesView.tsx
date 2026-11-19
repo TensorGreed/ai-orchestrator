@@ -9,6 +9,7 @@
  * shadow mode) and enforce shadow rules once their recorded hits look right.
  */
 
+import { workflowPickerLabel } from "../lib/workflow-names";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   McpGatewayApproval,
@@ -727,9 +728,9 @@ function McpPolicyForm({
             value={workflowIds}
             onChange={(event) => setWorkflowIds(Array.from(event.target.selectedOptions, (option) => option.value))}
           >
-            {principals.workflows.map((workflow) => (
+            {principals.workflows.map((workflow, _index, list) => (
               <option key={workflow.id} value={workflow.id}>
-                {workflow.name}
+                {workflowPickerLabel(list, workflow)}
               </option>
             ))}
             {workflowIds
@@ -1008,9 +1009,9 @@ function PolicyEvaluator({
           Workflow (optional)
           <select value={workflowId} onChange={(event) => setWorkflowId(event.target.value)}>
             <option value="">Any workflow</option>
-            {principals.workflows.map((workflow) => (
+            {principals.workflows.map((workflow, _index, list) => (
               <option key={workflow.id} value={workflow.id}>
-                {workflow.name}
+                {workflowPickerLabel(list, workflow)}
               </option>
             ))}
           </select>

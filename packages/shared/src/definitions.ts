@@ -2785,7 +2785,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
         properties: { question: { type: "string" } },
         required: ["question"]
       },
-      authMode: "public"
+      // A new node's REST route asks for a bearer token (pick its secret); nodes saved without authMode stay public.
+      authMode: "bearer"
     }
   },
   {

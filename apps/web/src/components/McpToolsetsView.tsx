@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { GuardProfileSummary, McpPolicyRole, McpToolsetMemberSpec, Project } from "@ai-orchestrator/shared";
+import { workflowPickerLabels } from "../lib/workflow-names";
 import {
   ApiError,
   type McpRegisteredServer,
@@ -531,6 +532,8 @@ function McpToolsetForm({
     return [...candidates, ...extra];
   }, [candidates, initial]);
 
+  const workflowLabels = useMemo(() => workflowPickerLabels(workflowOptions), [workflowOptions]);
+
   const toggleWorkflow = (id: string) =>
     setWorkflowIds((current) => (current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id]));
 
@@ -642,7 +645,7 @@ function McpToolsetForm({
             <label key={workflow.id} className="mcp-check">
               <input type="checkbox" checked={workflowIds.includes(workflow.id)} onChange={() => toggleWorkflow(workflow.id)} />
               <span>
-                {workflow.name}
+                {workflowLabels.get(workflow.id) ?? workflow.name}
                 {workflow.tools.length > 0 && <code className="mcp-member-glob">{workflow.tools.join(", ")}</code>}
               </span>
             </label>

@@ -1,7 +1,8 @@
 /**
  * Settings > Users > Invite user (admins): an email and a role. The server emails the invite link when a mail server
- * is set; otherwise the link is shown here once, to copy and pass on. Inviting the email of someone already invited
- * sends a new link (the old one stops working).
+ * is set; otherwise the link is shown here once, to copy or to send from the admin's own mail app ("Send email" opens a
+ * message to the invitee with the link in it; nothing goes through the server). Inviting the email of someone already
+ * invited sends a new link (the old one stops working).
  */
 import { useEffect, useId, useRef, useState } from "react";
 import { inviteUser, type UserInviteResult } from "../lib/api";
@@ -66,6 +67,14 @@ export function InviteUserDialog({ onInvited, onClose }: InviteUserDialogProps) 
     }
   };
 
+  /** A mailto: link for the admin's own mail app: to the invitee, with the link and its expiry in the body. */
+  const mailto = result?.inviteUrl
+    ? // The address stays as it is (the server checked it): some mail apps do not decode an encoded one.
+      `mailto:${result.user.email}?subject=${encodeURIComponent("You are invited to L2M")}&body=${encodeURIComponent(
+        `You are invited to L2M as ${result.user.role}.\n\nOpen this link to choose your password and sign in:\n${result.inviteUrl}\n\nThe link works once and expires at ${new Date(result.invite.expiresAt).toLocaleString()}.`
+      )}`
+    : null;
+
   const copy = async () => {
     if (!result?.inviteUrl) return;
     try {
@@ -105,6 +114,11 @@ export function InviteUserDialog({ onInvited, onClose }: InviteUserDialogProps) 
                     <button type="button" className="pg-btn" onClick={() => void copy()}>
                       {copied ? "Copied" : "Copy link"}
                     </button>
+                    {mailto && (
+                      <a className="pg-btn" href={mailto} title="Opens a message to them in your mail app, with the link in it">
+                        Send email
+                      </a>
+                    )}
                   </div>
                 </>
               )}

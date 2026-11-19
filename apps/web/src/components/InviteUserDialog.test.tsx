@@ -29,6 +29,12 @@ describe("InviteUserDialog", () => {
     expect(api.inviteUser).toHaveBeenCalledWith({ email: "ana@example.com", role: "operator" });
     expect(onInvited).toHaveBeenCalled();
     expect(screen.getByLabelText("Invite link")).toHaveValue("http://localhost:5173/#invite=abc");
+    // Or send it from their own mail app: a message to the invitee with the link in it.
+    const send = screen.getByRole("link", { name: "Send email" });
+    const href = send.getAttribute("href") ?? "";
+    expect(href.startsWith("mailto:ana@example.com?")).toBe(true);
+    expect(decodeURIComponent(href)).toContain("http://localhost:5173/#invite=abc");
+    expect(decodeURIComponent(href)).toContain("as operator");
   });
 
   it("says the invite was emailed when it was, and checks the email first", async () => {
