@@ -215,3 +215,28 @@ describe("helpers", () => {
     expect(readHttpSecretAuth({ type: "digest" })).toMatch(/must be/);
   });
 });
+
+describe("operationFormSchema", () => {
+  it("groups parameters and the body so form paths match buildOperationRequest", async () => {
+    const { operationFormSchema } = await import("./integration-catalog");
+    const catalog = parseOpenApiDocument(spec);
+    const create = catalog.operations[1]!;
+    const schema = operationFormSchema(create) as { properties: Record<string, { title?: string; properties?: Record<string, unknown> }>; required?: string[] };
+    expect(Object.keys(schema.properties)).toEqual(["body"]);
+    expect(schema.required).toEqual(["body"]);
+    expect(Object.keys(schema.properties.body!.properties!)).toEqual(["title", "priority", "urgent", "labels", "owner"]);
+    const remove = operationFormSchema(catalog.operations[3]!) as typeof schema;
+    expect(Object.keys(remove.properties)).toEqual(["path", "header"]);
+    expect(remove.required).toEqual(["path"]);
+    expect(remove.properties.header!.title).toBe("Headers");
+  });
+
+  it("nests deep body objects the same way the form does", () => {
+    const deep = { type: "object", properties: { a: { type: "object", properties: { b: { type: "object", properties: { c: { type: "object", properties: { d: { type: "string" } } } } } } } } };
+    // Root level 0: a(0) b(1) c(2) have fields, d is a string at level 3.
+    expect(JSON.parse(jsonTemplateFromForm(deep, { "a.b.c.d": "x" }).template)).toEqual({ a: { b: { c: { d: "x" } } } });
+    // Started one level down (an operation body), c sits at level 3 and still has fields; one more level would be JSON.
+    const deeper = { type: "object", properties: { a: { type: "object", properties: { b: { type: "object", properties: { c: { type: "object", properties: { d: { type: "object", properties: { e: { type: "string" } } } } } } } } } } };
+    expect(JSON.parse(jsonTemplateFromForm(deeper, { "a.b.c.d": '{"e":"y"}' }, { startLevel: 1 }).template)).toEqual({ a: { b: { c: { d: { e: "y" } } } } });
+  });
+});

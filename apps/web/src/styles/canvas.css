@@ -1541,7 +1541,7 @@
   background: var(--bg-elev);
   box-shadow: var(--shadow-lg);
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
   overflow: hidden;
   color: var(--fg);
 }
@@ -3170,4 +3170,82 @@ button.wf-mcp-chip:focus-visible {
 }
 .react-flow__node:has(.wf-error-output-card) .wf-node-telemetry {
   right: 76px;
+}
+
+/* Integration catalog: the palette's footer action and the "Your integrations" dialog. */
+.node-palette-footer {
+  border-top: 1px solid var(--line);
+  padding: 8px 12px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--fg-muted, var(--fg));
+}
+
+.api-catalog-modal {
+  width: min(640px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+}
+
+.api-catalog-mode {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+
+.api-catalog-list h4 {
+  margin: 16px 0 6px;
+  font-size: 13px;
+}
+
+.api-catalog-list ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.api-catalog-list li {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.api-catalog-list li > div:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.api-catalog-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.api-catalog-base {
+  margin-top: 6px;
+}
+
+.cfg-operation-summary {
+  display: grid;
+  gap: 2px;
+  margin-bottom: 8px;
+}
+
+.cfg-operation-summary code {
+  font-size: 12px;
+}
+.api-catalog-modal .pg-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }

@@ -106,6 +106,9 @@ export interface CatalogPaletteEntry {
   sourceId: string;
   /** Tool name or operation id. */
   itemId: string;
+  /** The node the entry adds and its starting configuration (see catalogNodeConfig). */
+  nodeType: "mcp_tool" | "http_request";
+  nodeConfig: Record<string, unknown>;
 }
 
 export interface CatalogSourceSummary {
@@ -498,8 +501,13 @@ function scalarJson(kind: string | undefined, raw: string, path: string, errors:
   }
 }
 
-function nestedFieldsUsable(schema: Record<string, unknown>, depth: number): boolean {
-  return depth < 4 && isRecord(schema.properties) && Object.keys(schema.properties).length > 0 && !schema.anyOf && !schema.oneOf && !schema.allOf;
+/**
+ * Whether an object at this nesting level (0: a property of the form's root) gets fields of its own. Matches the web
+ * form generator (apps/web lib/mcp-schema-form.ts): deeper objects, and objects without properties or with
+ * anyOf / oneOf / allOf, are one JSON field.
+ */
+function nestedFieldsUsable(schema: Record<string, unknown>, level: number): boolean {
+  return level < 4 && isRecord(schema.properties) && Object.keys(schema.properties).length > 0 && !schema.anyOf && !schema.oneOf && !schema.allOf;
 }
 
 /**
@@ -511,7 +519,7 @@ function nestedFieldsUsable(schema: Record<string, unknown>, depth: number): boo
 export function jsonTemplateFromForm(
   schema: unknown,
   values: CatalogFormValues,
-  options: { prefix?: string } = {}
+  options: { prefix?: string; startLevel?: number } = {}
 ): { template: string; errors: Record<string, string> } {
   const errors: Record<string, string> = {};
   const prefix = options.prefix ?? "";
@@ -525,7 +533,7 @@ export function jsonTemplateFromForm(
       const property = isRecord(rawProperty) ? rawProperty : {};
       const fieldPath = path ? `${path}.${key}` : key;
       const kind = schemaTypeOf(property);
-      if (kind === "object" && nestedFieldsUsable(property, depth + 1)) {
+      if (kind === "object" && nestedFieldsUsable(property, depth)) {
         const nested = build(property, fieldPath, depth + 1);
         if (nested.touched || required.has(key)) {
           parts.push(`${JSON.stringify(key)}: {${nested.parts.join(", ")}}`);
@@ -561,7 +569,7 @@ export function jsonTemplateFromForm(
   };
 
   const root = isRecord(schema) ? schema : {};
-  const { parts } = build(root, "", 0);
+  const { parts } = build(root, "", options.startLevel ?? 0);
   return { template: parts.length ? `{\n  ${parts.join(",\n  ")}\n}` : "{}", errors };
 }
 
@@ -581,6 +589,54 @@ function formText(value: CatalogFormValue): string {
   if (Array.isArray(value)) return value.filter((item) => item.trim() !== "").join(",");
   if (typeof value === "boolean") return String(value);
   return value ?? "";
+}
+
+function bodyHasFields(body: OpenApiRequestBody): boolean {
+  return body.json && schemaTypeOf(body.schema) !== "array" && nestedFieldsUsable(body.schema, 0);
+}
+
+/**
+ * One object schema for an operation's whole form: `path`, `query` and `header` objects holding its parameters (as
+ * text, so a value may be an expression), and `body`: the JSON body's own schema, or one text or JSON field. A form
+ * generated from it keys its values as `buildOperationRequest` reads them (`path.id`, `body.title`).
+ */
+export function operationFormSchema(operation: OpenApiOperation): Record<string, unknown> {
+  const properties: Record<string, unknown> = {};
+  const required: string[] = [];
+  const group = (location: OpenApiParameter["in"], title: string) => {
+    const parameters = operation.parameters.filter((parameter) => parameter.in === location);
+    if (parameters.length === 0) return;
+    const groupProperties: Record<string, unknown> = {};
+    for (const parameter of parameters) {
+      const schema = isRecord(parameter.schema) ? parameter.schema : {};
+      const kind = schemaTypeOf(schema);
+      // Parameters are sent as text: objects become a text field too.
+      groupProperties[parameter.name] = {
+        ...(kind === "array" ? { type: "array", items: isRecord(schema.items) ? schema.items : { type: "string" } } : kind === "object" || kind === undefined ? { type: "string" } : { type: kind }),
+        ...(Array.isArray(schema.enum) ? { enum: schema.enum } : {}),
+        ...(parameter.description ? { description: parameter.description } : {}),
+        ...(typeof schema.minimum === "number" ? { minimum: schema.minimum } : {}),
+        ...(typeof schema.maximum === "number" ? { maximum: schema.maximum } : {}),
+        ...(schema.default !== undefined ? { default: schema.default } : {})
+      };
+    }
+    const groupRequired = parameters.filter((parameter) => parameter.required).map((parameter) => parameter.name);
+    properties[location] = { type: "object", title, properties: groupProperties, ...(groupRequired.length ? { required: groupRequired } : {}) };
+    if (groupRequired.length) required.push(location);
+  };
+  group("path", "Path");
+  group("query", "Query");
+  group("header", "Headers");
+  const body = operation.requestBody;
+  if (body && operation.method !== "GET" && operation.method !== "DELETE") {
+    properties.body = bodyHasFields(body)
+      ? { ...body.schema, type: "object", title: "Body" }
+      : body.json
+        ? { title: "Body (JSON)", description: body.description ?? "The request body as JSON; expressions are allowed." }
+        : { type: "string", title: `Body (${body.contentType})`, ...(body.description ? { description: body.description } : {}) };
+    if (body.required) required.push("body");
+  }
+  return { type: "object", properties, ...(required.length ? { required } : {}) };
 }
 
 export interface OperationRequestTemplates {
@@ -617,8 +673,9 @@ export function buildOperationRequest(operation: OpenApiOperation, baseUrl: stri
   let bodyTemplate = "";
   const body = operation.requestBody;
   if (body && operation.method !== "GET" && operation.method !== "DELETE") {
-    if (body.json && isRecord(body.schema) && nestedFieldsUsable(body.schema, 0) && schemaTypeOf(body.schema) !== "array") {
-      const built = jsonTemplateFromForm(body.schema, values, { prefix: "body." });
+    if (bodyHasFields(body)) {
+      // In the operation's form (operationFormSchema) the body's fields sit one level down.
+      const built = jsonTemplateFromForm(body.schema, values, { prefix: "body.", startLevel: 1 });
       Object.assign(errors, built.errors);
       bodyTemplate = built.template === "{}" && !body.required ? "" : built.template;
     } else {
@@ -677,4 +734,26 @@ export function describeHttpSecretAuth(auth: HttpSecretAuth | null): string {
   if (auth.type === "basic") return "as basic auth (the secret holds user:password)";
   if (auth.type === "header") return `in the ${auth.name} header`;
   return `as the ${auth.name} query parameter`;
+}
+
+/** A new MCP Tool node's configuration for one registered server's tool: the tool form starts empty. */
+export function mcpToolNodeConfig(server: { id: string; adapterId: string }, toolName: string): Record<string, unknown> {
+  return { registryServerId: server.id, serverId: server.adapterId, toolName, allowedTools: [toolName], argsTemplate: "{}", argValues: {} };
+}
+
+/** A new HTTP Request node's configuration for one operation: the form starts empty; the secret is picked on the node. */
+export function openApiNodeConfig(specId: string, operation: OpenApiOperation, baseUrl: string): Record<string, unknown> {
+  const request = buildOperationRequest(operation, baseUrl, {});
+  return {
+    method: request.method,
+    urlTemplate: request.urlTemplate,
+    headersTemplate: request.headersTemplate,
+    bodyTemplate: request.bodyTemplate,
+    responseType: "json",
+    timeoutMs: 15000,
+    failOnHttpError: true,
+    openapiOperation: { specId, operationId: operation.id, method: operation.method, path: operation.path },
+    operationValues: {},
+    ...(operation.auth ? { secretAuth: operation.auth } : {})
+  };
 }

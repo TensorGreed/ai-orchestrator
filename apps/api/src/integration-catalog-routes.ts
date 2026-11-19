@@ -21,6 +21,8 @@ import {
   BodyTooLargeError,
   catalogEntryLabel,
   DEFAULT_PROJECT_ID,
+  mcpToolNodeConfig,
+  openApiNodeConfig,
   normalizeApiBaseUrl,
   OPENAPI_SPEC_MAX_BYTES,
   OpenApiSpecError,
@@ -234,7 +236,9 @@ export function registerIntegrationCatalogRoutes(deps: IntegrationCatalogDeps): 
           description: (tool.description ?? "").slice(0, 300),
           sourceName: server.name,
           sourceId: server.id,
-          itemId: tool.name
+          itemId: tool.name,
+          nodeType: "mcp_tool",
+          nodeConfig: mcpToolNodeConfig(server, tool.name)
         });
       }
     }
@@ -248,7 +252,9 @@ export function registerIntegrationCatalogRoutes(deps: IntegrationCatalogDeps): 
           description: `${operation.method} ${operation.path}${operation.description ? ` — ${operation.description.split(/\r?\n/)[0]!.slice(0, 200)}` : ""}`,
           sourceName: spec.name,
           sourceId: spec.id,
-          itemId: operation.id
+          itemId: operation.id,
+          nodeType: "http_request",
+          nodeConfig: openApiNodeConfig(spec.id, operation, spec.baseUrl)
         });
       }
     }

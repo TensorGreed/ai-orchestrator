@@ -1,3 +1,6 @@
+import { describeHttpSecretAuth, readHttpSecretAuth } from "@ai-orchestrator/shared";
+import { McpToolArgsForm, McpUseFormButton, OpenApiOperationForm, usesMcpArgsForm, usesOpenApiOperation } from "./IntegrationForms";
+import { buildSchemaForm } from "../lib/mcp-schema-form";
 import { createContext, useCallback, useContext, useEffect, useId, useImperativeHandle, useMemo, useRef, useState, type Ref } from "react";
 import type {
   LLMProviderConfig,
@@ -4371,14 +4374,26 @@ export function NodeInspector({
           );
         })()}
 
-        <ExpressionField
-          label="Tool Args Template"
-          value={toStringValue(config.argsTemplate, "{}")}
-          onChange={(next) => setConfig((current) => ({ ...current, argsTemplate: next }))}
-          rows={3}
-          mode="template"
-          previewContext={expressionPreviewContext}
-        />
+        {toolSelectionMode === "single" && selectedTool && usesMcpArgsForm(config) ? (
+          <McpToolArgsForm toolName={selectedTool.name} inputSchema={selectedTool.inputSchema} config={config} setConfig={setConfig} />
+        ) : null}
+        {!(toolSelectionMode === "single" && selectedTool && usesMcpArgsForm(config) && buildSchemaForm(selectedTool.inputSchema).fields) && (
+          <>
+            <ExpressionField
+              label="Tool Args Template"
+              value={toStringValue(config.argsTemplate, "{}")}
+              onChange={(next) => setConfig((current) => ({ ...current, argsTemplate: next }))}
+              rows={3}
+              mode="template"
+              previewContext={expressionPreviewContext}
+            />
+            {toolSelectionMode === "single" && selectedTool && !usesMcpArgsForm(config) ? (
+              <div className="cfg-inline-actions">
+                <McpUseFormButton inputSchema={selectedTool.inputSchema} config={config} setConfig={setConfig} />
+              </div>
+            ) : null}
+          </>
+        )}
 
         {toolSelectionMode === "single" && selectedTool && (
           <details className="cfg-advanced cfg-fold" data-testid="mcp-tool-metadata">
@@ -6859,6 +6874,58 @@ export function NodeInspector({
             }
           />
         );
+        const secretAuth = readHttpSecretAuth(config.secretAuth);
+        const secretField = renderCredentialSecretField({
+          fieldKey: "http_request_secret",
+          label: secretAuth && typeof secretAuth !== "string" ? "Secret" : "Authorization Secret (Bearer)",
+          value: toStringValue(asRecord(config.secretRef).secretId),
+          noneLabel: "None",
+          preferredProvider: "custom",
+          ...(secretAuth && typeof secretAuth !== "string" ? { hint: `Sent ${describeHttpSecretAuth(secretAuth)}.` } : {}),
+          onSelect: (next) =>
+            setConfig((current) => ({
+              ...current,
+              secretRef: next ? { secretId: next } : undefined
+            }))
+        });
+        const timingFields = (
+          <div className="cfg-grid-2">
+            <SelectField
+              label="Response Type"
+              value={toStringValue(config.responseType, "json")}
+              onChange={(next) => setConfig((current) => ({ ...current, responseType: next }))}
+              options={[
+                { value: "json", label: "JSON" },
+                { value: "text", label: "Text" }
+              ]}
+            />
+            <NumberField
+              label="Timeout (ms)"
+              value={toNumberValue(config.timeoutMs, 15000)}
+              min={1}
+              step={100}
+              onChange={(next) => setConfig((current) => ({ ...current, timeoutMs: next }))}
+            />
+          </div>
+        );
+        // A node made from an API operation: the operation's form writes the request.
+        if (usesOpenApiOperation(config)) {
+          return (
+            <>
+              <OpenApiOperationForm config={config} setConfig={setConfig} />
+              {secretField}
+              <AdvancedFields
+                setCount={countSet([
+                  [config.responseType, "json", sampleConfig.responseType],
+                  [config.timeoutMs, 15000, sampleConfig.timeoutMs]
+                ])}
+              >
+                {timingFields}
+              </AdvancedFields>
+              <HttpErrorStatusFields config={config} errorConfig={nodeErrorConfig} setConfig={setConfig} />
+            </>
+          );
+        }
         return (
           <>
             <SelectField
@@ -6888,18 +6955,7 @@ export function NodeInspector({
             />
             {sendsBody && bodyField}
             {sendsBody && headersField}
-            {renderCredentialSecretField({
-              fieldKey: "http_request_secret",
-              label: "Authorization Secret (Bearer)",
-              value: toStringValue(asRecord(config.secretRef).secretId),
-              noneLabel: "None",
-              preferredProvider: "custom",
-              onSelect: (next) =>
-                setConfig((current) => ({
-                  ...current,
-                  secretRef: next ? { secretId: next } : undefined
-                }))
-            })}
+            {secretField}
             <AdvancedFields
               setCount={countSet([
                 ...(sendsBody
@@ -6914,24 +6970,7 @@ export function NodeInspector({
             >
               {!sendsBody && headersField}
               {!sendsBody && bodyField}
-              <div className="cfg-grid-2">
-                <SelectField
-                  label="Response Type"
-                  value={toStringValue(config.responseType, "json")}
-                  onChange={(next) => setConfig((current) => ({ ...current, responseType: next }))}
-                  options={[
-                    { value: "json", label: "JSON" },
-                    { value: "text", label: "Text" }
-                  ]}
-                />
-                <NumberField
-                  label="Timeout (ms)"
-                  value={toNumberValue(config.timeoutMs, 15000)}
-                  min={1}
-                  step={100}
-                  onChange={(next) => setConfig((current) => ({ ...current, timeoutMs: next }))}
-                />
-              </div>
+              {timingFields}
             </AdvancedFields>
             <HttpErrorStatusFields config={config} errorConfig={nodeErrorConfig} setConfig={setConfig} />
           </>

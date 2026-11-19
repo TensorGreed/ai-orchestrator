@@ -32,6 +32,7 @@ import {
   type WorkflowListItem,
   type WorkflowValidationIssue
 } from "@ai-orchestrator/shared";
+import type { CatalogPaletteEntry, CatalogSourceSummary } from "@ai-orchestrator/shared";
 import {
   ApiError,
   inBackground,
@@ -67,6 +68,7 @@ import {
   fetchExecutionById,
   fetchExecutions,
   fetchDefinitions,
+  fetchIntegrationCatalog,
   fetchFolders,
   fetchProjects,
   fetchSecrets,
@@ -203,6 +205,8 @@ import { StudioProvider, useStudioContext } from "./contexts/StudioContext";
 import { MfaGateCard } from "./components/MfaGateCard";
 import { StepUpPrompt } from "./components/StepUpPrompt";
 import { isPaletteDefinition, withAgentToolPresets } from "./lib/agent-tool-presets";
+import { canUseIntegrationCatalog, catalogPresets } from "./lib/integration-catalog";
+import { ApiCatalogDialog } from "./components/ApiCatalogDialog";
 import { paletteKey } from "./components/NodePalette";
 import { GraphHistory, movedNodeIds } from "./lib/graph-history";
 import { AUXILIARY_HANDLES, CHAT_MODEL_NODE_TYPES, validateConnection } from "./lib/connection-rules";
@@ -1256,6 +1260,9 @@ function StudioApp() {
 
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [showNodeDrawer, setShowNodeDrawer] = useState(false);
+  // The integration catalog (registered MCP servers' tools, the project's APIs) as palette presets; builders only.
+  const [integrationCatalog, setIntegrationCatalog] = useState<{ entries: CatalogPaletteEntry[]; sources: CatalogSourceSummary[] }>({ entries: [], sources: [] });
+  const [showApiCatalog, setShowApiCatalog] = useState(false);
   const [nodeDrawerContext, setNodeDrawerContext] = useState<NodeDrawerContext | null>(null);
   // The output a node picked in the palette is connected after (its `+`, or a connection dropped on the canvas).
   const [paletteInsertSource, setPaletteInsertSource] = useState<PaletteInsertSource | null>(null);
@@ -1365,17 +1372,22 @@ function StudioApp() {
     return editorRunPrompts(nodes.map((node) => ({ type: node.data.nodeType, config: node.data.config })));
   }, [nodes]);
 
+  // Every palette entry: the node definitions, the built-in tool presets and the integration catalog's presets.
+  const paletteDefinitions = useMemo(
+    () => [...withAgentToolPresets(definitions), ...(catalogPresets(integrationCatalog.entries) as DefinitionNode[])],
+    [definitions, integrationCatalog.entries]
+  );
   const groupedDefinitions = useMemo(() => {
     const grouped = new Map<string, DefinitionNode[]>();
     // Phase 6.4 — the built-in tools are MCP Tool presets in the palette.
-    for (const definition of withAgentToolPresets(definitions)) {
+    for (const definition of paletteDefinitions) {
       if (!isPaletteDefinition(definition)) continue;
       const list = grouped.get(definition.category) ?? [];
       list.push(definition);
       grouped.set(definition.category, list);
     }
     return grouped;
-  }, [definitions]);
+  }, [paletteDefinitions]);
   const currentChatMessages = chatMessagesByWorkflow[currentWorkflow.id] ?? [];
   const currentChatSessionId = chatSessionsByWorkflow[currentWorkflow.id] ?? "";
 
@@ -2622,6 +2634,32 @@ function StudioApp() {
       cancelled = true;
     };
   }, [activeMode, authUser]);
+
+  const catalogProjectId = activeProjectId || null;
+  const canUseCatalog = canUseIntegrationCatalog(authUser?.role);
+  const reloadIntegrationCatalog = useCallback(async () => {
+    if (!canUseCatalog) {
+      setIntegrationCatalog({ entries: [], sources: [] });
+      return;
+    }
+    try {
+      const response = await fetchIntegrationCatalog(catalogProjectId);
+      setIntegrationCatalog({ entries: response.entries, sources: response.sources });
+    } catch {
+      // The palette works without the catalog; the dialog shows its own errors.
+      setIntegrationCatalog({ entries: [], sources: [] });
+    }
+  }, [canUseCatalog, catalogProjectId]);
+
+  // Loaded with the editor (and for each project), and again each time the palette opens, so a probe or a new API
+  // shows up there.
+  const catalogLoadedForRef = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (!authUser || activeMode !== "editor") return;
+    if (!showNodeDrawer && catalogLoadedForRef.current === catalogProjectId) return;
+    catalogLoadedForRef.current = catalogProjectId;
+    void reloadIntegrationCatalog();
+  }, [authUser, activeMode, showNodeDrawer, catalogProjectId, reloadIntegrationCatalog]);
 
   useEffect(() => {
     if (!authUser || !canManageSecrets) {
@@ -4993,7 +5031,7 @@ function StudioApp() {
         return;
       }
 
-      const definition = withAgentToolPresets(definitions).find((item) => paletteKey(item) === nodeType);
+      const definition = paletteDefinitions.find((item) => paletteKey(item) === nodeType);
       if (!definition) {
         return;
       }
@@ -5006,7 +5044,7 @@ function StudioApp() {
 
       createNodeFromDefinition(definition, position);
     },
-    [createNodeFromDefinition, definitions, importFromFile, reactFlowInstance]
+    [createNodeFromDefinition, paletteDefinitions, importFromFile, reactFlowInstance]
   );
 
   const handleToggleSecretSensitive = useCallback(
@@ -5815,8 +5853,35 @@ function StudioApp() {
             </section>
           )}
 
+          {activeMode === "editor" && showApiCatalog && (
+            <ApiCatalogDialog
+              projectId={catalogProjectId}
+              sources={integrationCatalog.sources}
+              canRefreshMcp={authUser?.role === "admin"}
+              onChanged={reloadIntegrationCatalog}
+              onClose={() => setShowApiCatalog(false)}
+            />
+          )}
           {activeMode === "editor" && (
             <WorkflowCanvasArea
+              paletteFooter={
+                canUseCatalog ? (
+                  <>
+                    <button
+                      type="button"
+                      className="pg-btn ghost small"
+                      onClick={() => {
+                        setShowNodeDrawer(false);
+                        setNodeDrawerContext(null);
+                        setPaletteInsertSource(null);
+                        setShowApiCatalog(true);
+                      }}
+                    >
+                      Add an API…
+                    </button>
+                  </>
+                ) : undefined
+              }
               isLogsPanelCollapsed={isLogsPanelCollapsed}
               canvasAndLogsStyle={canvasAndLogsStyle}
               flowWrapperRef={flowWrapperRef}

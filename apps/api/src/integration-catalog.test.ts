@@ -12,7 +12,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { buildOperationRequest, type OpenApiOperation, type Workflow } from "@ai-orchestrator/shared";
+import { buildOperationRequest, jsonTemplateFromForm, type OpenApiOperation, type Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
@@ -160,7 +160,21 @@ describe("OpenAPI specs", () => {
       "Ticket Desk · Create a ticket",
       "Ticket Desk · Get a ticket"
     ]);
-    expect(catalog.entries[1]).toMatchObject({ key: `openapi:${spec.id}:createTicket`, kind: "openapi_operation", description: "POST /tickets" });
+    expect(catalog.entries[1]).toMatchObject({
+      key: `openapi:${spec.id}:createTicket`,
+      kind: "openapi_operation",
+      description: "POST /tickets",
+      nodeType: "http_request",
+      nodeConfig: {
+        method: "POST",
+        urlTemplate: `${base}/api/tickets`,
+        failOnHttpError: true,
+        secretAuth: { type: "header", name: "X-API-Key" },
+        openapiOperation: { specId: spec.id, operationId: "createTicket", method: "POST", path: "/tickets" },
+        operationValues: {}
+      }
+    });
+    expect(catalog.entries[1].nodeConfig.secretRef).toBeUndefined();
     expect(catalog.sources).toEqual([expect.objectContaining({ kind: "openapi_spec", id: spec.id, itemCount: 3 })]);
 
     const full = (await call(context, "GET", `/api/catalog/openapi-specs/${spec.id}`, builder.cookie)).json().spec;
@@ -337,8 +351,39 @@ describe("MCP tools in the catalog", () => {
       key: `mcp:${serverId}:calculator`,
       kind: "mcp_tool",
       sourceId: serverId,
-      description: expect.stringMatching(/math expression/)
+      description: expect.stringMatching(/math expression/),
+      nodeType: "mcp_tool",
+      nodeConfig: { registryServerId: serverId, serverId: "mock-mcp", toolName: "calculator", allowedTools: ["calculator"], argsTemplate: "{}", argValues: {} }
     });
+    // A node made from the entry runs through the MCP Tool node, with the form's arguments.
+    const entry = catalog.entries.find((item: { itemId: string }) => item.itemId === "calculator");
+    const argValues = { expression: "{{ user_prompt }}" };
+    const workflow: Workflow = {
+      id: "wf-catalog-mcp",
+      name: "Catalog MCP",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "in", type: "webhook_input", name: "In", position: { x: 0, y: 0 }, config: {} },
+        {
+          id: "calc",
+          type: "mcp_tool",
+          name: entry.label,
+          position: { x: 200, y: 0 },
+          config: { ...entry.nodeConfig, argValues, argsTemplate: jsonTemplateFromForm({ type: "object", properties: { expression: { type: "string" } } }, argValues).template }
+        },
+        { id: "out", type: "output", name: "Out", position: { x: 400, y: 0 }, config: {} }
+      ],
+      edges: [
+        { id: "e1", source: "in", target: "calc" },
+        { id: "e2", source: "calc", target: "out" }
+      ]
+    };
+    expect((await call(context, "POST", "/api/workflows", admin.cookie, workflow)).statusCode).toBeLessThan(300);
+    const run = await call(context, "POST", "/api/workflows/wf-catalog-mcp/execute", admin.cookie, { user_prompt: "2+3" });
+    expect(run.json().status).toBe("success");
+    expect(JSON.stringify(run.json().nodeResults ?? run.json())).toContain("5");
+
     // Builders only: the catalog is for adding nodes.
     const viewer = await login(context, "viewer");
     expect((await call(context, "GET", "/api/catalog", viewer.cookie)).statusCode).toBe(403);

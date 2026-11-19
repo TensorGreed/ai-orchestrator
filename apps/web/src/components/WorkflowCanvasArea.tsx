@@ -42,6 +42,7 @@ import {
   type Point
 } from "../lib/stages";
 import { NodePalette, paletteKey, type PaletteDefinition, type PaletteSection } from "./NodePalette";
+import { INTEGRATION_CATALOG_CATEGORY } from "../lib/integration-catalog";
 import { CanvasInsertContext, type CanvasInsertActions } from "./canvas-insert-context";
 import { RunTape } from "./RunTape";
 import { LiveElapsed } from "./WorkflowCanvasNode";
@@ -179,10 +180,19 @@ const PALETTE_CATEGORIES: PaletteCategoryMeta[] = [
     description: "Input/output primitives and base workflow utilities.",
     icon: "core",
     match: () => true
+  },
+  {
+    key: "integrations",
+    title: "Your integrations",
+    description: "Tools of your registered MCP servers and operations of the APIs you added.",
+    icon: "app",
+    match: (node) => node.category === INTEGRATION_CATALOG_CATEGORY
   }
 ];
 
 interface WorkflowCanvasAreaProps {
+  /** Under the main palette's list (not the agent attachment drawer): the integration catalog's actions. */
+  paletteFooter?: ReactNode;
   isLogsPanelCollapsed: boolean;
   canvasAndLogsStyle: CSSProperties;
   flowWrapperRef: RefObject<HTMLDivElement | null>;
@@ -278,6 +288,7 @@ function samePoint(a: Point | undefined, b: Point | undefined): boolean {
 }
 
 export function WorkflowCanvasArea({
+  paletteFooter,
   isLogsPanelCollapsed,
   canvasAndLogsStyle,
   flowWrapperRef,
@@ -347,7 +358,13 @@ export function WorkflowCanvasArea({
   const paletteSections = useMemo<PaletteSection[]>(() => {
     const seen = new Set<string>();
     return PALETTE_CATEGORIES.map((section) => {
-      const items = allDefinitions.filter((node) => !seen.has(paletteKey(node)) && section.match(node));
+      // Catalog presets (MCP Tool and HTTP Request nodes) stay in their own section, after the built-in nodes.
+      const items = allDefinitions.filter(
+        (node) =>
+          !seen.has(paletteKey(node)) &&
+          section.match(node) &&
+          (section.key === "integrations") === (node.category === INTEGRATION_CATALOG_CATEGORY)
+      );
       for (const item of items) seen.add(paletteKey(item));
       return { key: section.key, title: section.title, description: section.description, icon: section.icon, items };
     }).filter((section) => section.items.length > 0);
@@ -703,6 +720,7 @@ export function WorkflowCanvasArea({
                   onPick={handleAddNode}
                   onClose={onCloseNodeDrawer}
                   onTidy={nodeDrawerContext ? undefined : applyTidy}
+                  footer={nodeDrawerContext ? undefined : paletteFooter}
                 />
               </div>
             )}
