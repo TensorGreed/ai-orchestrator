@@ -1934,6 +1934,20 @@ export interface WorkflowShareRecord {
   createdAt: string;
 }
 
+/** v78 — a workflow shared with you, in any project. */
+export interface SharedWorkflowItem {
+  id: string;
+  name: string;
+  projectId: string;
+  updatedAt: string | null;
+  accessLevel: "read" | "execute";
+  effectiveAccess: "read" | "execute";
+}
+
+export async function fetchWorkflowsSharedWithMe() {
+  return apiRequest<{ workflows: SharedWorkflowItem[] }>("/api/workflows/shared-with-me");
+}
+
 /** What you may do with a workflow (the editor shows only the controls that work). */
 export async function fetchWorkflowAccess(workflowId: string) {
   return apiRequest<{ workflowId: string; role: string; canRead: boolean; canEdit: boolean; canRun: boolean; canShare: boolean }>(

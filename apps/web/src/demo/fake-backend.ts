@@ -614,6 +614,8 @@ export function createFakeBackend(options: FakeBackendOptions): FakeBackend {
       if (body.dryRun === true) return json(200, { dryRun: true, mode: "new", workflow: { ...parsed, id }, existing: null, diff: null });
       return saveFromBody({ ...parsed, id });
     }
+    // The demo has one person and no shares.
+    if (pathname === "/api/workflows/shared-with-me" && method === "GET") return json(200, { workflows: [] });
     const workflowMatch = /^\/api\/workflows\/([^/]+)(?:\/(.+))?$/.exec(pathname);
     if (workflowMatch) {
       const id = decodeURIComponent(workflowMatch[1]!);

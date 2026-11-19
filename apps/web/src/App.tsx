@@ -74,6 +74,8 @@ import {
   importWorkflow,
   previewWorkflowImport,
   fetchWorkflowAccess,
+  fetchWorkflowsSharedWithMe,
+  type SharedWorkflowItem,
   type WorkflowImportPreview,
   listApprovals,
   validateStoredWorkflow,
@@ -1469,7 +1471,10 @@ function StudioApp() {
     () => new Set(Object.keys(asRecord(currentWorkflow.pinnedData) ?? {})),
     [currentWorkflow.pinnedData]
   );
-  const currentWorkflowExists = workflowList.some((item) => item.id === currentWorkflow.id);
+  /** v78 — workflows shared with you, from any project (the dashboard lists them under "Shared with you"). */
+  const [sharedWithMe, setSharedWithMe] = useState<SharedWorkflowItem[]>([]);
+  const currentWorkflowExists =
+    workflowList.some((item) => item.id === currentWorkflow.id) || sharedWithMe.some((item) => item.id === currentWorkflow.id);
   const canManageWorkflows = authUser?.role === "admin" || authUser?.role === "builder";
   const canManageSecrets = authUser?.role === "admin" || authUser?.role === "builder";
   // What you may do with the open workflow: viewers and operators open it read-only; a builder may only view a
@@ -2326,13 +2331,15 @@ function StudioApp() {
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
-      const [workflowItems, projectPayload, folderPayload] = await Promise.all([
+      const [workflowItems, projectPayload, folderPayload, sharedPayload] = await Promise.all([
         fetchWorkflows({ projectId: activeProjectId }),
         fetchProjects().catch(() => ({ projects: [] })),
-        fetchFolders(activeProjectId).catch(() => ({ folders: [] }))
+        fetchFolders(activeProjectId).catch(() => ({ folders: [] })),
+        fetchWorkflowsSharedWithMe().catch(() => ({ workflows: [] }))
       ]);
 
       setWorkflowList(workflowItems);
+      setSharedWithMe(sharedPayload.workflows.filter((item) => item.projectId !== activeProjectId));
       setProjects(projectPayload.projects ?? []);
       setFolders(folderPayload.folders ?? []);
     } catch (loadError) {
@@ -5492,6 +5499,32 @@ function StudioApp() {
                     );
                   })}
                 </div>
+              )}
+
+              {sharedWithMe.length > 0 && (
+                <section className="shared-with-me" aria-labelledby="shared-with-me-title">
+                  <h3 id="shared-with-me-title" className="shared-with-me-title">
+                    Shared with you
+                  </h3>
+                  <ul className="shared-with-me-list">
+                    {sharedWithMe.map((item) => (
+                      <li key={item.id}>
+                        <button
+                          type="button"
+                          className="shared-with-me-item"
+                          onClick={() => {
+                            void loadWorkflowById(item.id);
+                            setActiveMode("editor");
+                          }}
+                        >
+                          <span className="shared-with-me-name">{item.name}</span>
+                          <span className="settings-chip">{item.effectiveAccess === "execute" ? "Can view and run" : "Can view"}</span>
+                          <span className="settings-muted">{projects.find((project) => project.id === item.projectId)?.name ?? item.projectId}</span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
               )}
             </section>
           )}

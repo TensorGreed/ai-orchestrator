@@ -123,6 +123,11 @@ describe("workflow shares with people", () => {
     const paged = await call(context, "GET", "/api/workflows?page=1&pageSize=50", viewer.cookie);
     expect(paged.json<{ items: Array<{ id: string }> }>().items.map((workflow) => workflow.id)).toContain("wf-team");
     expect((await call(context, "POST", "/api/workflows/wf-team/execute", viewer.cookie, {})).statusCode).toBe(403);
+    const mine = await call(context, "GET", "/api/workflows/shared-with-me", viewer.cookie);
+    expect(mine.json()).toEqual({
+      workflows: [{ id: "wf-team", name: "Flow wf-team", projectId: "team", updatedAt: expect.any(String), accessLevel: "read", effectiveAccess: "read" }]
+    });
+    expect((await call(context, "GET", "/api/workflows/shared-with-me", owner.cookie)).json()).toEqual({ workflows: [] });
   });
 
   it("an execute share runs it; a read share does not, and a viewer's execute share reads", async () => {

@@ -5944,3 +5944,44 @@ img.mcp-pg-block {
   gap: 6px;
   margin-bottom: 10px;
 }
+
+/* Workflows: the ones shared with you from other projects. */
+.shared-with-me {
+  margin-top: 24px;
+}
+
+.shared-with-me-title {
+  font-size: 14px;
+  margin: 0 0 8px;
+}
+
+.shared-with-me-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.shared-with-me-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-elev-1, transparent);
+  color: inherit;
+  cursor: pointer;
+  flex-wrap: wrap;
+}
+
+.shared-with-me-item:hover {
+  border-color: var(--accent);
+}
+
+.shared-with-me-name {
+  font-weight: 600;
+}

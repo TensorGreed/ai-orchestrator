@@ -10840,6 +10840,29 @@ export async function createApp(
     return { ok: true, workflow: access.workflow };
   };
 
+  // The workflows shared with you (any project), so the studio can list them next to your project's workflows.
+  app.get("/api/workflows/shared-with-me", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const shared = await store.listWorkflowsSharedToUser(user.id);
+    const items = [];
+    for (const share of shared) {
+      const workflow = await store.getWorkflow(share.workflowId);
+      if (!workflow) continue;
+      const access = await rbacService.userShareAccess(user, workflow);
+      if (!access) continue;
+      items.push({
+        id: workflow.id,
+        name: workflow.name,
+        projectId: workflow.projectId ?? DEFAULT_PROJECT_ID,
+        updatedAt: workflow.updatedAt ?? null,
+        accessLevel: share.accessLevel,
+        effectiveAccess: access
+      });
+    }
+    return { workflows: items };
+  });
+
   app.get<{ Params: { id: string } }>("/api/workflows/:id/user-shares", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;

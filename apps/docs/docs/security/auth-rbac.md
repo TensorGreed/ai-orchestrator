@@ -171,6 +171,38 @@ in `MFA_REQUIRED_ROLES`, see [MFA required per role](#mfa-required-per-role)).
   directory that verifies the email, so nobody can assert an invited address they do not own.
 - **Audit.** `user.invite` (with `reinvite` and `emailed`) and `user.invite.accept` (success or failure).
 
+## Teams in the studio
+
+- **Invite user.** Settings, Users has **Invite user** for admins: an email and a role. With a mail server set the link
+  is emailed; otherwise the dialog shows it once to copy and pass on.
+- **Project members by email.** Settings, Project Members adds a member by email (admins pick from the deployment's
+  users). `POST /api/projects/:id/members` takes `{ "email": "..." }` in place of `userId`, and the member list carries
+  each member's `email`.
+- **What the editor shows.** Viewers and operators open workflows read-only: Save, Add node, Clear, Run and Webhook run
+  are disabled, and their tooltip says why. A builder sees the same for a workflow they may only view (one shared with
+  them, or in a project where their role is view-only); a workflow they may run but not change runs as saved.
+  `GET /api/workflows/:id/access` answers what the signed-in user may do.
+
+## Sharing a workflow with people
+
+Besides sharing a workflow with another project, a workflow can be shared with a person, from **Share…** in the editor
+or `POST /api/workflows/:id/user-shares` with `{ "email": "...", "accessLevel": "read" | "execute" }`.
+
+- **Who shares.** Users with `workflow:write` in the workflow's own project, and admins. The person must have an
+  account (invite them first); service accounts and yourself are refused.
+- **What it gives.** `read`: they find it under **Shared with you** on the Workflows page, open it and read its runs.
+  `execute`: they may also run it, when their role may run workflows: an execute share with a viewer reads only, and
+  running from the editor still needs the builder role. A share never gives write, delete, publish or the right to
+  share it on. Their runs may use the workflow's secrets, as runs of its own project do.
+- **Limits.** An API key limited to projects gets nothing from a share outside them. A deactivated user's shares stay
+  but give nothing while they cannot sign in; enabling the user again brings them back, as with project memberships.
+- **Lifecycle.** Shares go with the workflow when it is deleted (a workflow created later with the same id starts
+  unshared) and with the user. Moving the workflow to another project keeps them.
+- **Who sees them.** Managers of the workflow's shares see the list (`GET /api/workflows/:id/user-shares`, and
+  `userShares` in `GET /api/workflows/:id/shares`), with each person's role and `effectiveAccess`.
+- **Audit.** `workflow.user_share` (with `targetUserId`, `targetEmail`, `accessLevel`, `effectiveAccess`) and
+  `workflow.user_unshare`, in the `sharing` category.
+
 ## Project access
 
 Project memberships (project admin, editor, viewer, or a custom role) set what a

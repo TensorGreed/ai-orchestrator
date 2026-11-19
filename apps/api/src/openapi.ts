@@ -1126,6 +1126,13 @@ export const openApiSpec = {
         responses: { "200": { description: "Shared" } }
       }
     },
+    "/api/workflows/shared-with-me": {
+      get: {
+        tags: ["RBAC"],
+        summary: "The workflows shared with you, in any project, with the access each one gives you",
+        responses: { "200": { description: "{ workflows: [{ id, name, projectId, updatedAt, accessLevel, effectiveAccess }] }" } }
+      }
+    },
     "/api/workflows/{id}/access": {
       get: {
         tags: ["RBAC"],
