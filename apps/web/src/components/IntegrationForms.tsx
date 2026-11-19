@@ -8,10 +8,8 @@
 import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import {
   buildOperationRequest,
-  describeHttpSecretAuth,
   jsonTemplateFromForm,
   operationFormSchema,
-  readHttpSecretAuth,
   readOpenApiOperationRef,
   type CatalogFormValues,
   type OpenApiOperation
@@ -221,7 +219,6 @@ export function OpenApiOperationForm({ config, setConfig }: OpenApiOperationForm
     </button>
   );
 
-  const auth = readHttpSecretAuth(config.secretAuth);
   const summary = (
     <div className="cfg-operation-summary" data-testid="openapi-operation-summary">
       <strong>{operation?.summary ?? ref.operationId}</strong>
@@ -290,7 +287,6 @@ export function OpenApiOperationForm({ config, setConfig }: OpenApiOperationForm
           <code className="cfg-request-preview" data-testid="openapi-request-preview">
             {toText(config.method)} {toText(config.urlTemplate)}
           </code>
-          {typeof auth !== "string" && auth ? <div className="cfg-tip">The secret is sent {describeHttpSecretAuth(auth)}.</div> : null}
           <div className="cfg-inline-actions">{detach}</div>
         </div>
       </details>

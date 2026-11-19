@@ -142,7 +142,6 @@ describe("OpenApiOperationForm", () => {
     expect(config.urlTemplate).toBe("https://desk.example.com/api/tickets/{{ webhook.id }}?notify=true");
     expect(JSON.parse(String(config.bodyTemplate))).toEqual({ status: "closed" });
     expect(config.operationValues).toEqual({ "path.id": "{{ webhook.id }}", "query.notify": true, "body.status": "closed" });
-    expect(screen.getByText(/as the api_key query parameter/)).toBeInTheDocument();
   });
 
   it("keeps the node's request when the API is gone, and can detach from it", async () => {

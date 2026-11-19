@@ -229,6 +229,15 @@ Every node has the same error settings on its **Settings** tab.
   **Remove invalid values** on the node's Settings tab removes them with the next save.
 - Network failures and timeouts name the method and URL the same way and are retried as set under Retries on Failure.
 
+### HTTP Request secrets
+
+- A secret picked on the node (`secretRef`) is sent as `Authorization: Bearer <secret>`, as before.
+- `secretAuth` sends it another way: `{ "type": "basic" }` (the secret holds `user:password`),
+  `{ "type": "header", "name": "X-API-Key" }` or `{ "type": "query", "name": "api_key" }`. Nodes made from an API
+  operation set it from the spec (see [Your integrations](./integrations.md)); a node without it is unchanged.
+- A secret in its own header or in the query stays with the site: a redirect to another host fails the node. The
+  query secret is never part of the URL in run logs or error messages.
+
 ## Output Parser (`output_parser`)
 
 `output_parser` supports two independent controls:
