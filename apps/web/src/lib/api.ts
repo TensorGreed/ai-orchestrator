@@ -2969,6 +2969,8 @@ export interface TemplateDependency {
   kind: TemplateDependencyKind;
   label: string;
   envVar?: string;
+  /** A model or embedder that runs only with that provider's API key. */
+  needsKey?: boolean;
 }
 
 export interface TemplateListItem {

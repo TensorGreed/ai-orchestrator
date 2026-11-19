@@ -51,7 +51,7 @@ describe("computeTemplateDependencies", () => {
         }
       ])
     );
-    expect(deps).toEqual([{ kind: "provider", label: "OpenAI", envVar: "OPENAI_API_KEY" }]);
+    expect(deps).toEqual([{ kind: "provider", label: "OpenAI", envVar: "OPENAI_API_KEY", needsKey: true }]);
   });
 
   it("detects Pinecone vector store on a rag_retrieve node", () => {
@@ -138,7 +138,7 @@ describe("computeTemplateDependencies", () => {
     };
     const deps = computeTemplateDependencies(raw);
     expect(deps).toEqual([
-      { kind: "provider", label: "Anthropic", envVar: "ANTHROPIC_API_KEY" }
+      { kind: "provider", label: "Anthropic", envVar: "ANTHROPIC_API_KEY", needsKey: true }
     ]);
   });
 
@@ -187,7 +187,7 @@ describe("the built-in templates and their model", () => {
 
   it("counts a dedicated chat model node as a model dependency", () => {
     expect(computeTemplateDependencies(wf([{ type: "openai_chat_model", config: { model: "gpt-4o-mini" } }]))).toEqual([
-      { kind: "provider", label: "OpenAI", envVar: "OPENAI_API_KEY" }
+      { kind: "provider", label: "OpenAI", envVar: "OPENAI_API_KEY", needsKey: true }
     ]);
     expect(computeTemplateDependencies(wf([{ type: "ollama_chat_model", config: { model: "llama3.1" } }]))).toEqual([
       { kind: "provider", label: "Ollama (local model server)", envVar: undefined }
@@ -200,12 +200,18 @@ describe("the built-in templates and their model", () => {
       { kind: "vector_store", label: "Knowledge base", envVar: undefined }
     ]);
     expect(computeTemplateDependencies(wf([{ type: "rag_retrieve", config: { embedderId: "cohere-embedder" } }]))).toEqual([
-      { kind: "provider", label: "Cohere", envVar: "COHERE_API_KEY" }
+      { kind: "provider", label: "Cohere", envVar: "COHERE_API_KEY", needsKey: true }
     ]);
     expect(computeTemplateDependencies(wf([{ type: "pdf_output", config: { renderMode: "html" } }]))).toEqual([
       { kind: "connector", label: "Chromium for PDF rendering", envVar: "PDF_CHROMIUM_EXECUTABLE_PATH" }
     ]);
     expect(computeTemplateDependencies(wf([{ type: "pdf_output", config: { renderMode: "text" } }]))).toEqual([]);
+  });
+
+  it("marks the RAG with Citations template as needing an OpenAI key (the validation's B12)", () => {
+    expect(sampleDependencies("rag-with-citations-flow.json")).toEqual(
+      expect.arrayContaining([{ kind: "provider", label: "OpenAI", envVar: "OPENAI_API_KEY", needsKey: true }])
+    );
   });
 
   it("lists the knowledge-base and HTML-PDF samples as needing setup", () => {

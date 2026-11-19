@@ -1,4 +1,4 @@
-import type { ConnectorDocument, LLMProviderConfig } from "@ai-orchestrator/shared";
+import { ErrorCategory, WorkflowError, type ConnectorDocument, type LLMProviderConfig } from "@ai-orchestrator/shared";
 import type { EmbeddingProviderAdapter, EmbeddingProviderRegistry, EmbeddingResponse, ProviderExecutionContext } from "@ai-orchestrator/provider-sdk";
 import { readResponseText } from "@ai-orchestrator/provider-sdk";
 import pg from "pg";
@@ -17,6 +17,32 @@ async function errorDetail(response: Response): Promise<string> {
   } catch {
     return "(the response body could not be read)";
   }
+}
+
+/**
+ * An embedder that needs an API key and has none: a plain error naming the key, before anything is sent (a request
+ * without a key only comes back as the provider's raw 401).
+ */
+function requireEmbeddingKey(apiKey: string | undefined, provider: string, envVar?: string): void {
+  if (apiKey && apiKey.trim()) return;
+  throw new WorkflowError(
+    `No ${provider} API key for the embedder. Save the key under Secrets and pick it as the node's embedding credential${envVar ? `, or set ${envVar} on the server` : ""}.`,
+    ErrorCategory.PROVIDER_AUTH,
+    false,
+    { provider, ...(envVar ? { envVar } : {}) },
+    `Add a ${provider} key, or switch the node to the built-in token embedder.`
+  );
+}
+
+/** A key the provider refused (401/403), in one sentence: the provider's raw body is left out. */
+function embeddingKeyRefused(status: number, provider: string, envVar?: string): WorkflowError {
+  return new WorkflowError(
+    `${provider} did not accept the embedder's API key (${status}). Check the key in the node's embedding credential${envVar ? ` or ${envVar}` : ""}.`,
+    ErrorCategory.PROVIDER_AUTH,
+    false,
+    { provider, status },
+    `Check the ${provider} key: it may be wrong, expired or without access to the embedding model.`
+  );
 }
 
 /** One embedded text, with what the provider reported about the call when it reported it. */
@@ -195,6 +221,7 @@ export class OpenAIEmbeddingAdapter implements EmbeddingAdapter {
   }
 
   async embedDetailed(text: string): Promise<EmbeddedText> {
+    requireEmbeddingKey(this.config.apiKey, "OpenAI", "OPENAI_API_KEY");
     const baseUrl = this.config.baseUrl || "https://api.openai.com/v1";
     const model = this.config.model || "text-embedding-3-small";
     
@@ -207,6 +234,7 @@ export class OpenAIEmbeddingAdapter implements EmbeddingAdapter {
       body: JSON.stringify({ model, input: text })
     });
 
+    if (response.status === 401 || response.status === 403) throw embeddingKeyRefused(response.status, "OpenAI", "OPENAI_API_KEY");
     if (!response.ok) {
       throw new Error(`OpenAI Embedding API error: ${response.statusText} - ${await errorDetail(response)}`);
     }
@@ -246,6 +274,7 @@ export class AzureOpenAIEmbeddingAdapter implements EmbeddingAdapter {
       throw new Error("AzureOpenAIEmbeddingAdapter requires endpoint and deployment.");
     }
 
+    requireEmbeddingKey(this.config.apiKey, "Azure OpenAI", "AZURE_OPENAI_API_KEY");
     const apiVersion = this.config.apiVersion?.trim() || "2024-10-21";
     const trimmedAuth = this.config.apiKey.trim();
     const isBearer = trimmedAuth.split(".").length === 3 || /^bearer\s+/i.test(trimmedAuth);
@@ -266,6 +295,7 @@ export class AzureOpenAIEmbeddingAdapter implements EmbeddingAdapter {
       }
     );
 
+    if (response.status === 401 || response.status === 403) throw embeddingKeyRefused(response.status, "Azure OpenAI", "AZURE_OPENAI_API_KEY");
     if (!response.ok) {
       throw new Error(`Azure OpenAI Embedding API error: ${response.statusText} - ${await errorDetail(response)}`);
     }
@@ -720,6 +750,7 @@ export class CohereEmbeddingAdapter implements EmbeddingAdapter {
     return (await this.embedDetailed(text)).vector;
   }
   async embedDetailed(text: string): Promise<EmbeddedText> {
+    requireEmbeddingKey(this.config.apiKey, "Cohere", "COHERE_API_KEY");
     const model = this.config.model || "embed-english-v3.0";
     const res = await fetch("https://api.cohere.ai/v1/embed", {
       method: "POST",
@@ -744,6 +775,7 @@ export class MistralEmbeddingAdapter implements EmbeddingAdapter {
     return (await this.embedDetailed(text)).vector;
   }
   async embedDetailed(text: string): Promise<EmbeddedText> {
+    requireEmbeddingKey(this.config.apiKey, "Mistral", "MISTRAL_API_KEY");
     const model = this.config.model || "mistral-embed";
     const res = await fetch("https://api.mistral.ai/v1/embeddings", {
       method: "POST",
@@ -764,6 +796,7 @@ export class GoogleVertexEmbeddingAdapter implements EmbeddingAdapter {
   }
   readonly endpointUrl = "https://generativelanguage.googleapis.com";
   async embed(text: string): Promise<number[]> {
+    requireEmbeddingKey(this.config.apiKey, "Google Gemini", "GEMINI_API_KEY");
     const model = this.config.model || "text-embedding-004";
     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent?key=${this.config.apiKey}`, {
       method: "POST",
@@ -784,6 +817,7 @@ export class HuggingFaceEmbeddingAdapter implements EmbeddingAdapter {
   }
   readonly endpointUrl = "https://api-inference.huggingface.co";
   async embed(text: string): Promise<number[]> {
+    requireEmbeddingKey(this.config.apiKey, "HuggingFace", "HUGGINGFACE_API_KEY");
     const model = this.config.model || "sentence-transformers/all-MiniLM-L6-v2";
     const res = await fetch(`https://api-inference.huggingface.co/pipeline/feature-extraction/${model}`, {
       method: "POST",

@@ -20,14 +20,16 @@ export interface TemplateDependency {
   kind: TemplateDependencyKind;
   label: string;
   envVar?: string;
+  /** A model or embedder that runs only with that provider's API key (a saved secret or `envVar`). */
+  needsKey?: boolean;
 }
 
-const PROVIDER_DEPENDENCIES: Record<string, { label: string; envVar?: string } | null> = {
+const PROVIDER_DEPENDENCIES: Record<string, { label: string; envVar?: string; needsKey?: boolean } | null> = {
   echo: null, // built-in, no dep
-  openai: { label: "OpenAI", envVar: "OPENAI_API_KEY" },
-  anthropic: { label: "Anthropic", envVar: "ANTHROPIC_API_KEY" },
-  gemini: { label: "Google Gemini", envVar: "GEMINI_API_KEY" },
-  azure_openai: { label: "Azure OpenAI" },
+  openai: { label: "OpenAI", envVar: "OPENAI_API_KEY", needsKey: true },
+  anthropic: { label: "Anthropic", envVar: "ANTHROPIC_API_KEY", needsKey: true },
+  gemini: { label: "Google Gemini", envVar: "GEMINI_API_KEY", needsKey: true },
+  azure_openai: { label: "Azure OpenAI", needsKey: true },
   ollama: { label: "Ollama (local model server)" },
   openai_compatible: { label: "OpenAI-compatible endpoint" },
   ai_gateway: { label: "AI Gateway" }
@@ -59,14 +61,14 @@ const VECTOR_STORE_DEPENDENCIES: Record<string, { label: string; envVar?: string
 };
 
 /** Embedders a RAG node calls (`config.embedderId`); the token embedder is local. */
-const EMBEDDER_DEPENDENCIES: Record<string, { label: string; envVar?: string } | null> = {
+const EMBEDDER_DEPENDENCIES: Record<string, { label: string; envVar?: string; needsKey?: boolean } | null> = {
   "token-embedder": null,
-  "openai-embedder": { label: "OpenAI", envVar: "OPENAI_API_KEY" },
-  "azure-openai-embedder": { label: "Azure OpenAI" },
-  "cohere-embedder": { label: "Cohere", envVar: "COHERE_API_KEY" },
-  "mistral-embedder": { label: "Mistral", envVar: "MISTRAL_API_KEY" },
-  "google-vertex-embedder": { label: "Google Gemini", envVar: "GEMINI_API_KEY" },
-  "huggingface-embedder": { label: "HuggingFace", envVar: "HUGGINGFACE_API_KEY" }
+  "openai-embedder": { label: "OpenAI", envVar: "OPENAI_API_KEY", needsKey: true },
+  "azure-openai-embedder": { label: "Azure OpenAI", needsKey: true },
+  "cohere-embedder": { label: "Cohere", envVar: "COHERE_API_KEY", needsKey: true },
+  "mistral-embedder": { label: "Mistral", envVar: "MISTRAL_API_KEY", needsKey: true },
+  "google-vertex-embedder": { label: "Google Gemini", envVar: "GEMINI_API_KEY", needsKey: true },
+  "huggingface-embedder": { label: "HuggingFace", envVar: "HUGGINGFACE_API_KEY", needsKey: true }
 };
 
 const MCP_SERVER_DEPENDENCIES: Record<string, { label: string; envVar?: string } | null> = {
@@ -158,9 +160,11 @@ function templateNodes(rawWorkflow: unknown): unknown[] {
 export function computeTemplateDependencies(rawWorkflow: unknown): TemplateDependency[] {
   const nodes = templateNodes(rawWorkflow);
   const seen = new Map<string, TemplateDependency>();
-  const add = (kind: TemplateDependencyKind, label: string, envVar?: string) => {
+  const add = (kind: TemplateDependencyKind, label: string, envVar?: string, needsKey?: boolean) => {
     const key = `${kind}:${label}`;
-    if (!seen.has(key)) seen.set(key, { kind, label, envVar });
+    const existing = seen.get(key);
+    if (!existing) seen.set(key, { kind, label, envVar, ...(needsKey ? { needsKey: true } : {}) });
+    else if (needsKey) existing.needsKey = true;
   };
 
   for (const nodeRaw of nodes) {
@@ -176,7 +180,7 @@ export function computeTemplateDependencies(rawWorkflow: unknown): TemplateDepen
       const providerId = chatModelProvider ?? String(provider.providerId ?? "").trim();
       if (providerId in PROVIDER_DEPENDENCIES) {
         const dep = PROVIDER_DEPENDENCIES[providerId];
-        if (dep) add("provider", dep.label, dep.envVar);
+        if (dep) add("provider", dep.label, dep.envVar, dep.needsKey);
       } else if (providerId) {
         add("provider", providerId);
       }
@@ -198,7 +202,7 @@ export function computeTemplateDependencies(rawWorkflow: unknown): TemplateDepen
       const embedderId = String(config.embedderId ?? "").trim();
       if (embedderId in EMBEDDER_DEPENDENCIES) {
         const dep = EMBEDDER_DEPENDENCIES[embedderId];
-        if (dep) add("provider", dep.label, dep.envVar);
+        if (dep) add("provider", dep.label, dep.envVar, dep.needsKey);
       } else if (embedderId) {
         add("provider", embedderId);
       }
