@@ -23,14 +23,14 @@
 | `httpRequest` | `http_request` | Query parameters are appended to the URL; binary responses become text; auth becomes a secretRef placeholder. |
 | `code` | `code_node` | JavaScript is wrapped in a compatibility shim; Python is kept verbatim. |
 | `function` | `code_node` | Legacy function code is wrapped in the same compatibility shim. |
-| `set` | `set_node` | 'Keep only set fields' is not supported; other fields pass through. |
+| `set` | `set_node` | Field types are kept (string, number, boolean; arrays and objects as JSON). 'Keep only set fields' is not supported; other fields pass through. |
 | `if` | `if_node` | Conditions compile to one expression; outputs 0 and 1 become the true and false handles. |
 | `switch` | `switch_node` | Same-field equality rules become cases; other rule sets compile to a routing expression. |
 | `merge` | `merge_node` | Combine-by-fields keeps the first match field; SQL and position combines become append. |
 | `splitOut` | `split_out_node` | Only the first field to split out is kept. |
 | `itemLists` | `split_out_node` | Legacy item list node treated as split out. |
 | `aggregate` | `aggregate_node` | Collecting values into an array is approximated with the concatenate operation. |
-| `filter` | `filter_node` | Field-path conditions map directly; expression conditions need review. |
+| `filter` | `filter_node` | Keeps the matching items of the first list in its input (set Items from to pick another list). Field-path conditions map directly; expression conditions need review. |
 | `sort` | `sort_node` | Only the first sort field is kept; custom sort code needs review. |
 | `limit` | `limit_node` | Direct mapping. |
 | `wait` | `wait_node` | Timer, webhook and specific-time resumes are supported; form resume is approximated as a timer. |

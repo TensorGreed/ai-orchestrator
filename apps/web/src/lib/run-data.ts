@@ -247,17 +247,24 @@ export interface CanvasRunPreview {
 export function canvasRunPreview(
   result: NodeExecutionResult,
   labelFor: (nodeId: string) => string,
-  options: { hasOwnTestData?: boolean } = {}
+  options: { hasOwnTestData?: boolean; passes?: readonly NodeExecutionResult[] } = {}
 ): CanvasRunPreview {
   const attachment = attachmentUse(result);
   if (attachment) {
     return { usedBy: `used by ${labelFor(attachment.usedByNodeId)} as its ${portName(attachment.handle)}` };
   }
   const parts: string[] = [result.status];
-  if (result.status === "success" || (result.status === "error" && result.output !== undefined)) {
+  const passes = options.passes && options.passes.length > 1 ? options.passes : undefined;
+  if (passes) {
+    // A Loop body node runs once per item: count every pass and all their items, not only the last pass.
+    parts.push(`${passes.length} passes`);
+    const items = passes.reduce((sum, entry) => sum + (entry.status === "success" ? outputItemCount(entry.output) : 0), 0);
+    parts.push(formatItemCount(items));
+  } else if (result.status === "success" || (result.status === "error" && result.output !== undefined)) {
     parts.push(formatItemCount(outputItemCount(result.output)));
   }
-  const duration = result.status === "running" || result.status === "skipped" ? undefined : formatRunDuration(result.durationMs);
+  const durationMs = passes ? passes.reduce((sum, entry) => sum + (typeof entry.durationMs === "number" ? entry.durationMs : 0), 0) : result.durationMs;
+  const duration = result.status === "running" || result.status === "skipped" ? undefined : formatRunDuration(durationMs);
   if (duration) parts.push(duration);
   const preview: CanvasRunPreview = { meta: parts.join(" · ") };
   const prompt = runPromptInput(result.input, Boolean(options.hasOwnTestData));

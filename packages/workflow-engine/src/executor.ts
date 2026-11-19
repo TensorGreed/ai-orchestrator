@@ -164,6 +164,7 @@ import {
   type OutboundGuardConfig
 } from "./outbound-url-guard";
 import { bindCheckedRenderings, evaluateConditionTemplate, renderTemplate, tryParseJson, type TemplatePiece } from "./template";
+import { buildSetOutput, findFirstList, isRecordValue, loopPassResult, loopPassesOf, normalizeItemsFrom, singleInputItem } from "./item-nodes";
 import {
   createMcpElicitationHandler,
   createMcpSamplingHandler,
@@ -185,7 +186,7 @@ import { NO_CODE_SANDBOX_PLAN, codeNodesDisabledError, runJavaScriptCode, runPyt
 import { runWithSandboxOwner } from "./quickjs-sandbox";
 import { ownUsage, ownUsageOf, runAsUsageOwner, withoutUsage } from "./usage-ownership";
 import { sortWorkflowNodes, validateWorkflowGraph, computeDepthLevels } from "./validation";
-import { ErrorCategory, MODEL_NOT_ALLOWED_CODE, PUBLIC_RUN_ERROR_CODES, WorkflowError, remediationForCategory } from "@ai-orchestrator/shared";
+import { ErrorCategory, MODEL_NOT_ALLOWED_CODE, PUBLIC_RUN_ERROR_CODES, WorkflowError, filterModeOf, isMergeMode, loopCollectsResults, remediationForCategory } from "@ai-orchestrator/shared";
 import { AgentGuardInterrupt, RUNTIME_INTERNAL_TOOL_NAMES, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
 import { ApprovalHandoffSignal, approvedHandoffKeysFromState, isApprovalHandoffSignal, withoutReservedKeys, type ApprovalHandoffRequest } from "./approval-handoff";
 import { executeGuardNodeStep } from "./guard-node";
@@ -4887,11 +4888,31 @@ async function executeNodeHandler(
     }
 
     case "merge_node": {
-      const mode =
-        config.mode === "append" || config.mode === "combine_by_key" || config.mode === "choose_branch"
-          ? config.mode
-          : "append";
+      const mode = isMergeMode(config.mode) ? config.mode : "append";
       const entries = Object.entries(context.parentOutputs);
+
+      if (mode === "collect_loop_passes") {
+        // Every pass of a Loop body node connected into the Merge (read from its Loop's output, so a resumed run
+        // sees the same); a parent outside a loop body adds its output once.
+        const collected: unknown[] = [];
+        for (const [parentId, parentOutput] of entries) {
+          const loopIds = (context.workflow.edges ?? [])
+            .filter((edge) => edge.target === parentId && isExecutionEdge(edge) && context.nodeById.get(edge.source)?.type === "loop_node")
+            .map((edge) => edge.source);
+          let passes: unknown[] | undefined;
+          for (const loopId of loopIds) {
+            passes = loopPassesOf(context.nodeOutputs?.get(loopId), parentId);
+            if (passes) {
+              // Phase 16 — every pass's data, so the labels of all of them (the Loop's output carries their union).
+              context.labelScope?.readPath(`results.${loopId}`);
+              break;
+            }
+          }
+          if (passes) collected.push(...passes);
+          else collected.push(parentOutput);
+        }
+        return { items: collected, count: collected.length };
+      }
 
       if (mode === "append") {
         const mergedOutput: Record<string, unknown> = {};
@@ -4978,14 +4999,24 @@ async function executeNodeHandler(
       const combineWith = config.combineWith === "OR" ? "OR" : "AND";
       const passMode = config.passMode === "reject" ? "reject" : "pass";
 
-      function evaluateFilterCondition(cond: Record<string, unknown>): boolean {
+      // `scope` is what a condition reads: the node's input (gate), or one item over it (items mode).
+      function evaluateFilterCondition(cond: Record<string, unknown>, scope: Record<string, unknown>, item?: { value: unknown }): boolean {
         const field = typeof cond.field === "string" ? cond.field : "";
         const operator = typeof cond.operator === "string" ? cond.operator : "eq";
         const expectedRaw =
-          typeof cond.value === "string" ? renderTemplate(String(cond.value), templateData) : cond.value;
+          typeof cond.value === "string" ? renderTemplate(String(cond.value), scope) : cond.value;
 
-        let actual: unknown = readData(templateData, field);
-        if (actual === undefined) actual = getValueByPath(templateData, field);
+        let actual: unknown;
+        if (item) {
+          // An item's field (`price`), or a path from the item (`item.price`, `$json.price`); else the node's input.
+          const itemPath = field.trim().replace(/^(?:item|\$json)(?:\.|$)/, "");
+          if (!itemPath && /^(?:item|\$json)$/.test(field.trim())) actual = item.value;
+          else if (isRecordValue(item.value)) actual = getValueByPath(item.value, itemPath);
+          if (actual === undefined) actual = getValueByPath(scope, field);
+        } else {
+          actual = readData(templateData, field);
+          if (actual === undefined) actual = getValueByPath(templateData, field);
+        }
 
         const actualStr = actual == null ? "" : String(actual);
         const expectedStr = expectedRaw == null ? "" : String(expectedRaw);
@@ -5012,15 +5043,52 @@ async function executeNodeHandler(
         }
       }
 
-      const results = conditions.map((c: unknown) => evaluateFilterCondition(toRecord(c)));
-      const passed = combineWith === "OR" ? results.some(Boolean) : results.every(Boolean);
-      const shouldPass = passMode === "pass" ? passed : !passed;
+      const matches = (scope: Record<string, unknown>, item?: { value: unknown }): boolean => {
+        const results = conditions.map((c: unknown) => evaluateFilterCondition(toRecord(c), scope, item));
+        const passed = combineWith === "OR" ? results.some(Boolean) : results.every(Boolean);
+        return passMode === "pass" ? passed : !passed;
+      };
 
+      if (filterModeOf(config) === "gate") {
+        const shouldPass = matches(templateData);
+        return {
+          _branchHandle: shouldPass ? "pass" : "filtered",
+          passed: shouldPass,
+          input: { ...context.merged },
+          ...context.merged
+        };
+      }
+
+      // Items mode: keep the items of a list that match. Items from names the list; empty means the first list in
+      // the node's input (`products`, `body.items`), or, when the input has no list, the input itself as one item.
+      const configuredPath = normalizeItemsFrom(config.itemsFrom);
+      const itemsPath = configuredPath || findFirstList(context.merged) || "";
+      let list: unknown[];
+      if (itemsPath) {
+        let found = readData(templateData, itemsPath);
+        if (found === undefined) found = getValueByPath(templateData, itemsPath);
+        if (!Array.isArray(found)) {
+          throw WorkflowError.nodeConfig(`Filter Items from '${itemsPath}' is not a list in this run's input.`);
+        }
+        list = found;
+      } else {
+        list = [singleInputItem(context.parentOutputs, context.merged)];
+      }
+      const kept: unknown[] = [];
+      const rejected: unknown[] = [];
+      for (const [index, value] of list.entries()) {
+        const scope = { ...templateData, ...(isRecordValue(value) ? value : {}), item: value, _item_index: index };
+        (matches(scope, { value }) ? kept : rejected).push(value);
+      }
       return {
-        _branchHandle: shouldPass ? "pass" : "filtered",
-        passed: shouldPass,
-        input: { ...context.merged },
-        ...context.merged
+        // Pass runs when an item matched; Filtered runs when none did. Edges without a handle always run.
+        _branchHandle: kept.length > 0 ? "pass" : "filtered",
+        items: kept,
+        count: kept.length,
+        rejected,
+        rejected_count: rejected.length,
+        total: list.length,
+        items_from: itemsPath
       };
     }
 
@@ -5069,20 +5137,7 @@ async function executeNodeHandler(
     }
 
     case "set_node": {
-      const assignments = Array.isArray(config.assignments) ? config.assignments.map((entry) => toRecord(entry)) : [];
-      const output: Record<string, unknown> = {};
-
-      for (const assignment of assignments) {
-        const key = typeof assignment.key === "string" ? assignment.key.trim() : "";
-        const valueTemplate = typeof assignment.valueTemplate === "string" ? assignment.valueTemplate : "";
-        if (!key) {
-          continue;
-        }
-        const rendered = renderTemplate(valueTemplate, templateData);
-        output[key] = parseTemplateValue(rendered);
-      }
-
-      return output;
+      return buildSetOutput(Array.isArray(config.assignments) ? config.assignments : [], templateData);
     }
 
     case "workflow_tool":
@@ -10441,10 +10496,14 @@ async function executeWorkflowRun(
           });
         }
 
-        const output = {
+        const output: Record<string, unknown> = {
           items: loopItems,
           count: loopItems.length
         };
+        // Collect results: one entry per pass (the body node's output, or the pass's outputs by body node id).
+        if (loopCollectsResults(nodeConfig)) {
+          output.results = loopItems.map((pass) => loopPassResult(pass.outputs, downstreamNodeIds));
+        }
 
         nodeOutputs.set(node.id, output);
         labelState.set(node.id, labelState.finalize(unionLabels([itemLabels, ...passLabels]), output));

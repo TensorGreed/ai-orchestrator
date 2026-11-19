@@ -55,23 +55,28 @@
           "assignments": [
             {
               "key": "email",
-              "valueTemplate": "{{results.webhook.body.email}}"
+              "valueTemplate": "{{results.webhook.body.email}}",
+              "type": "string"
             },
             {
               "key": "company",
-              "valueTemplate": "{{results.http_request.company.name}}"
+              "valueTemplate": "{{results.http_request.company.name}}",
+              "type": "string"
             },
             {
               "key": "enrichedAt",
-              "valueTemplate": "{{ $now.toISOString() }}"
+              "valueTemplate": "{{ $now.toISOString() }}",
+              "type": "string"
             },
             {
               "key": "score",
-              "valueTemplate": "42"
+              "valueTemplate": "42",
+              "type": "number"
             },
             {
               "key": "source",
-              "valueTemplate": "webhook"
+              "valueTemplate": "webhook",
+              "type": "string"
             }
           ]
         }

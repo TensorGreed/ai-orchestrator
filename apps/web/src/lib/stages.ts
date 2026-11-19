@@ -604,7 +604,18 @@ export function summarizeNode(node: { type: string; config?: unknown }): string 
     case "chat_intent_router":
       return join(["report | code | message", str(c.inputTemplate, 24)]);
     case "loop_node":
-      return join([str(c.itemsKey ?? c.itemsTemplate ?? c.listKey, 32), typeof c.maxIterations === "number" ? `max ${c.maxIterations}` : null]) || "loop";
+      return (
+        join([
+          str(c.inputKey ?? c.itemsKey ?? c.itemsTemplate ?? c.listKey, 32),
+          typeof c.maxIterations === "number" ? `max ${c.maxIterations}` : null,
+          c.collectResults === true ? "collects results" : null
+        ]) || "loop"
+      );
+    case "filter_node": {
+      const conditions = Array.isArray(c.conditions) ? c.conditions.length : 0;
+      const what = c.mode === "items" ? `items of ${str(c.itemsFrom, 24) ?? "first list"}` : "pass or stop";
+      return join([what, `${conditions} condition${conditions === 1 ? "" : "s"}`]);
+    }
     case "wait_node":
       return join([str(c.resumeMode), typeof c.delayMs === "number" ? `${c.delayMs}ms` : null]);
     case "merge_node":

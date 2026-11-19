@@ -106,6 +106,36 @@ export function renderTemplate(template: string, values: Record<string, unknown>
   return renderTemplateAdvanced(template, values, options).rendered;
 }
 
+const SINGLE_TEMPLATE = /^\s*{{\s*([\s\S]+?)\s*}}\s*$/;
+
+/**
+ * A template's value with its type kept. A template that is one `{{ }}` (spaces around it allowed) gives what the
+ * path or expression gives: a number, boolean, object, list or text, or `undefined` when it is missing or the
+ * expression fails (which `renderTemplate` renders as ""). Any other template is rendered to text.
+ */
+export function renderTemplateValue(template: string, values: Record<string, unknown>): { single: true; value: unknown } | { single: false; rendered: string } {
+  const match = SINGLE_TEMPLATE.exec(template);
+  const body = match ? (match[1] ?? "").trim() : "";
+  // `{{a}} {{b}}` also matches the pattern above: one `{{ }}` only.
+  if (!match || body.includes("{{") || body.includes("}}")) return { single: false, rendered: renderTemplate(template, values) };
+  if (SIMPLE_PATH.test(body)) {
+    recordTemplateRead(body, true);
+    const value = resolvePath(values, body);
+    return { single: true, value: value === null ? undefined : value };
+  }
+  if (!isComplexExpression(body)) return { single: true, value: undefined };
+  recordTemplateRead(body, false);
+  return withExpressionEvaluator(expressionContextFor(values), (evaluate) => {
+    try {
+      const value = evaluate(body);
+      return { single: true as const, value: value === null ? undefined : value };
+    } catch (error) {
+      if (isExpressionSandboxFailure(error)) throw error;
+      return { single: true as const, value: undefined };
+    }
+  });
+}
+
 /** The truthiness an IF node has always used for its rendered condition. */
 function isTruthyConditionText(text: string): boolean {
   return Boolean(text) && text !== "false" && text !== "0" && text !== "null" && text !== "undefined";

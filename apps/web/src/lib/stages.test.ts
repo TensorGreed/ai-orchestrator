@@ -230,3 +230,15 @@ describe("summarizeNode", () => {
     expect(summarizeNode({ type: "mystery_node", config: {} })).toBe("mystery node");
   });
 });
+
+describe("item node summaries", () => {
+  it("names a Loop's list (inputKey) and whether it collects results", () => {
+    expect(summarizeNode({ type: "loop_node", config: { inputKey: "body.items", maxIterations: 50, collectResults: true } })).toBe("body.items · max 50 · collects results");
+  });
+
+  it("says what a Filter filters", () => {
+    expect(summarizeNode({ type: "filter_node", config: { mode: "items", itemsFrom: "", conditions: [{}] } })).toBe("items of first list · 1 condition");
+    expect(summarizeNode({ type: "filter_node", config: { mode: "items", itemsFrom: "body.items", conditions: [] } })).toBe("items of body.items · 0 conditions");
+    expect(summarizeNode({ type: "filter_node", config: { conditions: [{}, {}] } })).toBe("pass or stop · 2 conditions");
+  });
+});

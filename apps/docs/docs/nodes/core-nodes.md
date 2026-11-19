@@ -43,11 +43,14 @@ covers what a templated field can read from earlier steps.
 
 - `if_node`
 - `switch_node`
+- `filter_node` (see [Lists of items](#lists-of-items))
+- `loop_node`
 - `merge_node`
 - `approval_gate`
 
 ## Utilities
 
+- `set_node` (Set / Transform, see [Lists of items](#lists-of-items))
 - `local_memory` (Simple Memory)
 - `output_parser`
 - `http_request`
@@ -74,6 +77,49 @@ covers what a templated field can read from earlier steps.
 - Nodes on an agent's attachment ports (`chat_model`, `memory`, `tool`, `worker`) are not DAG steps: the agent uses
   them when it runs.
 - Node execution status is persisted in execution history.
+
+## Lists of items
+
+A step passes one object to the next. A list inside it (`products`, an HTTP response's `body.items`) is a list of
+items, and four nodes work on such lists.
+
+### Filter
+
+**Mode** picks what a Filter does:
+
+- **Keep matching items of a list** (`mode: "items"`, the default for new Filters). Each item of a list is checked
+  against the conditions, and the output is `items` (the items that match), `count`, `rejected` (the others),
+  `rejected_count`, `total` and `items_from` (the list's path). **Items from** names the list (`body.items`, or
+  <span v-pre>`{{ body.items }}`</span>); empty means the first list in the input, top-level fields before nested
+  ones, up to three levels deep. An input without a list is filtered as one item. A condition's field is read from
+  the item (`price`, `item.price` or `$json.price`; a field the item does not have is read from the node's input),
+  and a condition's value can use <span v-pre>`{{item.field}}`</span>. The editor draws a Filter with one output,
+  which always runs. In workflow JSON (and in imported workflows), an edge from the `pass` handle runs when at least
+  one item matches and one from the `filtered` handle when none does.
+- **Pass or stop** (`mode: "gate"`). The conditions judge the whole input once: the output is the input plus
+  `passed`, and an edge from the `pass` or `filtered` handle runs accordingly. A Filter saved before modes existed (no `mode`) works this way.
+
+### Set / Transform
+
+Each field has a **Type** (`type`):
+
+| Type | The value |
+|---|---|
+| `auto` (new fields) | A value that is one <span v-pre>`{{ }}`</span> keeps its type: <span v-pre>`{{ item.price > 25 }}`</span> is `true` or `false`, <span v-pre>`{{ count }}`</span> a number, a list stays a list. Other values are text, and text that is a JSON object or list is parsed. A missing value is `null`. |
+| `string` | Text. An object or list is written as JSON text. |
+| `number` | A number. Text that is not a number fails the node. |
+| `boolean` | `true` or `false` (also from `yes`/`no`, `1`/`0`, `on`/`off`). Other text fails the node. |
+| `json` | Parsed JSON, or the value of one <span v-pre>`{{ }}`</span> as it is. Text that is not JSON fails the node. |
+
+An empty value is `null` for `number`, `boolean` and `json`. A field saved before types existed has no type and is
+shown as **Text (as before)**: its value becomes text, and text that is a JSON object or list is parsed, so
+<span v-pre>`{{ item.price > 25 }}`</span> gives the text `"true"`. Choose a type to change that.
+
+### Loop and Merge
+
+See [Loops](/runtime/templates-and-expressions#loops): **Collect results** on a Loop adds `results` (one entry per
+pass), and a Merge in **Collect loop passes** mode (`collect_loop_passes`) gathers every pass of the loop body node
+connected into it. That Merge needs only the one incoming edge.
 
 ## Errors and retries
 

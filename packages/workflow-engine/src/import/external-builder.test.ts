@@ -218,11 +218,11 @@ describe("external workflow import — webhook, HTTP request and field assignmen
     const set = nodeById(conversion, "edit_fields");
     expect(set.type).toBe("set_node");
     expect(set.config.assignments).toEqual([
-      { key: "email", valueTemplate: "{{results.webhook.body.email}}" },
-      { key: "company", valueTemplate: "{{results.http_request.company.name}}" },
-      { key: "enrichedAt", valueTemplate: "{{ $now.toISOString() }}" },
-      { key: "score", valueTemplate: "42" },
-      { key: "source", valueTemplate: "webhook" }
+      { key: "email", valueTemplate: "{{results.webhook.body.email}}", type: "string" },
+      { key: "company", valueTemplate: "{{results.http_request.company.name}}", type: "string" },
+      { key: "enrichedAt", valueTemplate: "{{ $now.toISOString() }}", type: "string" },
+      { key: "score", valueTemplate: "42", type: "number" },
+      { key: "source", valueTemplate: "webhook", type: "string" }
     ]);
   });
 
@@ -542,7 +542,10 @@ describe("external workflow import — unsupported nodes and odd expressions", (
   it("keeps Python code verbatim and maps the filter", () => {
     const python = nodeById(conversion, "python");
     expect(python.config).toMatchObject({ language: "python", code: "for item in _input.all():\n    item.json['seen'] = True\nreturn _input.all()" });
+    // The source filters items: the Filter keeps the matching items of the first list in its input.
     expect(nodeById(conversion, "top_ratings").config).toEqual({
+      mode: "items",
+      itemsFrom: "",
       conditions: [{ field: "results.summarise.Rating", operator: "eq", value: "3" }],
       combineWith: "AND",
       passMode: "pass"
@@ -818,12 +821,12 @@ describe("external workflow import — additional node variants", () => {
     );
     expect(nodeById(conversion, "start").config).toMatchObject({ method: "GET", authMode: "bearer_token", authHeaderName: "authorization", secretRef: { secretId: "import-httpheaderauth-inbound_key" } });
     expect(nodeById(conversion, "raw_set").config.assignments).toEqual([
-      { key: "a", valueTemplate: "1" },
-      { key: "b", valueTemplate: "two" }
+      { key: "a", valueTemplate: "1", type: "json" },
+      { key: "b", valueTemplate: "two", type: "string" }
     ]);
     expect(nodeById(conversion, "legacy_set").config.assignments).toEqual([
-      { key: "s", valueTemplate: "{{results.raw_set.a}}" },
-      { key: "n", valueTemplate: "3" }
+      { key: "s", valueTemplate: "{{results.raw_set.a}}", type: "string" },
+      { key: "n", valueTemplate: "3", type: "number" }
     ]);
     expect(reportFor(conversion, "Legacy set").reason).toContain("Keep only set fields");
     expect(nodeById(conversion, "webhook_wait").config).toMatchObject({ resumeMode: "webhook", resumeWebhookPath: "resume-here" });

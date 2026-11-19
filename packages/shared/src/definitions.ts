@@ -106,14 +106,17 @@ const baseNodeDefinitions: NodeDefinition[] = [
       properties: {
         inputKey: { type: "string" },
         itemVariable: { type: "string" },
-        maxIterations: { type: "number" }
+        maxIterations: { type: "number" },
+        // Adds `results` to the output: one entry per pass (absent on Loops saved before it existed: off).
+        collectResults: { type: "boolean" }
       },
       required: ["inputKey", "itemVariable"]
     },
     sampleConfig: {
       inputKey: "documents",
       itemVariable: "item",
-      maxIterations: 100
+      maxIterations: 100,
+      collectResults: true
     }
   },
   {
@@ -152,11 +155,11 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "merge_node",
     label: "Merge / Join",
     category: "Utility",
-    description: "Merges outputs from multiple parent branches after fan-in.",
+    description: "Merges outputs from multiple parent branches after fan-in, or collects every pass of a Loop body node.",
     configSchema: {
       type: "object",
       properties: {
-        mode: { type: "string", enum: ["append", "combine_by_key", "choose_branch"] },
+        mode: { type: "string", enum: ["append", "combine_by_key", "choose_branch", "collect_loop_passes"] },
         combineKey: { type: "string" }
       },
       required: ["mode"]
@@ -222,7 +225,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "set_node",
     label: "Set / Transform",
     category: "Utility",
-    description: "Builds a structured output object from key/template assignments.",
+    description: "Builds a structured output object from key/template assignments; each field can keep or set its value's type.",
     configSchema: {
       type: "object",
       properties: {
@@ -232,7 +235,9 @@ const baseNodeDefinitions: NodeDefinition[] = [
             type: "object",
             properties: {
               key: { type: "string" },
-              valueTemplate: { type: "string" }
+              valueTemplate: { type: "string" },
+              // `auto` keeps a single {{ }}'s type; absent (saved before types existed) renders text as before.
+              type: { type: "string", enum: ["auto", "string", "number", "boolean", "json"] }
             },
             required: ["key", "valueTemplate"]
           }
@@ -241,9 +246,9 @@ const baseNodeDefinitions: NodeDefinition[] = [
     },
     sampleConfig: {
       assignments: [
-        { key: "customerId", valueTemplate: "{{webhook.customer.id}}" },
-        { key: "status", valueTemplate: "active" },
-        { key: "metadata", valueTemplate: "{\"source\":\"workflow\",\"index\":{{_loop_index}}}" }
+        { key: "customerId", valueTemplate: "{{webhook.customer.id}}", type: "auto" },
+        { key: "status", valueTemplate: "active", type: "auto" },
+        { key: "metadata", valueTemplate: "{\"source\":\"workflow\",\"index\":{{_loop_index}}}", type: "auto" }
       ]
     }
   },
@@ -1698,10 +1703,14 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "filter_node",
     label: "Filter",
     category: "Utility",
-    description: "Evaluates conditions against context data and routes to pass or filtered branches.",
+    description: "Keeps the items of a list that match its conditions (Items mode), or judges the whole input and routes to pass or filtered (Pass or stop mode).",
     configSchema: {
       type: "object",
       properties: {
+        // `items`: keep matching items of a list; `gate`: judge the whole input (a Filter without a mode is a gate).
+        mode: { type: "string", enum: ["items", "gate"] },
+        // Items mode: the list's path (`body.items`); empty means the first list in the input.
+        itemsFrom: { type: "string" },
         conditions: {
           type: "array",
           items: {
@@ -1726,6 +1735,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
       }
     },
     sampleConfig: {
+      mode: "items",
+      itemsFrom: "",
       conditions: [{ field: "status", operator: "eq", value: "active" }],
       combineWith: "AND",
       passMode: "pass"

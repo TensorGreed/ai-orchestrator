@@ -288,3 +288,10 @@ describe("canvas run preview", () => {
     expect(screen.getByTestId("node-used-by")).toHaveTextContent("used by Support agent as its chat model");
   });
 });
+
+describe("RunStatusLine for a Loop body node", () => {
+  it("says the data is the last of several passes", () => {
+    render(<RunStatusLine result={{ nodeId: "body", status: "success", startedAt: "2026-01-01T00:00:00.000Z", durationMs: 5, output: { a: 1 } }} passCount={3} />);
+    expect(screen.getByTestId("run-data-status")).toHaveTextContent("success · last of 3 passes · 1 item · 5 ms");
+  });
+});

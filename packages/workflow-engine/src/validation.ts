@@ -2,9 +2,12 @@ import { createDefaultGuardProfile, mergeGuardProfileOverride, outputSchemaOptio
 import { outputGuardrailProfile, readOutputGuardrailConfig } from "./output-checks-runtime";
 import {
   approvalGateConfigSchema,
+  FILTER_MODES,
   guardNodeConfigSchema,
   guardProtectionNodeConfigSchema,
   guardRevealNodeConfigSchema,
+  isMergeMode,
+  isSetValueType,
   OUTPUT_GUARDRAIL_CHECK_VALUES,
   parseIpAllowlist,
   parseStatusList,
@@ -920,10 +923,10 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
     }
 
     if (node.type === "merge_node") {
-      if (config.mode !== "append" && config.mode !== "combine_by_key" && config.mode !== "choose_branch") {
+      if (!isMergeMode(config.mode)) {
         issues.push({
           code: "invalid_merge_mode",
-          message: "Merge node mode must be one of append, combine_by_key, choose_branch.",
+          message: "Merge node mode must be one of append, combine_by_key, choose_branch, collect_loop_passes.",
           nodeId: node.id
         });
       }
@@ -936,7 +939,8 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
         });
       }
 
-      if ((incomingExecutionCount.get(node.id) ?? 0) < 2) {
+      // Collecting a loop body's passes needs only that body node connected in.
+      if (config.mode !== "collect_loop_passes" && (incomingExecutionCount.get(node.id) ?? 0) < 2) {
         issues.push({
           code: "merge_requires_multiple_parents",
           message: "Merge node requires at least two incoming execution edges.",
@@ -1021,6 +1025,14 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       }
     }
 
+    if (node.type === "filter_node" && config.mode !== undefined && !(FILTER_MODES as readonly unknown[]).includes(config.mode)) {
+      issues.push({
+        code: "invalid_filter_mode",
+        message: "Filter mode must be items (keep matching items of a list) or gate (pass or stop the whole input).",
+        nodeId: node.id
+      });
+    }
+
     if (node.type === "set_node") {
       if (!Array.isArray(config.assignments) || config.assignments.length === 0) {
         issues.push({
@@ -1043,6 +1055,14 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
             issues.push({
               code: "invalid_set_node_assignment_template",
               message: `Set / Transform assignment #${assignmentIndex + 1} requires a valueTemplate string.`,
+              nodeId: node.id
+            });
+            break;
+          }
+          if (entry.type !== undefined && entry.type !== null && entry.type !== "" && !isSetValueType(entry.type)) {
+            issues.push({
+              code: "invalid_set_node_assignment_type",
+              message: `Set / Transform assignment #${assignmentIndex + 1} has an unknown type; use auto, string, number, boolean or json.`,
               nodeId: node.id
             });
             break;
@@ -1486,6 +1506,8 @@ const DRAFT_SAVEABLE_ISSUE_CODES = new Set([
   "missing_set_node_assignments",
   "invalid_set_node_assignment_key",
   "invalid_set_node_assignment_template",
+  "invalid_set_node_assignment_type",
+  "invalid_filter_mode",
   "missing_qdrant_operation",
   "missing_output_parser_schema",
   "missing_merge_combine_key",

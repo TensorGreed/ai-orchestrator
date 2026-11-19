@@ -150,3 +150,24 @@ describe("run records", () => {
     expect(canvasRunPreview({ nodeId: "r", status: "running", startedAt: T0 }, (id) => id)).toEqual({ meta: "running" });
   });
 });
+
+describe("a Loop body node's passes on the canvas", () => {
+  const pass = (n: number, output: unknown, status: "success" | "error" = "success") => ({
+    nodeId: "body",
+    status,
+    startedAt: T0,
+    durationMs: 10,
+    output
+  });
+
+  it("counts every pass and the items of all of them, not only the last pass", () => {
+    const passes = [pass(1, { a: 1 }), pass(2, { a: 2 }), pass(3, [1, 2])];
+    expect(canvasRunPreview(passes[2]!, (id) => id, { passes }).meta).toBe("success · 3 passes · 4 items · 30 ms");
+    expect(canvasRunPreview(passes[2]!, (id) => id, { passes }).output).toBe(compactOutputPreview([1, 2]));
+  });
+
+  it("keeps the one-pass summary for a node that ran once", () => {
+    const only = pass(1, { a: 1 });
+    expect(canvasRunPreview(only, (id) => id, { passes: [only] }).meta).toBe("success · 1 item · 10 ms");
+  });
+});

@@ -399,8 +399,10 @@ function AttachmentNote({
   );
 }
 
-export function RunStatusLine({ result, title }: { result: RunNodeResult; title?: string }) {
+export function RunStatusLine({ result, title, passCount }: { result: RunNodeResult; title?: string; passCount?: number }) {
   const parts: string[] = [];
+  // A Loop body node: the data shown is its last pass.
+  if (passCount && passCount > 1) parts.push(`last of ${passCount} passes`);
   if (result.status === "success" || (result.status === "error" && result.output !== undefined)) {
     parts.push(formatItemCount(outputItemCount(result.output)));
   }

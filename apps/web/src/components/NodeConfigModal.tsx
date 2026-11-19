@@ -7,6 +7,7 @@ import type {
   McpSamplingTraceEntry,
   NodeActivityEvent,
   McpToolPolicyTrace,
+  SetValueType,
   Workflow,
   WorkflowExecutionResult
 } from "@ai-orchestrator/shared";
@@ -19,9 +20,12 @@ import {
   DEFAULT_RETRY_MAX_DELAY_MS,
   MODEL_PROVIDER_CHOICES,
   PROVIDER_CONFIG_NODE_TYPES,
+  SET_VALUE_TYPES,
   WORKFLOW_TOOL_ADAPTER_ID,
   builtInToolProviderOf,
+  filterModeOf,
   httpErrorStatusMode,
+  isSetValueType,
   parseStatusList,
   repairNodeErrorConfig,
   deriveWorkflowToolDescriptor,
@@ -638,6 +642,20 @@ function readTraceList<T>(output: unknown, key: string): T[] {
   const record = asRecord(output);
   const list = record[key];
   return Array.isArray(list) ? (list as T[]) : [];
+}
+
+const SET_VALUE_TYPE_LABELS: Record<SetValueType, string> = {
+  auto: "Auto (keep the value's type)",
+  string: "String",
+  number: "Number",
+  boolean: "Boolean",
+  json: "JSON (object or list)"
+};
+
+/** A Set field's type choices; "Text (as before)" is offered only on a field saved without a type. */
+function setValueTypeOptions(current: unknown): Array<{ value: string; label: string }> {
+  const options = SET_VALUE_TYPES.map((type) => ({ value: type, label: SET_VALUE_TYPE_LABELS[type] }));
+  return isSetValueType(current) ? options : [{ value: "", label: "Text (as before)" }, ...options];
 }
 
 function ToggleField({
@@ -1806,6 +1824,8 @@ export function NodeInspector({
     }
     return undefined;
   }, [executionResult, node.id]);
+  // A Loop body node has one result per pass.
+  const currentPassCount = useMemo(() => (executionResult?.nodeResults ?? []).filter((entry) => entry.nodeId === node.id).length, [executionResult, node.id]);
   // Nodes of a past run that were deleted since cannot be opened, so stepping skips them.
   const nodeExists = useCallback((nodeId: string) => !nodeLabels || nodeLabels.has(nodeId), [nodeLabels]);
   const runSteps = useMemo(() => runStepOrder(executionResult).filter(nodeExists), [executionResult, nodeExists]);
@@ -6341,6 +6361,12 @@ export function NodeInspector({
               step={1}
               onChange={(next) => setConfig((current) => ({ ...current, maxIterations: next }))}
             />
+            <ToggleField
+              label="Collect results"
+              checked={config.collectResults === true}
+              onChange={(next) => setConfig((current) => ({ ...current, collectResults: next }))}
+              help="Adds results to the Loop's output: one entry per pass, the body node's output (or each body node's output by id when the body has several). Read it after the loop as {{results.<loop id>.results}}."
+            />
           </>
         );
       case "merge_node":
@@ -6353,9 +6379,16 @@ export function NodeInspector({
               options={[
                 { value: "append", label: "Append (flat merge)" },
                 { value: "combine_by_key", label: "Combine by Key" },
-                { value: "choose_branch", label: "Choose First Success Branch" }
+                { value: "choose_branch", label: "Choose First Success Branch" },
+                { value: "collect_loop_passes", label: "Collect loop passes" }
               ]}
             />
+            {toStringValue(config.mode, "append") === "collect_loop_passes" && (
+              <div className="cfg-tip" data-testid="merge-collect-tip">
+                Connect a Loop body node into this Merge: its output is <code>items</code>, every pass of that node in order,
+                and <code>count</code>. A node outside a loop body adds its output once.
+              </div>
+            )}
             {toStringValue(config.mode, "append") === "combine_by_key" && (
               <TextField
                 label="Combine Key"
@@ -6714,6 +6747,27 @@ export function NodeInspector({
                       rows={3}
                     />
                   </div>
+                  <SelectField
+                    label="Type"
+                    value={typeof assignment.type === "string" ? assignment.type : ""}
+                    onChange={(next) =>
+                      setConfig((current) => {
+                        const currentAssignments = Array.isArray(current.assignments)
+                          ? current.assignments.map((item) => asRecord(item))
+                          : [];
+                        currentAssignments[index] = {
+                          ...asRecord(currentAssignments[index]),
+                          type: next
+                        };
+                        return {
+                          ...current,
+                          assignments: currentAssignments
+                        };
+                      })
+                    }
+                    options={setValueTypeOptions(assignment.type)}
+                    help="Auto keeps the type of a value that is one {{ }} (a number, true or false, a list or an object); other values are text. String, Number, Boolean and JSON convert the value, and a value that cannot be converted fails the node. A field saved before types existed is Text (as before): its value becomes text, and text that is a JSON object or list is parsed."
+                  />
                   <div className="cfg-inline-actions">
                     <button
                       type="button"
@@ -6747,7 +6801,8 @@ export function NodeInspector({
                         : [];
                       currentAssignments.push({
                         key: "",
-                        valueTemplate: ""
+                        valueTemplate: "",
+                        type: "auto"
                       });
                       return {
                         ...current,
@@ -7584,8 +7639,34 @@ export function NodeInspector({
           { value: "is_not_empty", label: "Is Not Empty" },
           { value: "regex", label: "Matches Regex" }
         ];
+        const filterMode = filterModeOf(config);
         return (
           <>
+            <SelectField
+              label="Mode"
+              value={filterMode}
+              onChange={(next) => setConfig((current) => ({ ...current, mode: next }))}
+              options={[
+                { value: "items", label: "Keep matching items of a list" },
+                { value: "gate", label: "Pass or stop (judge the whole input)" }
+              ]}
+              help="Keep matching items: each item of a list is checked, and the output's items holds the ones that match (rejected holds the others). Pass or stop: the whole input is checked once and passed on with passed true or false; a Filter saved before modes existed works this way."
+            />
+            {filterMode === "items" && (
+              <>
+                <TextField
+                  label="Items from"
+                  value={toStringValue(config.itemsFrom)}
+                  onChange={(next) => setConfig((current) => ({ ...current, itemsFrom: next }))}
+                  placeholder="first list in the input"
+                  help="The list to filter, as a path such as body.items or products. Empty: the first list in the input (an input without a list is filtered as one item)."
+                />
+                <div className="cfg-tip" data-testid="filter-items-tip">
+                  A condition's field is read from each item (<code>price</code>, or <code>item.price</code>), and a value can
+                  use <code>{"{{item.field}}"}</code>. The output's <code>items</code> holds the matches and <code>rejected</code> the others.
+                </div>
+              </>
+            )}
             <SelectField
               label="Combine With"
               value={toStringValue(config.combineWith, "AND").toUpperCase()}
@@ -10259,7 +10340,7 @@ export function NodeInspector({
   // The node's run status shows once, in the header. Attached nodes do not run as a step of their own.
   const headerStatus =
     showRuntimeInspection && currentRunResult && !attachmentUse(currentRunResult) ? (
-      <RunStatusLine result={currentRunResult} title={runLabel} />
+      <RunStatusLine result={currentRunResult} title={runLabel} passCount={currentPassCount} />
     ) : null;
 
   const tabBar = (
