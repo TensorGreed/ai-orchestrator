@@ -7099,7 +7099,7 @@ export class SqliteStore implements Store {
         anyOf.push(
           `(workflow_id IN (${ids}) AND (` +
             `execution_id IN (SELECT id FROM execution_history WHERE workflow_id IN (${ids}) AND ${history}) OR ` +
-            `execution_id IN (SELECT id FROM workflow_executions WHERE workflow_id IN (${ids}) AND ${paused})))`
+            `execution_id IN (SELECT id FROM workflow_executions we WHERE workflow_id IN (${ids}) AND ${paused} AND NOT EXISTS (SELECT 1 FROM execution_history eh WHERE eh.id = we.id))))`
         );
       }
       clauses.push(`(${anyOf.join(" OR ")})`);

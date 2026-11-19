@@ -20,6 +20,7 @@ import { AuthService } from "./services/auth-service.js";
 import { QueueService } from "./services/queue-service.js";
 import { SecretService } from "./services/secret-service.js";
 import { WorkflowVersionService } from "./services/workflow-version-service.js";
+import { testSql } from "./test-support/test-sql.js";
 import { openTestStore } from "./test-support/test-store.js";
 
 interface TestContext {
@@ -232,7 +233,35 @@ describe("own runs by user id (v80)", () => {
     expect((await listRuns(context, olivia)).ids).toEqual([executionId]);
   });
 
-  it("the starter's id crosses the execution queue", async () => {
+  it("a run paused before v80 (no starter in its state) stays its starter's after someone else approves it", async () => {
+    const { context, owner, olivia } = await seed();
+    const paused = await call(context, "POST", "/api/workflows/wf-gated/execute", olivia.cookie, { input: {} });
+    const executionId = paused.json<{ executionId: string }>().executionId;
+    // As an older build left it: no starter on the history or in the paused state.
+    const state = (await context.store.getWorkflowExecutionState(executionId))!;
+    const { triggeredByUserId: _dropped, ...olderState } = state.state as Record<string, unknown>;
+    await context.store.saveWorkflowExecutionState({ ...state, state: olderState } as never);
+    const history = (await context.store.getExecutionHistory(executionId))!;
+    await testSql(context.store).run("UPDATE execution_history SET triggered_by_user_id = NULL WHERE id = ?", executionId);
+    expect(await context.store.getExecutionStarter(executionId)).toBeNull();
+    expect(history.triggeredBy).toBe(olivia.email);
+
+    const approved = await call(context, "POST", `/api/approvals/${executionId}/approve`, owner.cookie, {});
+    expect(approved.statusCode, approved.body).toBeLessThan(300);
+    expect((await context.store.getExecutionHistory(executionId))?.status).toBe("success");
+    expect(await context.store.getExecutionStarter(executionId)).toBe(olivia.id);
+    expect((await listRuns(context, olivia)).ids).toEqual([executionId]);
+  });
+
+  it("a retry of a run whose starter's account is gone, with no session owner recorded, is refused", async () => {
+    const { context, owner } = await seed();
+    const now = new Date().toISOString();
+    await context.store.saveExecutionHistory({ id: "run-of-gone", workflowId: "wf-team", status: "error", startedAt: now, completedAt: now, triggerType: "manual", triggeredBy: "gone@example.com", triggeredByUserId: "usr_gone", inputJson: {}, error: "boom" });
+    const retried = await call(context, "POST", "/api/executions/run-of-gone/retry", owner.cookie, {});
+    expect(retried.statusCode, retried.body).toBe(409);
+  });
+
+  it("a queued run's record carries the starter's id", async () => {
     const { context, olivia, run } = await seed({ queue: true });
     const executionId = await run(olivia);
     expect(await context.store.getExecutionStarter(executionId)).toBe(olivia.id);

@@ -157,6 +157,8 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       // An email names the run's starter only when that account is older than the run (a reused email is not them).
       const emailStarter = byEmail && source.startedAt && Date.parse(byEmail.createdAt) <= Date.parse(source.startedAt) ? byEmail : null;
       const starter = starterId ? await deps.store.getUserById(starterId) : emailStarter;
+      // The person who started it no longer has an account: their sessions are gone, so it is not run again.
+      if (starterId && !starter) return null;
       if (starter) {
         owner = (await deps.sessionOwnerFor({ id: starter.id, email: starter.email, role: starter.role as SafeUser["role"], ...(starter.kind === "service" ? { serviceAccount: true as const } : {}) }, workflow)) ?? null;
       }

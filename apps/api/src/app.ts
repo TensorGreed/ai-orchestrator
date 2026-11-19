@@ -2654,8 +2654,8 @@ export async function createApp(
     const releaseVersion = channel === "production" ? (input.releaseVersion !== undefined ? input.releaseVersion : releaseService.versionOf(input.workflow)) : null;
     // Phase 15.4 — the run's history records which published version it ran, so a retry runs that version again.
     const starter = runStarterId(input);
-    noteRunStarter(input.executionId, starter);
     if (input.executionId && !input.replay) {
+      noteRunStarter(input.executionId, starter);
       if (runReleases.size >= 5_000) runReleases.delete(runReleases.keys().next().value!);
       runReleases.set(input.executionId, { channel, version: releaseVersion });
       if (input.sessionOwner) {
@@ -4797,7 +4797,7 @@ export async function createApp(
       const pausedOwner = pausedState.sessionOwner;
       const pausedStarter = pausedState.triggeredByUserId;
       const sessionOwner = (await store.getExecutionSessionOwner(executionId)) ?? (typeof pausedOwner === "string" ? pausedOwner : null);
-      const triggeredByUserId = history ? await store.getExecutionStarter(executionId) : typeof pausedStarter === "string" && pausedStarter ? pausedStarter : null;
+      const triggeredByUserId = (history ? await store.getExecutionStarter(executionId) : null) ?? (typeof pausedStarter === "string" && pausedStarter ? pausedStarter : null);
       return { triggeredBy: started.triggeredBy ?? null, triggeredByUserId, sessionOwner, startedAt: started.startedAt ?? null };
     },
     getUserCreatedAt: async (userId) => (await store.getUserById(userId))?.createdAt ?? null
@@ -5799,6 +5799,18 @@ export async function createApp(
     clearInterval(credentialExpiryTimer);
   });
 
+  /**
+   * v80 — the starter of a run recorded before user ids were: the account with that user id, or with that email when
+   * the account is older than the run (as run-access.ts runOwnedBy judges it). Null otherwise.
+   */
+  const legacyRunStarter = async (triggeredBy: string | null, startedAt: string | null): Promise<string | null> => {
+    if (!triggeredBy) return null;
+    const byId = await store.getUserById(triggeredBy);
+    if (byId) return byId.id;
+    if (!triggeredBy.includes("@") || !startedAt) return null;
+    const byEmail = await store.getUserByEmail(triggeredBy.toLowerCase());
+    return byEmail && Date.parse(byEmail.createdAt) <= Date.parse(startedAt) ? byEmail.id : null;
+  };
   // Phase 11.2 — resuming a decided approval: inline, or on the execution queue when it is in use.
   const approvalResumes = new ApprovalResumeRunner();
   // A timed-out approval whose run cannot continue: the run ends as an error and its paused state is cleared.
@@ -6008,8 +6020,11 @@ export async function createApp(
           budgetSubject: state.budgetSubject ?? budgetSubjectOf(pending.triggeredBy ?? undefined),
           // A run kept to one person's sessions stays so after the approval, whoever decided it.
           ...(typeof state.sessionOwner === "string" && state.sessionOwner ? { sessionOwner: state.sessionOwner } : {}),
-          // v80 — and stays the person's who started it, not the approver's.
-          triggeredByUserId: typeof state.triggeredByUserId === "string" && state.triggeredByUserId ? state.triggeredByUserId : null,
+          // v80 — and stays the person's who started it, not the approver's (a run paused before v80: by its email).
+          triggeredByUserId:
+            typeof state.triggeredByUserId === "string" && state.triggeredByUserId
+              ? state.triggeredByUserId
+              : await legacyRunStarter(pending.triggeredBy ?? null, pending.startedAt ?? null),
           policyActor: actor,
           workflow: resumeWorkflow,
           executionId: job.executionId,
@@ -16443,6 +16458,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       ...(hooks ? { hooks } : {}),
       spendAttempt: context,
       policyActor: enqueuedBy,
+      // v80 — the person who queued it, by id (their email may have changed since).
+      triggeredByUserId: enqueuedBy?.id ?? null,
       elicitationsForWorkflow: true,
       workflow,
       executionId: payload.executionId,

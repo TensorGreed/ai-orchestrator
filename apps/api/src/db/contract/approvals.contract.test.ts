@@ -125,6 +125,9 @@ describeStoreContract("store contract: approvals", (ctx) => {
     await store.saveWorkflowExecutionState({ id: "paused-old-account", workflowId: "wf", status: "waiting_approval", waitingNodeId: "gate", startedAt: before, triggeredBy: "pat@example.com", state: {} });
     await store.saveWorkflowExecutionState({ id: "paused-mine", workflowId: "wf", status: "waiting_approval", waitingNodeId: "gate", startedAt, triggeredBy: "Pat@example.com", state: {} });
     await store.saveExecutionHistory({ id: "run-new-id", workflowId: "wf", status: "waiting_approval", startedAt, triggeredBy: "pat@example.com", triggeredByUserId: "u-other" });
+    // Paused again after Pat approved someone else's run: the paused row names Pat, the run's history names its starter.
+    await store.saveExecutionHistory({ id: "run-repaused", workflowId: "wf", status: "waiting_approval", startedAt, triggeredBy: "pat@example.com", triggeredByUserId: "u-lee" });
+    await store.saveWorkflowExecutionState({ id: "run-repaused", workflowId: "wf", status: "waiting_approval", waitingNodeId: "gate", startedAt, triggeredBy: "pat@example.com", state: {} });
     await store.saveExecutionHistory({ id: "run-mine", workflowId: "wf", status: "waiting_approval", startedAt, triggeredBy: "PAT@example.com" });
     await store.saveExecutionHistory({ id: "run-session", workflowId: "wf", status: "waiting_approval", startedAt, triggeredBy: "lee@example.com" });
     await store.setExecutionSessionOwner("run-session", "u-pat");
@@ -133,7 +136,8 @@ describeStoreContract("store contract: approvals", (ctx) => {
     await store.saveExecutionHistory({ id: "run-team", workflowId: "wf-team", status: "waiting_approval", startedAt, triggeredBy: "lee@example.com" });
     for (const [id, executionId, workflowId] of [
       ["r-mine", "run-mine", "wf"], ["r-session", "run-session", "wf"], ["r-paused", "run-paused-only", "wf"], ["r-other", "run-other", "wf"], ["r-team", "run-team", "wf-team"],
-      ["r-starter", "run-starter", "wf"], ["r-old", "run-old-account", "wf"], ["r-paused-old", "paused-old-account", "wf"], ["r-paused-mine", "paused-mine", "wf"], ["r-new-id", "run-new-id", "wf"]
+      ["r-starter", "run-starter", "wf"], ["r-old", "run-old-account", "wf"], ["r-paused-old", "paused-old-account", "wf"], ["r-paused-mine", "paused-mine", "wf"], ["r-new-id", "run-new-id", "wf"],
+      ["r-repaused", "run-repaused", "wf"]
     ] as const) {
       await store.insertApprovalRequest(request(id, { executionId, workflowId }));
     }
@@ -146,7 +150,7 @@ describeStoreContract("store contract: approvals", (ctx) => {
     // Without the account's creation time, an email alone never counts.
     expect(await ids({ workflowIds: [], ownRunsOnly: { workflowIds: ["wf"], ...pat, userCreatedAt: null } })).toEqual(["r-paused", "r-session", "r-starter"]);
     expect(await ids({ workflowIds: [], ownRunsOnly: { workflowIds: ["wf"], userId: "u-nobody", email: "nobody@example.com", userCreatedAt: "2020-01-01T00:00:00.000Z" } })).toEqual([]);
-    expect(await ids({ workflowIds: ["wf", "wf-team"] })).toHaveLength(10);
+    expect(await ids({ workflowIds: ["wf", "wf-team"] })).toHaveLength(11);
   });
 
   it("a deleted workflow's requests leave scoped lists", async () => {

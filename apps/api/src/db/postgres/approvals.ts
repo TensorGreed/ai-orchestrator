@@ -210,7 +210,7 @@ export async function listApprovalRequests(ctx: PgContext, filter: {
       anyOf.push(
         `(workflow_id = ANY($${ids}::text[]) AND (` +
           `execution_id IN (SELECT id FROM execution_history WHERE workflow_id = ANY($${ids}::text[]) AND ${history}) OR ` +
-          `execution_id IN (SELECT id FROM workflow_executions WHERE workflow_id = ANY($${ids}::text[]) AND ${paused})))`
+          `execution_id IN (SELECT id FROM workflow_executions we WHERE workflow_id = ANY($${ids}::text[]) AND ${paused} AND NOT EXISTS (SELECT 1 FROM execution_history eh WHERE eh.id = we.id))))`
       );
     }
     clauses.push(`(${anyOf.join(" OR ")})`);
