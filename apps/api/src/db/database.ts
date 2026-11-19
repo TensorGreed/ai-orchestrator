@@ -45,6 +45,7 @@ import {
   memorySessionErasureStatements,
   runErasureStatements,
   staffWhere,
+  staffRunStarterWhere,
   subjectRowHoldTargets,
   type ErasureStatement,
   type ErasureTombstoneWrite,
@@ -229,6 +230,7 @@ import {
   type LostJobOutcome,
   type LostJobReasons
 } from "./queue-leases.js";
+import { ownHistoryRunSql } from "./own-runs-sql.js";
 
 type BindParams = unknown[];
 
@@ -3956,6 +3958,10 @@ export class SqliteStore implements Store {
     this.ensureColumn("execution_history", "release_channel", "TEXT");
     // v79 — the person whose session memory the run used.
     this.ensureColumn("execution_history", "session_owner", "TEXT");
+    // v80 — the user id of the person who started the run, and once, for the runs recorded before it, the starter as
+    // migration 80 finds them (db/migrations.ts).
+    this.ensureColumn("execution_history", "triggered_by_user_id", "TEXT");
+    this.backfillExecutionStarters();
     this.ensureColumn("execution_history", "release_version", "INTEGER");
     this.exec(`
       CREATE TABLE IF NOT EXISTS release_gates (
@@ -4631,6 +4637,55 @@ export class SqliteStore implements Store {
   private columnExists(table: string, column: string): boolean {
     const rows = this.queryAll<{ name: string }>(`PRAGMA table_info(${table})`);
     return rows.some((row) => toString(row.name) === column);
+  }
+
+  /**
+   * v80 — once: the runs recorded before their starter's user id was get it, by migration 80's rule (db/migrations.ts):
+   * the first approval request's requester for a run that asked for one (an older build wrote the approver into
+   * `triggered_by` on resume), nobody for a resumed run without one, else `triggered_by`; that names the account with
+   * that user id, or with that email (any case) created before the run started. No account, or two: NULL (nobody's own
+   * run). In batches of 5000 runs, each its own transaction.
+   */
+  private backfillExecutionStarters(): void {
+    if (this.queryOne<{ name: string }>(`SELECT name FROM schema_markers WHERE name = 'execution_starter_backfill'`)) return;
+    let lastRowid = 0;
+    for (;;) {
+      const done = this.transaction(() => {
+        const batch = this.queryAll<{ rowid: number }>(
+          `SELECT rowid FROM execution_history WHERE rowid > ? AND triggered_by_user_id IS NULL ORDER BY rowid LIMIT 5000`,
+          [lastRowid]
+        );
+        if (batch.length === 0) return true;
+        const first = toNumber(batch[0]!.rowid);
+        const last = toNumber(batch[batch.length - 1]!.rowid);
+        const firstRequest = (column: string) =>
+          `(SELECT a.${column} FROM approval_requests a WHERE a.execution_id = h.id ORDER BY a.created_at, a.id LIMIT 1)`;
+        this.exec(
+          `UPDATE execution_history SET triggered_by_user_id = m.user_id
+           FROM (
+             SELECT s.id, CASE WHEN COUNT(u.id) = 1 THEN MIN(u.id) END AS user_id
+             FROM (
+               SELECT h.id, h.started_at,
+                 ${firstRequest("requested_by_user_id")} AS ref_id,
+                 CASE WHEN EXISTS (SELECT 1 FROM approval_requests a WHERE a.execution_id = h.id) THEN ${firstRequest("requested_by")}
+                      WHEN h.trigger_type = 'approval_resume' THEN NULL
+                      ELSE h.triggered_by END AS ref
+               FROM execution_history h
+               WHERE h.rowid BETWEEN ? AND ? AND h.triggered_by_user_id IS NULL
+             ) s
+             JOIN users u ON (s.ref_id IS NOT NULL AND u.id = s.ref_id)
+               OR (s.ref_id IS NULL AND (u.id = s.ref OR (LOWER(u.email) = LOWER(s.ref) AND julianday(u.created_at) <= julianday(s.started_at))))
+             GROUP BY s.id
+           ) m
+           WHERE execution_history.id = m.id AND m.user_id IS NOT NULL`,
+          [first, last]
+        );
+        lastRowid = last;
+        return false;
+      });
+      if (done) break;
+    }
+    this.exec(`INSERT OR IGNORE INTO schema_markers (name, created_at) VALUES ('execution_starter_backfill', ?)`, [new Date().toISOString()]);
   }
 
   private ensureColumn(table: string, column: string, type: string, defaultExpr?: string): void {
@@ -6104,6 +6159,7 @@ export class SqliteStore implements Store {
     durationMs?: number;
     triggerType?: string;
     triggeredBy?: string;
+    triggeredByUserId?: string | null;
     inputJson?: unknown;
     outputJson?: unknown;
     nodeResultsJson?: unknown;
@@ -6196,10 +6252,11 @@ export class SqliteStore implements Store {
           node_results_json,
           custom_data_json,
           error,
-          sensitive
+          sensitive,
+          triggered_by_user_id
         )
         -- 13.3: a run a data-subject deletion erased (its tombstone) is never written back by its executor.
-        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         WHERE NOT EXISTS (SELECT 1 FROM erasure_tombstones WHERE kind = 'run' AND row_id = ?)
         ON CONFLICT(id) DO UPDATE SET
           workflow_id = excluded.workflow_id,
@@ -6210,6 +6267,8 @@ export class SqliteStore implements Store {
           duration_ms = excluded.duration_ms,
           trigger_type = excluded.trigger_type,
           triggered_by = excluded.triggered_by,
+          -- v80: set once; a resume an approver decided keeps who started the run.
+          triggered_by_user_id = COALESCE(execution_history.triggered_by_user_id, excluded.triggered_by_user_id),
           input_json = excluded.input_json,
           output_json = excluded.output_json,
           node_results_json = excluded.node_results_json,
@@ -6232,6 +6291,7 @@ export class SqliteStore implements Store {
         input.customData === undefined ? null : JSON.stringify(input.customData),
         input.error ?? null,
         executionSensitiveValue(input.sensitive),
+        input.triggeredByUserId || null,
         input.id,
         input.sensitive === undefined ? 1 : 0,
         ...(interrupted ? [options.unlessInterruptedWith] : [])
@@ -6294,8 +6354,9 @@ export class SqliteStore implements Store {
         whereParams.push(...input.workflowIds);
       }
       if (own) {
-        anyOf.push(`(workflow_id IN (${own.workflowIds.map(() => "?").join(", ")}) AND (LOWER(triggered_by) = ? OR triggered_by = ? OR session_owner = ?))`);
-        whereParams.push(...own.workflowIds, own.email.toLowerCase(), own.userId, own.userId);
+        const ids = own.workflowIds.map(() => "?").join(", ");
+        whereParams.push(...own.workflowIds);
+        anyOf.push(`(workflow_id IN (${ids}) AND ${ownHistoryRunSql(own, (value) => (whereParams.push(value), "?"))})`);
       }
       whereParts.push(anyOf.length > 0 ? `(${anyOf.join(" OR ")})` : "1 = 0");
     }
@@ -7077,15 +7138,11 @@ export class SqliteStore implements Store {
       if (own) {
         // Of a workflow shared only with the person: the requests of runs they started or that ran in their sessions.
         const ids = own.workflowIds.map(() => "?").join(", ");
+        params.push(...own.workflowIds, ...own.workflowIds);
+        // A paused run has its history row (written when it paused); one without it is nobody's own.
+        const history = ownHistoryRunSql(own, (value) => (params.push(value), "?"));
         anyOf.push(
-          `(workflow_id IN (${ids}) AND (` +
-            `execution_id IN (SELECT id FROM execution_history WHERE workflow_id IN (${ids}) AND (LOWER(triggered_by) = ? OR triggered_by = ? OR session_owner = ?)) OR ` +
-            `execution_id IN (SELECT id FROM workflow_executions WHERE workflow_id IN (${ids}) AND (LOWER(triggered_by) = ? OR triggered_by = ?))))`
-        );
-        params.push(
-          ...own.workflowIds,
-          ...own.workflowIds, own.email.toLowerCase(), own.userId, own.userId,
-          ...own.workflowIds, own.email.toLowerCase(), own.userId
+          `(workflow_id IN (${ids}) AND execution_id IN (SELECT id FROM execution_history WHERE workflow_id IN (${ids}) AND ${history}))`
         );
       }
       clauses.push(`(${anyOf.join(" OR ")})`);
@@ -10213,6 +10270,12 @@ export class SqliteStore implements Store {
   async setExecutionSessionOwner(executionId: string, userId: string): Promise<void> {
     this.exec(`UPDATE execution_history SET session_owner = ? WHERE id = ?`, [userId, executionId]);
     this.persist();
+  }
+
+  /** v80 — see Store.getExecutionStarter. */
+  async getExecutionStarter(executionId: string): Promise<string | null> {
+    const row = this.queryOne<{ triggered_by_user_id: string | null }>(`SELECT triggered_by_user_id FROM execution_history WHERE id = ?`, [executionId]);
+    return row?.triggered_by_user_id ? String(row.triggered_by_user_id) : null;
   }
 
   /** v79 — see Store.getExecutionSessionOwner. */
@@ -15620,7 +15683,7 @@ export class SqliteStore implements Store {
    * 13.3 — replaces a staff member's email with `pseudonym` in every authorship column (db/erasure.ts), in batches of
    * `batch` rows with a turn for the event loop between them. Rows a legal hold keeps are left and counted (`held`).
    */
-  async pseudonymiseStaff(input: { emails: string[]; pseudonym: string; batch?: number }): Promise<{ changed: number; held: number; remaining: number }> {
+  async pseudonymiseStaff(input: { emails: string[]; userIds?: string[]; pseudonym: string; batch?: number }): Promise<{ changed: number; held: number; remaining: number }> {
     const emails = [...new Set(input.emails.map((email) => email.trim().toLowerCase()))].filter(Boolean);
     if (emails.length === 0) return { changed: 0, held: 0, remaining: 0 };
     const batch = Math.max(1, Math.floor(input.batch ?? STAFF_BATCH));
@@ -15639,6 +15702,22 @@ export class SqliteStore implements Store {
       // A column no hold can keep has no held rows (and its "held" predicate takes no parameter).
       if (!column.held) continue;
       const count = this.queryOne<{ n: number }>(`SELECT COUNT(*) AS n FROM ${column.table} t WHERE ${staffWhere(column, emails.length, "held")}`, emails);
+      held += count ? toNumber(count.n) : 0;
+    }
+    // v80 — their runs by the starter's user id too (one started under an email the account had before a rename).
+    const userIds = [...new Set((input.userIds ?? []).filter(Boolean))];
+    if (userIds.length > 0) {
+      const params = [...userIds, input.pseudonym, ...emails];
+      const unheld = staffRunStarterWhere(userIds.length, emails.length, "unheld");
+      for (;;) {
+        const step = this.db
+          .prepare(`UPDATE execution_history SET triggered_by = ? WHERE rowid IN (SELECT t.rowid FROM execution_history t WHERE ${unheld} LIMIT ?)`)
+          .run(input.pseudonym, ...params, batch).changes;
+        changed += step;
+        if (step < batch) break;
+        await yieldToEventLoop();
+      }
+      const count = this.queryOne<{ n: number }>(`SELECT COUNT(*) AS n FROM execution_history t WHERE ${staffRunStarterWhere(userIds.length, emails.length, "held")}`, params);
       held += count ? toNumber(count.n) : 0;
     }
     if (changed > 0) this.persist();

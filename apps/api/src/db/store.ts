@@ -529,6 +529,11 @@ export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentR
   /** v79 — that user, or null for a run that used the workflow's sessions (or an older record). */
   getExecutionSessionOwner(executionId: string): Promise<string | null>;
   /**
+   * v80 — the user id of the person who started the run (saveExecutionHistory's `triggeredByUserId`), or null: a run
+   * no signed-in person started, a run recorded before v80, or no such run.
+   */
+  getExecutionStarter(executionId: string): Promise<string | null>;
+  /**
    * v74 — whether content copied from this run is sensitive: its record is marked, or its run never wrote a final
    * answer (see saveExecutionHistory's `sensitive`). Null when there is no record.
    */
@@ -1303,10 +1308,11 @@ export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentR
   countErasureTombstones(): Promise<number>;
   /**
    * 13.3 — replaces a staff member's email with `pseudonym` in every authorship column (STAFF_AUTHORSHIP_COLUMNS), in
-   * batches. Rows a legal hold keeps are left and counted (`held`); `remaining` counts rows another transaction had
-   * locked (Postgres SKIP LOCKED), to retry.
+   * batches, and (v80) `triggered_by` of the runs whose starter's user id is one of `userIds`. Rows a legal hold keeps
+   * are left and counted (`held`); `remaining` counts rows another transaction had locked (Postgres SKIP LOCKED), to
+   * retry.
    */
-  pseudonymiseStaff(input: { emails: string[]; pseudonym: string; batch?: number }): Promise<{ changed: number; held: number; remaining: number }>;
+  pseudonymiseStaff(input: { emails: string[]; userIds?: string[]; pseudonym: string; batch?: number }): Promise<{ changed: number; held: number; remaining: number }>;
   /** Bytes one workflow's captured candidates use (REPLAY_CAPTURES_MAX_BYTES_PER_WORKFLOW). */
   sumReplayCaptureBytesForWorkflow(workflowId: string): Promise<number>;
   /** The oldest candidates of a workflow with their sizes, oldest first (byte-budget eviction), held ones left out. */
@@ -2088,6 +2094,11 @@ export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentR
     durationMs?: number;
     triggerType?: string;
     triggeredBy?: string;
+    /**
+     * v80 — the user id of the signed-in person who started the run. Set once: a later write without it, or with
+     * another id (a resume an approver decided), keeps the stored one. Read it with getExecutionStarter.
+     */
+    triggeredByUserId?: string | null;
     inputJson?: unknown;
     outputJson?: unknown;
     nodeResultsJson?: unknown;

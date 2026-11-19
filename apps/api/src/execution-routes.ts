@@ -140,19 +140,22 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
    * person, whoever repeats it: never the workflow's sessions or the repeating person's. The person's own repeat
    * continues their sessions; anyone else's runs under the person's key in a namespace of its own (a repeat owner,
    * db/person-sessions.ts), so it reads none of their memory, whatever its session templates say, and writes nowhere
-   * they read. A run whose owner went unrecorded (a canceled, expired or reconciled run) is judged by who started it,
-   * failing closed. A run that used the workflow's sessions is repeated in the repeating person's scope, as a new run
-   * of theirs would be. `null`: the person was deleted, so the run is not repeated (their sessions are gone).
+   * they read. A run whose owner went unrecorded (a canceled, expired or reconciled run) is judged by who started it
+   * (their user id, v80), failing closed: a run that records nobody is repeated in the repeating person's scope, as a run
+   * that used the workflow's sessions is, like a new run of theirs. `null`: the person was deleted, so the run is not repeated (their sessions are gone).
    */
   const repeatSessionScope = async (
-    source: { id: string; triggeredBy?: string | null },
+    source: { id: string },
     user: SafeUser,
     workflow: Workflow,
     executionId: string
   ): Promise<{ sessionOwner?: string } | null> => {
     let owner = await deps.store.getExecutionSessionOwner(source.id);
-    if (!owner && source.triggeredBy) {
-      const starter = await deps.store.getUserByEmail(source.triggeredBy.toLowerCase());
+    if (!owner) {
+      const starterId = await deps.store.getExecutionStarter(source.id);
+      const starter = starterId ? await deps.store.getUserById(starterId) : null;
+      // The person who started it no longer has an account: their sessions are gone, so it is not run again.
+      if (starterId && !starter) return null;
       if (starter) {
         owner = (await deps.sessionOwnerFor({ id: starter.id, email: starter.email, role: starter.role as SafeUser["role"], ...(starter.kind === "service" ? { serviceAccount: true as const } : {}) }, workflow)) ?? null;
       }

@@ -7,7 +7,8 @@ import { expect, test, type Browser, type Page } from "@playwright/test";
  * their run, and the admin's run answers 404 to them. Needs a server with PROJECT_ISOLATION=strict (with role
  * isolation an operator reads every project, so the share is never all they have); skipped otherwise. No model is
  * called. Everything it makes is removed at the end. Also: a deep link opens any workflow the person can read (and
- * only those), and a person with no project of their own lands on the workflows shared with them.
+ * only those), a person with no project of their own lands on the workflows shared with them, and the publish dialog
+ * shows them a gate's verdict without the reasons and figures taken from other people's runs.
  */
 
 const ADMIN_EMAIL = process.env.E2E_ADMIN_EMAIL ?? "admin@example.com";
@@ -430,6 +431,67 @@ test.describe("switching project after opening a shared workflow (either isolati
     } finally {
       for (const id of [shared, own, other]) await page.request.delete(`/api/workflows/${id}`);
       for (const id of [team, home]) await page.request.delete(`/api/projects/${id}`);
+      for (const userId of userIds) await page.request.delete(`/api/users/${userId}`);
+    }
+  });
+});
+
+test.describe("own runs only: releases", () => {
+  test.setTimeout(180_000);
+
+  test("the publish dialog shows them the gate's verdict with a note instead of its reasons and figures", async ({ page, browser }) => {
+    const ollama = await guardLocalModels(page);
+    await signIn(page);
+    const stamp = Date.now();
+    const projectId = `e2e-gate-${stamp}`;
+    const homeId = `e2e-gate-home-${stamp}`;
+    const id = `wf-e2e-gate-shared-${stamp}`;
+    const userIds: string[] = [];
+    let setId: string | null = null;
+    try {
+      for (const [project, name] of [[projectId, "E2E Gate team"], [homeId, "E2E Gate home"]] as const) {
+        expect((await page.request.post("/api/projects", { data: { id: project, name } })).ok()).toBeTruthy();
+      }
+      const created = await page.request.post("/api/workflows", { data: flow(id, projectId, "E2E Gate shared") });
+      expect(created.ok(), await created.text()).toBeTruthy();
+      const set = await page.request.post("/api/eval/datasets", { data: { name: `E2E Gate set ${stamp}`, workflowId: id } });
+      expect(set.ok(), await set.text()).toBeTruthy();
+      setId = ((await set.json()) as { dataset: { id: string } }).dataset.id;
+      const gate = await page.request.put(`/api/workflows/${id}/release-gate`, { data: { enabled: true, datasetIds: [setId] } });
+      expect(gate.ok(), await gate.text()).toBeTruthy();
+      const operator = await makeUser(page, `e2e-gate-${stamp}@example.com`, "operator");
+      userIds.push(operator.id);
+      expect((await page.request.post(`/api/projects/${homeId}/members`, { data: { email: operator.email, role: "viewer" } })).ok()).toBeTruthy();
+      expect((await page.request.post(`/api/workflows/${id}/user-shares`, { data: { email: operator.email, accessLevel: "execute" } })).ok()).toBeTruthy();
+
+      const as = await pageAs(browser, operator.email, operator.password);
+      try {
+        const access = (await (await as.page.request.get(`/api/workflows/${id}/access`)).json()) as { ownRunsOnly?: boolean };
+        test.skip(access.ownRunsOnly !== true, "Needs a server with PROJECT_ISOLATION=strict");
+
+        await as.page.goto(`/?projectId=${encodeURIComponent(homeId)}&workflowId=${encodeURIComponent(id)}&mode=editor`);
+        await expect(as.page.getByLabel("Workflow name")).toHaveValue("E2E Gate shared", { timeout: 60_000 });
+        await as.page.getByRole("button", { name: /^Release: / }).click();
+        const dialog = as.page.getByRole("dialog", { name: "Publish to production" });
+        await expect(dialog.getByText("Blocked", { exact: true })).toBeVisible({ timeout: 30_000 });
+        await expect(dialog.getByText(/come from other people's runs, so only its verdict is shown/)).toBeVisible();
+        await expect(dialog.locator(".release-reasons")).toHaveCount(0);
+        await as.page.screenshot({ path: path.join(SHOT_DIR, "publish-preview-own-runs.png") });
+        expect(as.ollama).toEqual([]);
+      } finally {
+        await as.context.close();
+      }
+
+      // The project's admin still sees why it is blocked.
+      const preview = (await (await page.request.get(`/api/workflows/${id}/publish-preview?version=1`)).json()) as { preview: { reasons: string[]; detailsHidden?: boolean } };
+      expect(preview.preview.reasons.length).toBeGreaterThan(0);
+      expect(preview.preview.detailsHidden).toBeUndefined();
+      expect(ollama).toEqual([]);
+    } finally {
+      await page.request.put(`/api/workflows/${id}/release-gate`, { data: { enabled: false, datasetIds: [] } });
+      await page.request.delete(`/api/workflows/${id}`);
+      if (setId) await page.request.delete(`/api/eval/datasets/${setId}`);
+      for (const project of [projectId, homeId]) await page.request.delete(`/api/projects/${project}`);
       for (const userId of userIds) await page.request.delete(`/api/users/${userId}`);
     }
   });

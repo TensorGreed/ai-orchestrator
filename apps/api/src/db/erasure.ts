@@ -333,6 +333,21 @@ export function staffWhere(column: StaffAuthorshipColumn, emailCount: number, wh
   return which === "unheld" ? `${match} AND NOT ${column.held}` : `${match} AND ${column.held}`;
 }
 
+/** v80 — the authorship column of the runs a staff member started, also matched by the starter's user id. */
+export const STAFF_RUN_STARTER_COLUMN: StaffAuthorshipColumn = STAFF_AUTHORSHIP_COLUMNS.find(
+  (column) => column.table === "execution_history" && column.column === "triggered_by"
+)!;
+
+/**
+ * v80 — the runs whose starter's user id is one of `idCount` ids but whose `triggered_by` is not already the pseudonym
+ * nor one of `emailCount` emails (the email pass, staffWhere, takes those): an email the account had before a rename,
+ * or none. `t` aliases execution_history. Parameters: the ids, the pseudonym, the emails (lower-cased).
+ */
+export function staffRunStarterWhere(idCount: number, emailCount: number, which: "unheld" | "held"): string {
+  const match = `t.triggered_by_user_id IN (${marks(idCount)}) AND (t.triggered_by IS NULL OR (t.triggered_by <> ? AND lower(t.triggered_by) NOT IN (${marks(emailCount)})))`;
+  return which === "unheld" ? `${match} AND NOT ${STAFF_RUN_STARTER_COLUMN.held}` : `${match} AND ${STAFF_RUN_STARTER_COLUMN.held}`;
+}
+
 /** The emails a staff member's rows match (staffWhere compares lower-cased): the request's and the account's, each once. */
 export function staffEmails(email: string, storedEmail?: string | null): string[] {
   return [...new Set([email, ...(storedEmail ? [storedEmail] : [])].map((value) => value.trim().toLowerCase()).filter(Boolean))];
@@ -497,7 +512,17 @@ export async function reapplyErasures(exec: ErasureExecutor, subjectKey: Buffer 
       user.role === "admin" && (user.kind ?? "human") === "human" && !user.disabled_at && !invited.has(String(user.id));
     let admins = users.filter(isSignInAdmin).length;
     for (const user of users) {
-      if (!staff.has(staffTombstoneId(subjectKey, String(user.email)))) continue;
+      const tombstoneId = staffTombstoneId(subjectKey, String(user.email));
+      if (!staff.has(tombstoneId)) continue;
+      // v80 — their runs by the starter's user id too (one started under an email the account had before a rename).
+      const pseudonym = staffPseudonym(tombstoneId);
+      const byStarter = `t.triggered_by_user_id = ? AND (t.triggered_by IS NULL OR t.triggered_by <> ?)`;
+      report.rowsChanged += await exec.run(
+        `UPDATE execution_history AS t SET triggered_by = ? WHERE ${byStarter} AND NOT ${STAFF_RUN_STARTER_COLUMN.held}`,
+        [pseudonym, String(user.id), pseudonym]
+      );
+      const keptRuns = await exec.all(`SELECT COUNT(*) AS n FROM execution_history t WHERE ${byStarter} AND ${STAFF_RUN_STARTER_COLUMN.held}`, [String(user.id), pseudonym]);
+      report.rowsKept += Number(keptRuns[0]?.n ?? 0);
       if (isSignInAdmin(user)) {
         if (admins <= 1) {
           report.rowsKept += 1;

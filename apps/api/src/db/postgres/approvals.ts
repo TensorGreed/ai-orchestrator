@@ -15,6 +15,7 @@ import type {
 import type { ApprovalReadScope, ApprovalRequestInsert, ApprovalRequestRecord } from "../database.js";
 import type { ApprovalDecisionInput, QueueClaimFence, Store } from "../store.js";
 import { QueueClaimLostError } from "../queue-leases.js";
+import { ownHistoryRunSql } from "../own-runs-sql.js";
 import { claimExecutionForResumeOn, releaseExecutionClaimOn, withQueueClaim } from "./executions.js";
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
@@ -198,12 +199,15 @@ export async function listApprovalRequests(ctx: PgContext, filter: {
     }
     if (own) {
       // Of a workflow shared only with the person: the requests of runs they started or that ran in their sessions.
-      params.push(own.workflowIds, own.email.toLowerCase(), own.userId);
-      const [ids, email, userId] = [params.length - 2, params.length - 1, params.length];
+      params.push(own.workflowIds);
+      const ids = params.length;
+      // A paused run has its history row (written when it paused); one without it is nobody's own.
+      const history = ownHistoryRunSql(own, (value) => {
+        params.push(value);
+        return `$${params.length}::text`;
+      });
       anyOf.push(
-        `(workflow_id = ANY($${ids}::text[]) AND (` +
-          `execution_id IN (SELECT id FROM execution_history WHERE workflow_id = ANY($${ids}::text[]) AND (LOWER(triggered_by) = $${email} OR triggered_by = $${userId} OR session_owner = $${userId})) OR ` +
-          `execution_id IN (SELECT id FROM workflow_executions WHERE workflow_id = ANY($${ids}::text[]) AND (LOWER(triggered_by) = $${email} OR triggered_by = $${userId}))))`
+        `(workflow_id = ANY($${ids}::text[]) AND execution_id IN (SELECT id FROM execution_history WHERE workflow_id = ANY($${ids}::text[]) AND ${history}))`
       );
     }
     clauses.push(`(${anyOf.join(" OR ")})`);

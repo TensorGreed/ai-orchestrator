@@ -359,7 +359,7 @@ import {
 import { DeliveryDedupe } from "./services/delivery-dedupe.js";
 import { acceptSlackEvent } from "./services/slack-intake.js";
 import { LocalRunEvents, openRunRelay, resultFromPersistedRun, RunEventPublisher, type PersistedRun, type RunEventName } from "./services/run-event-relay.js";
-import type { RedactedNodeEvent, RunWorkflowExecutionInput, WorkflowExecutionEventHooks } from "./run-types.js";
+import { runStarterId, type RedactedNodeEvent, type RunWorkflowExecutionInput, type WorkflowExecutionEventHooks } from "./run-types.js";
 import type { WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import { createRunAccess, type RunAccessDenial } from "./run-access.js";
 import { ProjectNotEmptyError, ReleaseGateEnforcedError, StoreReferenceMissingError } from "./db/store-errors.js";
@@ -2505,8 +2505,11 @@ export async function createApp(
       if (meta.phase === "final") runTraceIds.delete(meta.executionId);
     }
   };
-  const persistExecutionHistoryRecordUnsettled = async (record: ExecutionHistoryRecord, meta: PersistExecutionHistoryMeta): Promise<boolean> => {
+  const persistExecutionHistoryRecordUnsettled = async (given: ExecutionHistoryRecord, meta: PersistExecutionHistoryMeta): Promise<boolean> => {
     if (meta.phase === "final") await progressWrites.settle(meta.executionId);
+    // v80 — every write of a run that a person started says who (the store keeps the first one).
+    const starter = given.triggeredByUserId ?? runStarters.get(meta.executionId);
+    const record: ExecutionHistoryRecord = starter ? { ...given, triggeredByUserId: starter } : given;
     const active = activeExecutions.get(meta.executionId);
     // A stopped run keeps the canceled record the cancel route wrote. A
     // timed-out run is still saved: it ends as an error with its node results.
@@ -2601,6 +2604,14 @@ export async function createApp(
   const runReleases = new Map<string, { channel: ReleaseChannel; version: number | null }>();
   // v79 — the person a run's session memory was kept to, recorded on its history so a retry or a replay keeps it.
   const runSessionOwners = new Map<string, string>();
+  // v80 — the person who started a run (their user id), recorded with each of its history writes until the final one.
+  const runStarters = new Map<string, string>();
+  const noteRunStarter = (executionId: string | undefined, starter: string | null) => {
+    if (!executionId || !starter) return;
+    runStarters.delete(executionId);
+    if (runStarters.size >= 5_000) runStarters.delete(runStarters.keys().next().value!);
+    runStarters.set(executionId, starter);
+  };
 
   // The run's trace span (only while tracing is on): it covers the host's work around the engine as well, and the
   // engine's node, agent and tool spans are its children.
@@ -2642,7 +2653,9 @@ export async function createApp(
     const channel: ReleaseChannel = input.channel ?? "draft";
     const releaseVersion = channel === "production" ? (input.releaseVersion !== undefined ? input.releaseVersion : releaseService.versionOf(input.workflow)) : null;
     // Phase 15.4 — the run's history records which published version it ran, so a retry runs that version again.
+    const starter = runStarterId(input);
     if (input.executionId && !input.replay) {
+      noteRunStarter(input.executionId, starter);
       if (runReleases.size >= 5_000) runReleases.delete(runReleases.keys().next().value!);
       runReleases.set(input.executionId, { channel, version: releaseVersion });
       if (input.sessionOwner) {
@@ -2890,7 +2903,9 @@ export async function createApp(
                 // Who the run's budgets are matched against, kept for the resumed part (not the approver).
                 budgetSubject: input.budgetSubject ?? (({ userEmail, userId }) => ({ userEmail, userId }))(runBudgetContext(input)),
                 // Whose sessions the run uses, so the resumed part (decided by someone else) reads the same ones.
-                ...(input.sessionOwner ? { sessionOwner: input.sessionOwner } : {})
+                ...(input.sessionOwner ? { sessionOwner: input.sessionOwner } : {}),
+                // v80 — and who started it, so the run stays theirs after someone else decides.
+                ...(starter ? { triggeredByUserId: starter } : {})
               })
             }, queueFence ? { fence: queueFence } : {});
             if (!pausedHere) {
@@ -3312,6 +3327,14 @@ export async function createApp(
     /** 12.6 — a gateway call's run: its usage is the client's and counts toward the toolset's project. */
     gatewayUsage?: RunWorkflowExecutionInput["gatewayUsage"];
   }) => {
+    try {
+      await persistExecutionHistoryOnce(input);
+    } finally {
+      // The record has it now; a resume notes it again from the paused state.
+      runStarters.delete(input.executionId);
+    }
+  };
+  const persistExecutionHistoryOnce = async (input: Parameters<typeof persistExecutionHistory>[0]) => {
     if (input.result.status === "waiting_approval") {
       // The resumed run is recorded apart: what the children spent so far is recorded now.
       await subWorkflowSpend.take(input.executionId)?.closeDetached();
@@ -3995,6 +4018,7 @@ export async function createApp(
             completedAt: new Date().toISOString(),
             triggerType: run.triggerType,
             triggeredBy: run.triggeredBy,
+            triggeredByUserId: runStarterId(run),
             // A run that threw has no redaction of what it revealed: a workflow with a Reveal node keeps no input.
             ...(hasRevealNode(run.workflow) ? {} : { inputJson: redactSensitiveInput(spec.history.requestInput) }),
             customData: spec.history.customData,
@@ -4284,6 +4308,7 @@ export async function createApp(
           startedAt: new Date().toISOString(),
           triggerType: spec.run.triggerType,
           triggeredBy: spec.run.triggeredBy,
+          triggeredByUserId: runStarterId(spec.run),
           // Held back for a workflow with a Reveal node, as the run's progress does (see createProgressTrackingHooks).
           ...(hasRevealNode(spec.run.workflow) ? {} : { inputJson: redactSensitiveInput(tracked.requestInput) }),
           customData: tracked.customData,
@@ -4304,6 +4329,7 @@ export async function createApp(
             completedAt: new Date().toISOString(),
             triggerType: spec.run.triggerType,
             triggeredBy: spec.run.triggeredBy,
+            triggeredByUserId: runStarterId(spec.run),
             inputJson: redactSensitiveInput((spec.progress ?? spec.history).requestInput),
             customData: (spec.progress ?? spec.history).customData,
             error
@@ -4323,7 +4349,8 @@ export async function createApp(
       // The history input travels redacted, as the history stores it (the worker only writes it there).
       const dispatched: DispatchedRunSpec = {
         ...spec,
-        run: { ...run, policyActor: dispatchedPolicyActor(run.policyActor) },
+        // v80 — who started the run crosses as an id, whatever the worker makes of the policy actor.
+        run: { ...run, policyActor: dispatchedPolicyActor(run.policyActor), triggeredByUserId: runStarterId(run) },
         progress: spec.progress ? { ...spec.progress, requestInput: redactSensitiveInput(spec.progress.requestInput) } : spec.progress,
         history: { ...spec.history, requestInput: redactSensitiveInput(spec.history.requestInput) }
       };
@@ -4762,14 +4789,11 @@ export async function createApp(
     // Who started a run (its history, or the paused state of a run that has none yet) and whose sessions it used.
     getRunOwner: async (executionId) => {
       const history = await store.getExecutionHistory(executionId);
-      const paused = history ? null : await store.getWorkflowExecutionState(executionId);
-      const started = history ?? paused;
-      if (!started) return null;
-      // A paused run keeps whose sessions it uses in its state until its history records it.
-      const pausedOwner = paused ? asRecord(paused.state).sessionOwner : undefined;
-      const sessionOwner = (await store.getExecutionSessionOwner(executionId)) ?? (typeof pausedOwner === "string" ? pausedOwner : null);
-      return { triggeredBy: started.triggeredBy ?? null, sessionOwner };
-    }
+      // A paused run has its history row (written when it paused); one without it is nobody's own, as the stores'
+      // approvals lists judge it (db/own-runs-sql.ts).
+      if (!history) return (await store.getWorkflowExecutionState(executionId)) ? { triggeredByUserId: null, sessionOwner: null } : null;
+      return { triggeredByUserId: await store.getExecutionStarter(executionId), sessionOwner: await store.getExecutionSessionOwner(executionId) };
+    },
   });
   // Phase 9.1 — built-in persistent vector store. A run sees the knowledge
   // bases of its own project and the shared ones without a project; any other
@@ -5768,6 +5792,30 @@ export async function createApp(
     clearInterval(credentialExpiryTimer);
   });
 
+  /**
+   * v80 — who started a paused run that recorded no starter's user id: its history's (migration 80 set it on the runs
+   * recorded before, or left it empty when it could tell nobody). A run paused with no history row follows migration
+   * 80's rule: its first approval request's requester (`firstRequester`, by user id, else by email) or, with no request,
+   * the paused row's `triggeredBy`; that names the account with that user id, or with that email when the account is
+   * older than the run.
+   */
+  const pausedRunStarter = async (
+    executionId: string,
+    hasHistory: boolean,
+    firstRequester: { userId: string | null; email: string | null } | null,
+    triggeredBy: string | null,
+    startedAt: string | null
+  ): Promise<string | null> => {
+    if (hasHistory) return await store.getExecutionStarter(executionId);
+    if (firstRequester?.userId) return (await store.getUserById(firstRequester.userId))?.id ?? null;
+    const ref = firstRequester ? firstRequester.email : triggeredBy;
+    if (!ref) return null;
+    const byId = await store.getUserById(ref);
+    if (byId) return byId.id;
+    if (!ref.includes("@") || !startedAt) return null;
+    const byEmail = await store.getUserByEmail(ref);
+    return byEmail && Date.parse(byEmail.createdAt) <= Date.parse(startedAt) ? byEmail.id : null;
+  };
   // Phase 11.2 — resuming a decided approval: inline, or on the execution queue when it is in use.
   const approvalResumes = new ApprovalResumeRunner();
   // A timed-out approval whose run cannot continue: the run ends as an error and its paused state is cleared.
@@ -5956,6 +6004,10 @@ export async function createApp(
         // 12.6 — a run an MCP gateway call started resumes under the same toolset/client Guard stack (pinned versions),
         // and its history keeps the record, so a retry or replay of it applies the stack again.
         const resumeHistory = await store.getExecutionHistory(job.executionId);
+        // Who started the run: its first approval request's requester (an older build wrote the approver into a
+        // resumed run's triggered_by, also of the paused row when it paused again), else as the paused row records it.
+        const [firstRequest] = await store.listApprovalRequestsForExecution(job.executionId);
+        const startedBy = firstRequest?.requestedBy ?? pending.triggeredBy ?? resumeHistory?.triggeredBy ?? undefined;
         const gatewayGuard =
           parseGatewayGuardStack(state.gatewayGuard) ?? parseGatewayGuardStack(asRecord(resumeHistory?.customData)[GATEWAY_GUARD_CUSTOM_DATA_KEY]);
         // 12.6 — and its usage stays the gateway client's and counts toward the toolset's project (not the approver's).
@@ -5977,11 +6029,23 @@ export async function createApp(
           budgetSubject: state.budgetSubject ?? budgetSubjectOf(pending.triggeredBy ?? undefined),
           // A run kept to one person's sessions stays so after the approval, whoever decided it.
           ...(typeof state.sessionOwner === "string" && state.sessionOwner ? { sessionOwner: state.sessionOwner } : {}),
+          // v80 — and stays the person's who started it, not the approver's (a run paused before v80: see pausedRunStarter).
+          triggeredByUserId:
+            typeof state.triggeredByUserId === "string" && state.triggeredByUserId
+              ? state.triggeredByUserId
+              : await pausedRunStarter(
+                  job.executionId,
+                  resumeHistory !== null,
+                  firstRequest ? { userId: firstRequest.requestedByUserId, email: firstRequest.requestedBy } : null,
+                  pending.triggeredBy ?? null,
+                  pending.startedAt ?? null
+                ),
           policyActor: actor,
           workflow: resumeWorkflow,
           executionId: job.executionId,
           triggerType: "approval_resume",
-          triggeredBy: actedBy,
+          // "Started by" stays who started the run; the approver is recorded on the decision (approval_requests).
+          triggeredBy: startedBy,
           // The resumed run is its own span, linked (not parented) to the node that paused, hours or days earlier.
           ...(readTraceCarrier(state.traceContext) ? { traceLinks: [readTraceCarrier(state.traceContext)!] } : {}),
           resumeState: { ...state, workflow: resumeWorkflow },
@@ -5999,7 +6063,7 @@ export async function createApp(
           workflow: state.workflow,
           result,
           triggerType: "approval_resume",
-          triggeredBy: actedBy,
+          triggeredBy: startedBy,
           ...(resumeCustomData ? { customData: { ...(result.customData ?? {}), ...resumeCustomData } } : {}),
           ...(gatewayUsage ? { gatewayUsage } : {}),
           requestInput: {
@@ -6049,7 +6113,8 @@ export async function createApp(
         // error); the attempts are for a lost worker, re-run only if nothing completed since the resume started.
         maxAttempts: 3,
         triggerType: "approval_resume",
-        triggeredBy: job.actedBy,
+        // The run's starter, as the run records them; the approver is on the decision.
+        triggeredBy: pending?.triggeredBy ?? job.actedBy,
         // The queue's stuck-job threshold follows the run's own timeout.
         executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS,
         resume: job
@@ -6120,6 +6185,11 @@ export async function createApp(
     access: async (user, workflowId, permission) => await runAccess.workflow(user, workflowId, permission),
     // Release requests carry replay results of other people's runs: not for someone who sees only their own runs.
     readableWorkflowIds: async (user) => await runAccess.runVisibleWorkflowIds(user),
+    // Nor do the publish preview's and the release history's gate details.
+    seesAllRuns: async (user, workflowId) => {
+      const releasedWorkflow = await store.getWorkflow(workflowId);
+      return !releasedWorkflow || await runAccess.seesAllRuns(user, releasedWorkflow);
+    },
     audit: async (event) => {
       await auditService.record(event);
     },
@@ -13257,12 +13327,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         return { error: deactivated ? DEACTIVATED_MESSAGE : "Form not found" };
       }
       const cfg = asRecord(found.node.config);
+      // A signed-in submission is the submitter's own run, kept to their sessions where theirs are kept apart.
+      let submitter: { triggeredByUserId?: string; sessionOwner?: string } = {};
       if (cfg.authMode === "session") {
         const user = await requireRole(request, reply, ["viewer"]);
         if (!user) return;
         // Session forms are for people who can see the workflow's project.
         const access = await runAccess.workflow(user, found.workflow.id, "workflow:read", "Form");
         if (!access.ok) return denyRunAccess(reply, access);
+        submitter = { triggeredByUserId: user.id, ...await sessionOwnerOptionFor(user, found.workflow) };
       }
       // Production's version has unfinished settings: the form still shows, a submission starts no run.
       const paused = await releaseService.pausedRefusal(found.workflow);
@@ -13286,6 +13359,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
               submitted_at: new Date().toISOString(),
               ...submission
             },
+            ...submitter,
             executionId,
             triggerType: "form",
             triggeredBy: "form-submitter"
@@ -13318,14 +13392,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const cfg = asRecord(chatNode.config);
       const authMode = typeof cfg.authMode === "string" ? cfg.authMode : "public";
       // A signed-in chat by a viewer, an operator or a share-only reader keeps its session memory to that person.
-      let chatSessionOwner: { sessionOwner?: string } = {};
+      let chatSessionOwner: { sessionOwner?: string; triggeredByUserId?: string } = {};
       if (authMode === "session") {
         const user = await requireRole(request, reply, ["viewer"]);
         if (!user) return;
         // Session chats are for people who can see the workflow's project.
         const access = await runAccess.workflow(user, workflow.id, "workflow:read");
         if (!access.ok) return denyRunAccess(reply, access);
-        chatSessionOwner = await sessionOwnerOptionFor(user, workflow);
+        // The signed-in person's run (v80): it counts among their own runs.
+        chatSessionOwner = { ...await sessionOwnerOptionFor(user, workflow), triggeredByUserId: user.id };
       } else if (authMode === "bearer") {
         const secretRef = toSecretReference(cfg.secretRef);
         const secret = await secretService.resolveSecret(secretRef);
@@ -16400,6 +16475,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       ...(hooks ? { hooks } : {}),
       spendAttempt: context,
       policyActor: enqueuedBy,
+      // v80 — the person who queued it, by id (their email may have changed since).
+      triggeredByUserId: enqueuedBy?.id ?? null,
       elicitationsForWorkflow: true,
       workflow,
       executionId: payload.executionId,

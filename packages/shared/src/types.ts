@@ -649,6 +649,11 @@ export interface WorkflowExecutionState {
    */
   sessionOwner?: string;
   /**
+   * v80 — the user id of the person who started the run, so it stays theirs after someone else decides (the resumed
+   * part records it on the run's history). Written and read only by the API.
+   */
+  triggeredByUserId?: string;
+  /**
    * Phase 16 — the run's data labels, beside `nodeOutputs`: the input's
    * labels, every completed node's labels, and whether labels are tracked
    * (stored and scanned). A resumed run carries on with them.

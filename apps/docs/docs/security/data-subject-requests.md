@@ -68,7 +68,8 @@ can assign a role that grants it.
 
 - **Someone whose data flows through runs** (end user): an email, customer id, phone number or other identifier.
 - **A staff member**: an L2M user's email, in any case. The export adds their account, SSO identities, project roles, API key
-  metadata (never the key), the runs they started, the workflows they created, the approvals they asked for or decided,
+  metadata (never the key), the runs they started (by their email, or by their user id: also a run started under an
+  email the account had before a rename), the workflows they created, the approvals they asked for or decided,
   their eval runs and releases, and their own audit log entries. Password hashes and secrets are never included.
 
 Options:
@@ -175,7 +176,8 @@ releases record them, and how many audit-log rows they have. On confirmation:
 
 - their email is replaced with a pseudonym (`erased-user-` and 8 hex characters, the same for every row) in every column
   that records who started, wrote, shared, decided or changed something (runs, usage, approvals, workflows, versions,
-  releases, gates, rules, MCP servers and policies, destinations, variables, legal holds, requests and more);
+  releases, gates, rules, MCP servers and policies, destinations, variables, legal holds, requests and more), and in
+  the "started by" of the runs that record their user id as the starter;
 - their account is deleted the way **Settings → Users → Delete** does: sessions, API keys, MFA, SSO identities, project
   roles, invites, workflow shares, their MCP sign-ins and the agent memory kept to them (except what a legal hold
   keeps) go with it;

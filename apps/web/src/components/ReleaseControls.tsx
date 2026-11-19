@@ -266,6 +266,9 @@ export function PublishDialog({ workflowId, state, canPublish, isAdmin, onClose,
                   ))}
                 </ul>
               )}
+              {preview.detailsHidden && (
+                <p className="settings-help">The gate's reasons and figures come from other people's runs, so only its verdict is shown here.</p>
+              )}
               {verdict === "ungated" && (
                 <p className="settings-help">
                   This workflow has no release gate, so any saved version publishes.
