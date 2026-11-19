@@ -613,7 +613,16 @@ describe("auth + rbac API", () => {
         user_prompt: "user"
       }
     });
-    expect(operatorWebhookExecute.statusCode).toBe(403);
+    // Operators run the saved workflow with their input (they have workflow:execute); variable overrides stay a builder's.
+    expect(operatorWebhookExecute.statusCode).not.toBe(401);
+    expect(operatorWebhookExecute.statusCode).not.toBe(403);
+    const operatorWebhookVariables = await context.app.inject({
+      method: "POST",
+      url: "/api/webhooks/execute",
+      headers: { cookie: sessionCookies.operator },
+      payload: { workflow_id: "wf-builder-create", variables: { a: "b" } }
+    });
+    expect(operatorWebhookVariables.statusCode).toBe(403);
 
     const adminCreateAdmin = await context.app.inject({
       method: "POST",

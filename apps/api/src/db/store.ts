@@ -1500,6 +1500,14 @@ export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentR
     projectId: string;
     accessLevel: string;
   }>>;
+  /** The workflows shared to a project, each with its name, owning project and last save (one query). */
+  listWorkflowSummariesSharedToProject(projectId: string): Promise<Array<{
+    workflowId: string;
+    ownerProjectId: string;
+    accessLevel: WorkflowShareAccessLevel;
+    name: string;
+    updatedAt: string | null;
+  }>>;
   upsertWorkflowShare(input: {
     workflowId: string;
     projectId: string;

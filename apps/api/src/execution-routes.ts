@@ -41,6 +41,7 @@ import {
   normalizeSessionId,
   retryAfterSeconds
 } from "./run-helpers.js";
+import { editorRunOptionsError, editorRunOptionsRefused } from "./run-editor-options.js";
 import { startSseHeartbeat, type SseSessionWatch } from "./sse-heartbeat.js";
 import { traceUrlFor } from "./telemetry/trace-url.js";
 import { maskRunEvent, maskRunNodeData, runViewHidesNodeData } from "./response-run-view.js";
@@ -161,7 +162,8 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
   } = deps;
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/execute", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
+    // Operators (and execute shares) run the saved workflow with their input; the editor's options are checked below.
+    const user = await requireRole(request, reply, ["operator"]);
     if (!user) {
       return;
     }
@@ -215,6 +217,11 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
         error: "Invalid execution payload",
         details: parsed.error.issues
       };
+    }
+    const refusedOptions = editorRunOptionsRefused(user.role, request.body);
+    if (refusedOptions.length > 0) {
+      reply.code(403);
+      return editorRunOptionsError(refusedOptions);
     }
     const prepared = await prepareWorkflowExecutionPayload(parsed.data, reply, user);
     if (!prepared) {
@@ -271,7 +278,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/execute/stream", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
+    const user = await requireRole(request, reply, ["operator"]);
     if (!user) {
       return;
     }
@@ -296,6 +303,11 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
         error: "Invalid execution payload",
         details: parsed.error.issues
       };
+    }
+    const refusedOptions = editorRunOptionsRefused(user.role, request.body);
+    if (refusedOptions.length > 0) {
+      reply.code(403);
+      return editorRunOptionsError(refusedOptions);
     }
     const prepared = await prepareWorkflowExecutionPayload(parsed.data, reply, user);
     if (!prepared) {

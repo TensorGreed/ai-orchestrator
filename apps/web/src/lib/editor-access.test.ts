@@ -1,12 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { editorAccess } from "./editor-access";
+import { editorAccess, roleMayUseEditorRunOptions } from "./editor-access";
 
 const full = { workflowId: "wf", canEdit: true, canRun: true, canShare: true };
 
 describe("editorAccess", () => {
-  it("turns editing and running off for viewers and operators, whatever the workflow allows", () => {
-    expect(editorAccess("viewer", full)).toEqual({ editDisabledReason: expect.stringMatching(/viewer role/), runDisabledReason: expect.stringMatching(/builder role/) });
-    expect(editorAccess("operator", null)).toEqual({ editDisabledReason: expect.stringMatching(/operator role/), runDisabledReason: expect.stringMatching(/builder role/) });
+  it("turns editing off for viewers and operators; viewers never run, operators run where they may", () => {
+    expect(editorAccess("viewer", full)).toEqual({ editDisabledReason: expect.stringMatching(/viewer role/), runDisabledReason: expect.stringMatching(/operator role or higher/) });
+    expect(editorAccess("operator", full)).toEqual({ editDisabledReason: expect.stringMatching(/operator role/), runDisabledReason: null });
+    expect(editorAccess("operator", { ...full, canRun: false }).runDisabledReason).toMatch(/permission to run/);
+    expect(editorAccess("operator", null).runDisabledReason).toMatch(/Checking/);
+  });
+
+  it("lets only builders and admins use the editor's run options", () => {
+    expect(["admin", "builder", "operator", "viewer"].map((role) => roleMayUseEditorRunOptions(role as "admin"))).toEqual([true, true, false, false]);
   });
 
   it("follows the workflow's access for builders and admins", () => {

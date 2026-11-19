@@ -75,6 +75,8 @@ import {
   previewWorkflowImport,
   fetchWorkflowAccess,
   fetchWorkflowsSharedWithMe,
+  fetchProjectSharedWorkflows,
+  type ProjectSharedWorkflowItem,
   type SharedWorkflowItem,
   type WorkflowImportPreview,
   listApprovals,
@@ -180,7 +182,7 @@ import { WorkflowCardMenu } from "./components/WorkflowCardMenu";
 import { WorkflowCanvasArea, type ImportPanelBinding } from "./components/WorkflowCanvasArea";
 import { ExternalImportDialog, type ExternalImportSource } from "./components/ExternalImportDialog";
 import { ImportConflictDialog, type ImportConflictChoice } from "./components/ImportConflictDialog";
-import { editorAccess, type WorkflowAccessView } from "./lib/editor-access";
+import { editorAccess, roleMayUseEditorRunOptions, type WorkflowAccessView } from "./lib/editor-access";
 import { SecretSaveWarnings } from "./components/SecretSaveWarnings";
 import { DraftWarnings } from "./components/DraftWarnings";
 import { WebhookTestPayloadDialog } from "./components/WebhookTestPayloadDialog";
@@ -1473,15 +1475,19 @@ function StudioApp() {
   );
   /** v78 — workflows shared with you, from any project (the dashboard lists them under "Shared with you"). */
   const [sharedWithMe, setSharedWithMe] = useState<SharedWorkflowItem[]>([]);
+  /** Workflows other projects share to the active project ("Shared with this project"). */
+  const [sharedWithProject, setSharedWithProject] = useState<ProjectSharedWorkflowItem[]>([]);
   const currentWorkflowExists =
-    workflowList.some((item) => item.id === currentWorkflow.id) || sharedWithMe.some((item) => item.id === currentWorkflow.id);
+    workflowList.some((item) => item.id === currentWorkflow.id) ||
+    sharedWithMe.some((item) => item.id === currentWorkflow.id) ||
+    sharedWithProject.some((item) => item.id === currentWorkflow.id);
   const canManageWorkflows = authUser?.role === "admin" || authUser?.role === "builder";
   const canManageSecrets = authUser?.role === "admin" || authUser?.role === "builder";
   // What you may do with the open workflow: viewers and operators open it read-only; a builder may only view a
   // workflow shared with them (or in a project where their role is view-only). Asked for each saved workflow.
   const [workflowAccess, setWorkflowAccess] = useState<WorkflowAccessView | null>(null);
   useEffect(() => {
-    if (!authUser || !currentWorkflowExists || (authUser.role !== "admin" && authUser.role !== "builder")) {
+    if (!authUser || !currentWorkflowExists || authUser.role === "viewer") {
       setWorkflowAccess(null);
       return;
     }
@@ -2337,15 +2343,19 @@ function StudioApp() {
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
-      const [workflowItems, projectPayload, folderPayload, sharedPayload] = await Promise.all([
+      const [workflowItems, projectPayload, folderPayload, sharedPayload, projectSharedPayload] = await Promise.all([
         fetchWorkflows({ projectId: activeProjectId }),
         fetchProjects().catch(() => ({ projects: [] })),
         fetchFolders(activeProjectId).catch(() => ({ folders: [] })),
-        fetchWorkflowsSharedWithMe().catch(() => ({ workflows: [] }))
+        fetchWorkflowsSharedWithMe().catch(() => ({ workflows: [] })),
+        fetchProjectSharedWorkflows(activeProjectId).catch(() => ({ workflows: [] }))
       ]);
 
       setWorkflowList(workflowItems);
-      setSharedWithMe(sharedPayload.workflows.filter((item) => item.projectId !== activeProjectId));
+      setSharedWithProject(projectSharedPayload.workflows);
+      // A workflow listed as shared with this project is not listed again as shared with you.
+      const projectSharedIds = new Set(projectSharedPayload.workflows.map((item) => item.id));
+      setSharedWithMe(sharedPayload.workflows.filter((item) => item.projectId !== activeProjectId && !projectSharedIds.has(item.id)));
       setProjects(projectPayload.projects ?? []);
       setFolders(folderPayload.folders ?? []);
     } catch (loadError) {
@@ -3448,11 +3458,16 @@ function StudioApp() {
       user_prompt?: string;
       record?: boolean;
     } = {
-      sessionId,
-      usePinnedData: true
+      sessionId
     };
 
-    if (recordMcp) {
+    // Operators run the saved workflow with their input: pinned data, recording and partial runs are the editor's.
+    const editorOptions = roleMayUseEditorRunOptions(authUser?.role);
+    if (editorOptions) {
+      payload.usePinnedData = true;
+    }
+
+    if (recordMcp && editorOptions) {
       payload.record = true;
     }
 
@@ -3476,7 +3491,7 @@ function StudioApp() {
     }
 
     return payload;
-  }, [executionResult, editorPrompts.sendSystemPrompt, editorPrompts.sendUserPrompt, recordMcp, sessionId, systemPrompt, userPrompt]);
+  }, [authUser?.role, executionResult, editorPrompts.sendSystemPrompt, editorPrompts.sendUserPrompt, recordMcp, sessionId, systemPrompt, userPrompt]);
 
   const buildWebhookExecutionPayload = useCallback(() => {
     const payload: {
@@ -3522,6 +3537,15 @@ function StudioApp() {
 
   const handleExecute = useCallback(async (options?: { startNodeId?: string; runMode?: "workflow" | "single_node" }) => {
     let trace: TraceStreamHandlers | null = null;
+    if (runDisabledReason) {
+      setError(runDisabledReason);
+      return;
+    }
+    // Running one node or from a node is the editor's; operators run the whole saved workflow.
+    if ((options?.startNodeId || options?.runMode === "single_node") && !roleMayUseEditorRunOptions(authUser?.role)) {
+      setError("Running one node, or from a node, needs the builder role. Run the whole workflow instead.");
+      return;
+    }
     try {
       setBusy(true);
       setRunningExecutionId(null);
@@ -3569,6 +3593,8 @@ function StudioApp() {
     isDebugMode,
     persistForRun,
     refreshExecutionHistory,
+    runDisabledReason,
+    authUser?.role,
   ]);
 
   const handleWebhookExecute = useCallback(async (testPayload: Record<string, unknown>) => {
@@ -5505,6 +5531,34 @@ function StudioApp() {
                     );
                   })}
                 </div>
+              )}
+
+              {sharedWithProject.length > 0 && (
+                <section className="shared-with-me" aria-labelledby="shared-with-project-title">
+                  <h3 id="shared-with-project-title" className="shared-with-me-title">
+                    Shared with this project
+                  </h3>
+                  <ul className="shared-with-me-list">
+                    {sharedWithProject.map((item) => (
+                      <li key={item.id}>
+                        <button
+                          type="button"
+                          className="shared-with-me-item"
+                          onClick={() => {
+                            void loadWorkflowById(item.id);
+                            setActiveMode("editor");
+                          }}
+                        >
+                          <span className="shared-with-me-name">{item.name}</span>
+                          <span className="settings-chip">{item.effectiveAccess === "execute" ? "Can view and run" : "Can view"}</span>
+                          <span className="settings-muted">
+                            from {projects.find((project) => project.id === item.ownerProjectId)?.name ?? item.ownerProjectId}
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
               )}
 
               {sharedWithMe.length > 0 && (

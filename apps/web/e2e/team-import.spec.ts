@@ -210,4 +210,52 @@ test.describe("import and team", () => {
       for (const userId of userIds) await page.request.delete(`/api/users/${userId}`);
     }
   });
+
+  test("an operator runs the saved workflow from the editor, and a project lists the workflows shared to it", async ({ page, browser }) => {
+    const ollama = await guardLocalModels(page);
+    await signIn(page);
+    const stamp = Date.now();
+    const id = `wf-e2e-ops-${stamp}`;
+    const projectId = `e2e-ops-${stamp}`;
+    const userIds: string[] = [];
+    try {
+      expect((await page.request.post("/api/workflows", { data: flow(id, "E2E Ops flow", true) })).ok()).toBeTruthy();
+      const operator = await makeUser(page, `e2e-operator-${stamp}@example.com`, "operator");
+      userIds.push(operator.id);
+
+      const as = await pageAs(browser, operator.email, operator.password);
+      try {
+        await openEditor(as.page, id);
+        const run = as.page.getByRole("button", { name: "Run workflow" });
+        await expect(run).not.toHaveAttribute("aria-disabled", "true");
+        await expect(as.page.getByRole("button", { name: /^Save/ })).toHaveAttribute("aria-disabled", "true");
+        await run.click();
+        await expect
+          .poll(async () => {
+            const list = (await (await as.page.request.get(`/api/executions?workflowId=${id}`)).json()) as { items?: Array<{ status: string; triggeredBy?: string }> };
+            return list.items?.[0]?.status ?? null;
+          }, { timeout: 30_000 })
+          .toBe("success");
+        await as.page.screenshot({ path: path.join(SHOT_DIR, "operator-run.png") });
+        expect(as.ollama).toEqual([]);
+      } finally {
+        await as.context.close();
+      }
+
+      // Shared with this project: listed on the other project's Workflows page, read-only, with its access.
+      expect((await page.request.post("/api/projects", { data: { id: projectId, name: "E2E Ops project" } })).ok()).toBeTruthy();
+      expect((await page.request.post(`/api/workflows/${id}/shares`, { data: { projectId, accessLevel: "execute" } })).ok()).toBeTruthy();
+      await page.goto(`/?projectId=${encodeURIComponent(projectId)}&mode=dashboard`);
+      const section = page.getByRole("region", { name: "Shared with this project" });
+      await expect(section).toBeVisible({ timeout: 30_000 });
+      await expect(section.getByRole("button", { name: /E2E Ops flow/ })).toContainText("Can view and run");
+      await page.screenshot({ path: path.join(SHOT_DIR, "shared-with-project.png") });
+      expect(ollama).toEqual([]);
+    } finally {
+      await page.request.delete(`/api/workflows/${id}/shares/${projectId}`);
+      await page.request.delete(`/api/workflows/${id}`);
+      await page.request.delete(`/api/projects/${projectId}`);
+      for (const userId of userIds) await page.request.delete(`/api/users/${userId}`);
+    }
+  });
 });

@@ -1,6 +1,6 @@
 /**
- * v78 — sharing a workflow with a person. Whoever may write the workflow's project shares it by email with read or
- * execute; the person then sees and opens it (and runs it, with execute and a role that may run), never edits it.
+ * v78 — sharing a workflow with a person. Whoever may invite members to the workflow's project shares it by email
+ * with read or execute; the person then sees and opens it (and runs it, with execute and a role that may run), never edits it.
  * Shares are audited, listed to managers, and gone with the workflow or the user.
  */
 import crypto from "node:crypto";
@@ -226,6 +226,24 @@ describe("workflow shares with people", () => {
     expect(audit.items.find((entry) => entry.eventType === "workflow.transfer")?.metadata).toMatchObject({ targetProjectId: "other", userShareCount: 1 });
   });
 
+  it("lists the workflows shared to a project to its members, with the access they get there", async () => {
+    const { context, owner, operator, viewer, outsider } = await seed();
+    await context.store.upsertProject({ id: "ops", name: "Ops" });
+    await context.store.upsertProjectRole({ userId: operator.id, projectId: "ops", role: "editor" });
+    await context.store.upsertProjectRole({ userId: viewer.id, projectId: "ops", role: "viewer" });
+    expect((await call(context, "POST", "/api/workflows/wf-team/shares", owner.cookie, { projectId: "ops", accessLevel: "execute" })).statusCode).toBe(200);
+
+    const forOperator = await call(context, "GET", "/api/projects/ops/shared-workflows", operator.cookie);
+    expect(forOperator.statusCode, forOperator.body).toBe(200);
+    expect(forOperator.json()).toMatchObject({ workflows: [{ id: "wf-team", name: "Flow wf-team", ownerProjectId: "team", accessLevel: "execute", effectiveAccess: "execute" }] });
+    const forViewer = await call(context, "GET", "/api/projects/ops/shared-workflows", viewer.cookie);
+    expect(forViewer.json()).toMatchObject({ workflows: [{ id: "wf-team", effectiveAccess: "read" }] });
+    // Not a member of ops (strict isolation): the project reads as missing.
+    expect((await call(context, "GET", "/api/projects/ops/shared-workflows", outsider.cookie)).statusCode).toBe(404);
+    // The owning project lists its own workflows elsewhere.
+    expect((await call(context, "GET", "/api/projects/team/shared-workflows", owner.cookie)).json()).toEqual({ workflows: [] });
+  });
+
   it("a deleted workflow or user takes its shares along", async () => {
     const { context, owner, operator } = await seed();
     const admin = await login(context, "admin", "ada");
@@ -270,8 +288,8 @@ describe("what the editor may show", () => {
     await call(context, "POST", "/api/workflows/wf-team/user-shares", owner.cookie, { email: operator.email, accessLevel: "execute" });
     await call(context, "POST", "/api/workflows/wf-team/user-shares", owner.cookie, { email: outsider.email, accessLevel: "execute" });
     expect(await access(viewer.cookie)).toMatchObject({ role: "viewer", canEdit: false, canRun: false, canShare: false });
-    // Running from the editor is a builder's route.
-    expect(await access(operator.cookie)).toMatchObject({ role: "operator", canEdit: false, canRun: false, canShare: false });
+    // An operator with an execute share runs the saved workflow.
+    expect(await access(operator.cookie)).toMatchObject({ role: "operator", canEdit: false, canRun: true, canShare: false });
     expect(await access(outsider.cookie)).toMatchObject({ role: "builder", canEdit: false, canRun: true, canShare: false });
   });
 });

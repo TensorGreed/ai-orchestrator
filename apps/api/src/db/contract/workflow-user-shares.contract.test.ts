@@ -70,4 +70,16 @@ describeStoreContract("store contract: workflow user shares", (ctx) => {
     expect((await store.listWorkflowUserShares("wf-b")).map((share) => share.userId)).toEqual(["u-a"]);
     expect(await store.listWorkflowsSharedToUser("u-b")).toEqual([]);
   });
+
+  it("lists the workflows shared to a project with their names, in one query", async () => {
+    const store = ctx.store();
+    await store.upsertProject({ id: "p-own", name: "Own" });
+    await store.upsertProject({ id: "p-to", name: "To" });
+    await store.upsertWorkflow({ ...(workflow("wf-x") as object), projectId: "p-own" } as never);
+    await store.upsertWorkflowShare({ workflowId: "wf-x", projectId: "p-to", accessLevel: "execute" });
+    const listed = await store.listWorkflowSummariesSharedToProject("p-to");
+    expect(listed.map(({ updatedAt, ...rest }) => rest)).toEqual([{ workflowId: "wf-x", ownerProjectId: "p-own", accessLevel: "execute", name: "Workflow wf-x" }]);
+    expect(typeof listed[0]!.updatedAt).toBe("string");
+    expect(await store.listWorkflowSummariesSharedToProject("p-own")).toEqual([]);
+  });
 });

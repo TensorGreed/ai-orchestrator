@@ -206,6 +206,7 @@ import {
   oidcUserErrorCode,
   type FetchLike as OidcFetch
 } from "./services/oidc-service.js";
+import { editorRunOptionsError, editorRunOptionsRefused } from "./run-editor-options.js";
 import {
   ALL_PERMISSIONS,
   RbacService,
@@ -10861,6 +10862,30 @@ export async function createApp(
     return { workflows: items };
   });
 
+  // The workflows other projects share to this one (read-only rows with the access level), in one query: they are not
+  // in the project's own workflow list.
+  app.get<{ Params: { id: string } }>("/api/projects/:id/shared-workflows", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const target = await runAccess.project(user, request.params.id, "workflow:read");
+    if (!target.ok) return denyRunAccess(reply, target);
+    const projectId = request.params.id;
+    const mayRunHere = await rbacService.can(user, projectId, "workflow:execute");
+    const shared = await store.listWorkflowSummariesSharedToProject(projectId);
+    const items = shared
+      .filter((share) => share.ownerProjectId !== projectId)
+      .map((share) => ({
+        id: share.workflowId,
+        name: share.name,
+        ownerProjectId: share.ownerProjectId,
+        updatedAt: share.updatedAt,
+        accessLevel: share.accessLevel,
+        effectiveAccess: share.accessLevel === "execute" && mayRunHere ? ("execute" as const) : ("read" as const)
+      }))
+      .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+    return { workflows: items };
+  });
+
   app.get<{ Params: { id: string } }>("/api/workflows/:id/user-shares", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
@@ -11116,7 +11141,8 @@ export async function createApp(
   });
 
   // What the signed-in user may do with a workflow, so the editor shows only the controls that work: edit (save,
-  // add or remove nodes), run (from the editor: a builder's route, with workflow:execute), and manage its shares.
+  // add or remove nodes), run (operator and up, with workflow:execute: operators run the saved workflow), and manage
+  // its shares.
   app.get<{ Params: { id: string } }>("/api/workflows/:id/access", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
@@ -11125,7 +11151,7 @@ export async function createApp(
     const workflow = access.workflow;
     const isBuilder = hasRequiredRole(user, ["builder"]);
     const canWrite = isBuilder && (await runAccess.workflow(user, workflow.id, "workflow:write")).ok;
-    const canExecute = isBuilder && (await runAccess.workflow(user, workflow.id, "workflow:execute")).ok;
+    const canExecute = hasRequiredRole(user, ["operator"]) && (await runAccess.workflow(user, workflow.id, "workflow:execute")).ok;
     const canShare = user.role === "admin" || (await rbacService.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "workflow:write"));
     return { workflowId: workflow.id, role: user.role, canRead: true, canEdit: canWrite, canRun: canExecute, canShare };
   });
@@ -12496,7 +12522,8 @@ export async function createApp(
   };
 
   app.post<{ Body: unknown }>("/api/webhooks/execute", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
+    // Operators (and execute shares) run the selected workflow with their payload; variable overrides are a builder's.
+    const user = await requireRole(request, reply, ["operator"]);
     if (!user) {
       return;
     }
@@ -12508,6 +12535,11 @@ export async function createApp(
         error: "Invalid webhook payload",
         details: parsed.error.issues
       };
+    }
+    const refusedOptions = editorRunOptionsRefused(user.role, request.body);
+    if (refusedOptions.length > 0) {
+      reply.code(403);
+      return editorRunOptionsError(refusedOptions);
     }
 
     const workflow = await selectWebhookWorkflow(
@@ -13560,7 +13592,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   });
 
   app.post<{ Body: unknown }>("/api/webhooks/execute/stream", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
+    // Operators (and execute shares) run the selected workflow with their payload; variable overrides are a builder's.
+    const user = await requireRole(request, reply, ["operator"]);
     if (!user) {
       return;
     }
@@ -13572,6 +13605,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         error: "Invalid webhook payload",
         details: parsed.error.issues
       };
+    }
+    const refusedOptions = editorRunOptionsRefused(user.role, request.body);
+    if (refusedOptions.length > 0) {
+      reply.code(403);
+      return editorRunOptionsError(refusedOptions);
     }
 
     const workflow = await selectWebhookWorkflow(

@@ -1950,6 +1950,20 @@ export async function fetchWorkflowsSharedWithMe() {
   return apiRequest<{ workflows: SharedWorkflowItem[] }>("/api/workflows/shared-with-me");
 }
 
+/** A workflow another project shares to the active one (read-only in the list). */
+export interface ProjectSharedWorkflowItem {
+  id: string;
+  name: string;
+  ownerProjectId: string;
+  updatedAt: string | null;
+  accessLevel: "read" | "execute";
+  effectiveAccess: "read" | "execute";
+}
+
+export async function fetchProjectSharedWorkflows(projectId: string) {
+  return apiRequest<{ workflows: ProjectSharedWorkflowItem[] }>(`/api/projects/${encodeURIComponent(projectId)}/shared-workflows`);
+}
+
 /** What you may do with a workflow (the editor shows only the controls that work). */
 export async function fetchWorkflowAccess(workflowId: string) {
   return apiRequest<{ workflowId: string; role: string; canRead: boolean; canEdit: boolean; canRun: boolean; canShare: boolean }>(

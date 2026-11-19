@@ -774,6 +774,25 @@ export async function listWorkflowShares(ctx: PgContext, workflowId: string): Re
   }));
 }
 
+export async function listWorkflowSummariesSharedToProject(
+  ctx: PgContext,
+  projectId: string
+): ReturnType<Store["listWorkflowSummariesSharedToProject"]> {
+  const rows = await ctx.query<{ workflow_id: string; access_level: string; name: string; project_id: string | null; updated_at: string | null }>(
+    `SELECT s.workflow_id, s.access_level, w.name, w.project_id, w.updated_at
+       FROM workflow_shares s JOIN workflows w ON w.id = s.workflow_id
+      WHERE s.project_id = $1 ORDER BY s.workflow_id COLLATE "C"`,
+    [projectId]
+  );
+  return rows.map((row) => ({
+    workflowId: toStr(row.workflow_id),
+    ownerProjectId: row.project_id ? toStr(row.project_id) : DEFAULT_PROJECT_ID,
+    accessLevel: shareLevel(row.access_level),
+    name: toStr(row.name),
+    updatedAt: row.updated_at ? toStr(row.updated_at) : null
+  }));
+}
+
 export async function listWorkflowsSharedToProject(ctx: PgContext, projectId: string): ReturnType<Store["listWorkflowsSharedToProject"]> {
   // SQLite reads these through idx_workflow_shares_project_id: ties in project id fall back to rowid (insertion) order.
   const rows = await ctx.query<{ workflow_id: string; project_id: string; access_level: string }>(

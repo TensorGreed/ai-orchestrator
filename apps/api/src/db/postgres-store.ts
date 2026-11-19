@@ -1672,6 +1672,10 @@ export class PostgresStore implements Store {
   async getWorkflowUserShare(...args: Parameters<Store["getWorkflowUserShare"]>): ReturnType<Store["getWorkflowUserShare"]> {
     return workflows.getWorkflowUserShare(this.ctx, ...args);
   }
+  async listWorkflowSummariesSharedToProject(...args: Parameters<Store["listWorkflowSummariesSharedToProject"]>): ReturnType<Store["listWorkflowSummariesSharedToProject"]> {
+    return workflows.listWorkflowSummariesSharedToProject(this.ctx, ...args);
+  }
+
   async listWorkflowsSharedToUser(...args: Parameters<Store["listWorkflowsSharedToUser"]>): ReturnType<Store["listWorkflowsSharedToUser"]> {
     return workflows.listWorkflowsSharedToUser(this.ctx, ...args);
   }

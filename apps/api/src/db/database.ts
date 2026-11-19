@@ -8623,6 +8623,22 @@ export class SqliteStore implements Store {
     }));
   }
 
+  async listWorkflowSummariesSharedToProject(projectId: string): ReturnType<Store["listWorkflowSummariesSharedToProject"]> {
+    const rows = this.queryAll<{ workflow_id: string; access_level: string; name: string; project_id: string | null; updated_at: string | null }>(
+      `SELECT s.workflow_id, s.access_level, w.name, w.project_id, w.updated_at
+         FROM workflow_shares s JOIN workflows w ON w.id = s.workflow_id
+        WHERE s.project_id = ? ORDER BY s.workflow_id`,
+      [projectId]
+    );
+    return rows.map((row) => ({
+      workflowId: toString(row.workflow_id),
+      ownerProjectId: row.project_id ? toString(row.project_id) : DEFAULT_PROJECT_ID,
+      accessLevel: toString(row.access_level) === "execute" ? "execute" : "read",
+      name: toString(row.name),
+      updatedAt: row.updated_at ? toString(row.updated_at) : null
+    }));
+  }
+
   async listWorkflowsSharedToProject(projectId: string): Promise<Array<{
     workflowId: string;
     projectId: string;

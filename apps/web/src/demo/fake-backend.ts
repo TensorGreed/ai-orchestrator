@@ -616,6 +616,7 @@ export function createFakeBackend(options: FakeBackendOptions): FakeBackend {
     }
     // The demo has one person and no shares.
     if (pathname === "/api/workflows/shared-with-me" && method === "GET") return json(200, { workflows: [] });
+    if (/^\/api\/projects\/[^/]+\/shared-workflows$/.test(pathname) && method === "GET") return json(200, { workflows: [] });
     const workflowMatch = /^\/api\/workflows\/([^/]+)(?:\/(.+))?$/.exec(pathname);
     if (workflowMatch) {
       const id = decodeURIComponent(workflowMatch[1]!);

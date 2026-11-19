@@ -70,7 +70,8 @@ the envelope `GET /api/executions` uses:
 - `POST /api/workflows/import/external` — convert an export from another builder; see [Importing from another builder](../product/importing-from-another-builder.md)
 - `GET /api/workflows/:id/export`
 - `POST /api/workflows/:id/validate`
-- `POST /api/workflows/:id/execute` (`record: true` records the run's MCP calls into a cassette; the result carries `mcpCassette`)
+- `POST /api/workflows/:id/execute` (operator and up with `workflow:execute`; the editor's options, such as `record: true`, which records the run's MCP calls into a cassette (the result carries `mcpCassette`), are a builder's: see [Running workflows by role](../security/auth-rbac.md#running-workflows-by-role))
+- `GET /api/projects/:id/shared-workflows` (`workflow:read` in the project) → `{ workflows: [{ id, name, ownerProjectId, updatedAt, accessLevel, effectiveAccess }] }`: the workflows other projects share to it
 - `POST /api/workflows/:id/execute/stream` — SSE: `node_start`, `node_complete`, `llm_delta`, `node_progress` (MCP progress: `nodeId`, `toolName`, `serverId`, `registryServerId`, `progress`, `total`, `percent`, `message`, `at`), `result`
 - On the production channel (an API key), `/execute`, `/execute/stream` and `POST /api/webhooks/execute(/stream)` answer `409` when production refuses the workflow; when the version production would run has unfinished settings the body is `{ error, code: "workflow_unfinished" }`. A run that fails because a sub-workflow it calls is refused that way carries `errorCode: "workflow_unfinished"` on the run and the node (and `code` in a webhook's answer).
 
@@ -366,7 +367,7 @@ See [Approval gates](../product/approvals.md). Release requests (Phase 15.4) app
 
 ## Webhooks
 
-- `POST /api/webhooks/execute` and `POST /api/webhooks/execute/stream` (builder; `{ workflow_id?, webhook_path?, session_id?, system_prompt?, user_prompt?, variables?, customData?, payload? }`). `payload` is the request body the run's webhook receives (what <span v-pre>`{{webhook.<field>}}`</span> reads), with the prompt fields on top of it, as a call to `/webhook/:path` gets them; without it the body holds the prompt fields only.
+- `POST /api/webhooks/execute` and `POST /api/webhooks/execute/stream` (operator and up with `workflow:execute`; `variables` is a builder's; `{ workflow_id?, webhook_path?, session_id?, system_prompt?, user_prompt?, variables?, customData?, payload? }`). `payload` is the request body the run's webhook receives (what <span v-pre>`{{webhook.<field>}}`</span> reads), with the prompt fields on top of it, as a call to `/webhook/:path` gets them; without it the body holds the prompt fields only.
 - `ANY /webhook/:path` (production: answers `409` with `code: "workflow_unfinished"`, and starts no run, while the version production would run has unfinished node settings)
 - `ANY /webhook-test/:path`
 
@@ -384,7 +385,7 @@ An idempotent retry of a withheld webhook call answers the same `422`.
 
 With a `trigger_input` channel, a webhook payload the rules refuse answers `400 { error: "The request was refused by content rules.", code: "content_filter" }` before anything runs. `/api/chat` and MCP invoke are not checked this way.
 
-`POST /api/webhooks/execute` (builder) is not checked.
+`POST /api/webhooks/execute` (operator and up) is not checked.
 
 ## Helper
 

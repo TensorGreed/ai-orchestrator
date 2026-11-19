@@ -99,13 +99,15 @@ needs a role also accepts every role above it.
 
 - Workflow read: all authenticated roles
 - Workflow create/update/delete: `builder`, `admin`
-- Execute workflow/webhook API trigger: `builder`, `admin`
+- Execute workflow/webhook API trigger: `operator`, `builder`, `admin` with `workflow:execute` (operators run the saved
+  workflow with their input; see [Running workflows by role](#running-workflows-by-role))
 - Secrets list/create: `builder`, `admin`
 - What an `operator` can do beyond a viewer:
   - put a run on the queue (`POST /api/workflows/:id/enqueue`; see [Queue and workers](../operations/queue-and-workers.md))
     and see the queue depth and the dead-letter queue (`GET /api/queue/depth`, `GET /api/queue/dlq`). These routes
-    exist only where a queue runs. Direct runs (`/execute`, `/execute/stream`, retry, replay and the compat webhook
-    API) need `builder`.
+    exist only where a queue runs.
+  - run the saved workflow directly (`/execute`, `/execute/stream` and the compat webhook API) with their input, without
+    the editor's options (see [Running workflows by role](#running-workflows-by-role)). Retry and replay need `builder`.
   - cancel a running or paused run (`POST /api/executions/:id/cancel`)
   - decide approval-gate requests: a gate that lists no approver roles or users accepts any operator, builder or admin
     (see [Approvals](../product/approvals.md)). Release requests in the same inbox need `workflow:publish`, which
@@ -178,10 +180,24 @@ in `MFA_REQUIRED_ROLES`, see [MFA required per role](#mfa-required-per-role)).
 - **Project members by email.** Settings, Project Members adds a member by email (admins pick from the deployment's
   users). `POST /api/projects/:id/members` takes `{ "email": "..." }` in place of `userId`, and the member list carries
   each member's `email`.
-- **What the editor shows.** Viewers and operators open workflows read-only: Save, Add node, Clear, Run and Webhook run
-  are disabled, and their tooltip says why. A builder sees the same for a workflow they may only view (one shared with
-  them, or in a project where their role is view-only); a workflow they may run but not change runs as saved.
+- **What the editor shows.** Viewers and operators open workflows read-only: Save, Add node and Clear are disabled, and
+  their tooltip says why; viewers cannot run. Operators run the saved workflow where they have `workflow:execute`
+  (Run and Webhook run). A builder sees the same for a workflow they may only view (one shared with them, or in a
+  project where their role is view-only); a workflow they may run but not change runs as saved.
   `GET /api/workflows/:id/access` answers what the signed-in user may do.
+- **Shared with this project.** The Workflows page lists the workflows other projects share to the active one, with
+  the access members get there (`GET /api/projects/:id/shared-workflows`).
+
+## Running workflows by role
+
+`POST /api/workflows/:id/execute`, `/execute/stream`, `POST /api/webhooks/execute` and `/stream` take operators and up,
+with `workflow:execute` on the workflow (a project membership, an execute share to a project, or an execute share to
+the person). They run the saved workflow the route runs for that id (the draft from a signed-in session, production
+for an API key, as before) with the caller's input: `input`, `payload`, `system_prompt`, `user_prompt`, `sessionId`,
+`customData` and a timeout. Options that change what runs stay with builders and admins: `startNodeId`,
+`runMode: "single_node"`, `usePinnedData`, `pinnedData`, `nodeOutputs`, `sourceExecutionId`, `nodeOutputsExecutionId`,
+`variables`, `record`, and a `workflow`, `nodes` or `edges` sent with the request; an operator who sends one gets `403`
+with `refusedOptions`. Viewers are refused. Runs are audited as before.
 
 ## Sharing a workflow with people
 
@@ -193,9 +209,9 @@ or `POST /api/workflows/:id/user-shares` with `{ "email": "...", "accessLevel": 
   (`project_member.change`). A project editor may change the workflow but not open it to people. The person must have
   an account (invite them first); service accounts and yourself are refused.
 - **What it gives.** `read`: they find it under **Shared with you** on the Workflows page, open it and read its runs.
-  `execute`: they may also act on its runs (approve, cancel, answer a tool's question) when their role may run
-  workflows; an execute share with a viewer reads only. Starting a run (from the editor, a webhook test or the API)
-  still needs the builder role, so an operator's execute share does not start runs. A share never gives write, delete, publish or the right to
+  `execute`: they may also run it (see [Running workflows by role](#running-workflows-by-role)) and act on its runs
+  (approve, cancel, answer a tool's question) when their role may run workflows; an execute share with a viewer reads
+  only. A share never gives write, delete, publish or the right to
   share it on. Their runs may use the workflow's secrets, as runs of its own project do.
 - **Limits.** An API key limited to projects gets nothing from a share outside them. A deactivated user's shares stay
   but give nothing while they cannot sign in; enabling the user again brings them back, as with project memberships.

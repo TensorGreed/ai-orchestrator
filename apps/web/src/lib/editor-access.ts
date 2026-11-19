@@ -1,7 +1,7 @@
 /**
- * What the editor lets you do with the open workflow, and why not: your role first (viewers and operators open
- * workflows but do not change or run them from the editor), then your access to this workflow (a builder may only
- * view a workflow shared with them, or one in a project where their role is view-only).
+ * What the editor lets you do with the open workflow, and why not: your role first (viewers open workflows read-only;
+ * operators open them read-only and may run the saved workflow where they have run access), then your access to this
+ * workflow (a builder may only view a workflow shared with them, or one in a project where their role is view-only).
  */
 export interface WorkflowAccessView {
   workflowId: string;
@@ -19,22 +19,30 @@ export interface EditorAccess {
 
 type Role = "admin" | "builder" | "operator" | "viewer";
 
+/** Whether a role may use the editor's run options (run from a node, one node, pinned data, recording). */
+export function roleMayUseEditorRunOptions(role: Role | undefined): boolean {
+  return role === "admin" || role === "builder";
+}
+
+const NO_RUN = "You do not have permission to run this workflow.";
+
 export function editorAccess(role: Role | undefined, access: WorkflowAccessView | null): EditorAccess {
   if (role === "viewer") {
     return {
       editDisabledReason: "You have the viewer role: you can open workflows and their runs, but not change them.",
-      runDisabledReason: "You have the viewer role: running a workflow needs the builder role."
+      runDisabledReason: "You have the viewer role: running a workflow needs the operator role or higher."
     };
   }
   if (role === "operator") {
     return {
-      editDisabledReason: "You have the operator role: you can open workflows and their runs, but not change them.",
-      runDisabledReason: "You have the operator role: running a workflow from the editor needs the builder role."
+      editDisabledReason: "You have the operator role: you can open and run workflows, but not change them.",
+      // Until the workflow's access is known, Run waits for it.
+      runDisabledReason: access?.canRun ? null : access ? NO_RUN : "Checking whether you may run this workflow…"
     };
   }
   if (!access) return { editDisabledReason: null, runDisabledReason: null };
   return {
     editDisabledReason: access.canEdit ? null : "You can view this workflow but not change it: it is shared with you, or your role in its project is view-only.",
-    runDisabledReason: access.canRun ? null : "You do not have permission to run this workflow."
+    runDisabledReason: access.canRun ? null : NO_RUN
   };
 }

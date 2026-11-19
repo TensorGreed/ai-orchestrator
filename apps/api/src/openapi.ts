@@ -1133,10 +1133,18 @@ export const openApiSpec = {
         responses: { "200": { description: "{ workflows: [{ id, name, projectId, updatedAt, accessLevel, effectiveAccess }] }" } }
       }
     },
+    "/api/projects/{id}/shared-workflows": {
+      get: {
+        tags: ["RBAC"],
+        summary: "The workflows other projects share to this one, with the access members get here (workflow:read in the project)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ workflows: [{ id, name, ownerProjectId, updatedAt, accessLevel, effectiveAccess }] }" }, "404": { description: "Not found or not readable" } }
+      }
+    },
     "/api/workflows/{id}/access": {
       get: {
         tags: ["RBAC"],
-        summary: "What you may do with a workflow: canEdit (save it), canRun (run it from the editor), canShare (manage its shares)",
+        summary: "What you may do with a workflow: canEdit (save it), canRun (run the saved workflow: operator and up with workflow:execute), canShare (manage its shares)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "{ workflowId, role, canRead, canEdit, canRun, canShare }" }, "404": { description: "Not found or not readable" } }
       }
@@ -1144,7 +1152,7 @@ export const openApiSpec = {
     "/api/workflows/{id}/user-shares": {
       get: {
         tags: ["RBAC"],
-        summary: "The people a workflow is shared with, with the access each one gets (workflow:write on its project, or admin)",
+        summary: "The people a workflow is shared with, with the access each one gets (project:invite on its project, or admin)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "{ userShares: [{ userId, email, role, disabled, accessLevel, effectiveAccess, sharedBy, createdAt }] }" }, "403": { description: "Not a manager of the workflow" } }
       },
