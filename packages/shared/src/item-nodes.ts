@@ -72,3 +72,12 @@ export function isMergeMode(value: unknown): value is MergeMode {
 export function loopCollectsResults(config: Record<string, unknown>): boolean {
   return config.collectResults === true;
 }
+
+/**
+ * True when IF, Switch, Filter and the other branching nodes route inside a Loop's body: each pass runs only the
+ * outputs they take, and the nodes on those outputs are part of the body. Off for Loops saved before it existed (the
+ * nodes on every output run once, after the loop); new Loops have it on.
+ */
+export function loopRoutesBranches(config: Record<string, unknown>): boolean {
+  return config.routeBranches === true;
+}

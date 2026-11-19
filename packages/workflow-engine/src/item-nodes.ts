@@ -194,3 +194,18 @@ export function loopPassesOf(loopOutput: unknown, bodyNodeId: string): unknown[]
   }
   return found ? passes : undefined;
 }
+
+/**
+ * The outputs of several body nodes of one Loop, pass by pass: on each pass, the output of each of `bodyNodeIds`
+ * (in that order) that ran on it.
+ */
+export function loopPassesInOrder(loopOutput: unknown, bodyNodeIds: readonly string[]): unknown[] {
+  if (!isRecord(loopOutput) || !Array.isArray(loopOutput.items)) return [];
+  const passes: unknown[] = [];
+  for (const pass of loopOutput.items) {
+    const outputs = isRecord(pass) && isRecord(pass.outputs) ? pass.outputs : undefined;
+    if (!outputs) continue;
+    for (const id of bodyNodeIds) if (Object.prototype.hasOwnProperty.call(outputs, id)) passes.push(outputs[id]);
+  }
+  return passes;
+}

@@ -696,7 +696,7 @@ SQLite-backed session memory that can be attached to an Agent Orchestrator node.
 
 ### `loop_node` — Loop / ForEach
 
-Iterates over an input array and executes direct downstream nodes once per item.
+Iterates over an input array and runs its body (the nodes connected straight after it, and with branch routing the nodes on its branching nodes' outputs) once per item.
 
 **Config fields**
 
@@ -706,6 +706,7 @@ Iterates over an input array and executes direct downstream nodes once per item.
 | `itemVariable` | `string` | yes | — |
 | `maxIterations` | `number` | no | — |
 | `collectResults` | `boolean` | no | — |
+| `routeBranches` | `boolean` | no | — |
 
 **Example config**
 
@@ -714,7 +715,8 @@ Iterates over an input array and executes direct downstream nodes once per item.
   "inputKey": "documents",
   "itemVariable": "item",
   "maxIterations": 100,
-  "collectResults": true
+  "collectResults": true,
+  "routeBranches": true
 }
 ```
 

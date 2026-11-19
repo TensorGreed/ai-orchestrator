@@ -100,7 +100,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "loop_node",
     label: "Loop / ForEach",
     category: "Utility",
-    description: "Iterates over an input array and executes direct downstream nodes once per item.",
+    description: "Iterates over an input array and runs its body (the nodes connected straight after it, and with branch routing the nodes on its branching nodes' outputs) once per item.",
     configSchema: {
       type: "object",
       properties: {
@@ -108,7 +108,9 @@ const baseNodeDefinitions: NodeDefinition[] = [
         itemVariable: { type: "string" },
         maxIterations: { type: "number" },
         // Adds `collected` to the output: one entry per pass (absent on Loops saved before it existed: off).
-        collectResults: { type: "boolean" }
+        collectResults: { type: "boolean" },
+        // Branching nodes in the body route per pass (absent on Loops saved before it existed: off).
+        routeBranches: { type: "boolean" }
       },
       required: ["inputKey", "itemVariable"]
     },
@@ -116,7 +118,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
       inputKey: "documents",
       itemVariable: "item",
       maxIterations: 100,
-      collectResults: true
+      collectResults: true,
+      routeBranches: true
     }
   },
   {

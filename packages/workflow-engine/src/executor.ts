@@ -111,6 +111,7 @@ import type {
   WorkflowNode
 } from "@ai-orchestrator/shared";
 import { isAuxiliaryEdge, isExecutionEdge, DescendantCache } from "./graph";
+import { loopBodyOf } from "./loop-body";
 import { HttpStatusError, httpNetworkError, isNetworkFailure } from "./http-errors";
 import { finishNodeSpan, openNodeSpan, runAgentInSpan, runChildInSpan } from "./run-instrumentation";
 import {
@@ -172,7 +173,7 @@ import {
   tryParseJson,
   type TemplatePiece
 } from "./template";
-import { buildSetOutput, filterOutputForHandles, findFirstList, isRecordValue, loopPassResult, loopPassesOf, normalizeItemsFrom, singleInputItem } from "./item-nodes";
+import { buildSetOutput, filterOutputForHandles, findFirstList, isRecordValue, loopPassResult, loopPassesInOrder, loopPassesOf, normalizeItemsFrom, singleInputItem } from "./item-nodes";
 import {
   createMcpElicitationHandler,
   createMcpSamplingHandler,
@@ -4933,23 +4934,30 @@ async function executeNodeHandler(
 
       if (mode === "collect_loop_passes") {
         // Every pass of a Loop body node connected into the Merge (read from its Loop's output, so a resumed run
-        // sees the same); a parent outside a loop body adds its output once.
+        // sees the same); a parent outside a loop body adds its output once. The body nodes of one Loop that routes
+        // branches are gathered pass by pass (on a pass that took one IF output, that output's node).
         const collected: unknown[] = [];
+        const workflowNodes = context.workflow.nodes ?? [];
+        const bodies = workflowNodes
+          .filter((entry) => entry.type === "loop_node")
+          .map((entry) => ({ loopId: entry.id, body: loopBodyOf(context.workflow, entry.id) }));
+        const gatheredRoutedLoops = new Set<string>();
         for (const [parentId, parentOutput] of entries) {
-          const loopIds = (context.workflow.edges ?? [])
-            .filter((edge) => edge.target === parentId && isExecutionEdge(edge) && context.nodeById.get(edge.source)?.type === "loop_node")
-            .map((edge) => edge.source);
-          let passes: unknown[] | undefined;
-          for (const loopId of loopIds) {
-            passes = loopPassesOf(context.nodeOutputs?.get(loopId), parentId);
-            if (passes) {
-              // Phase 16 — every pass's data, so the labels of all of them (the Loop's output carries their union).
-              context.labelScope?.readPath(`results.${loopId}`);
-              break;
-            }
+          const owner = bodies.find((entry) => entry.body.nodeIds.includes(parentId) && loopPassesOf(context.nodeOutputs?.get(entry.loopId), parentId));
+          if (!owner) {
+            collected.push(parentOutput);
+            continue;
           }
-          if (passes) collected.push(...passes);
-          else collected.push(parentOutput);
+          // Phase 16 — every pass's data, so the labels of all of them (the Loop's output carries their union).
+          context.labelScope?.readPath(`results.${owner.loopId}`);
+          if (!owner.body.routing) {
+            collected.push(...(loopPassesOf(context.nodeOutputs?.get(owner.loopId), parentId) ?? []));
+            continue;
+          }
+          if (gatheredRoutedLoops.has(owner.loopId)) continue;
+          gatheredRoutedLoops.add(owner.loopId);
+          const fromLoop = entries.map(([id]) => id).filter((id) => owner.body.nodeIds.includes(id));
+          collected.push(...loopPassesInOrder(context.nodeOutputs?.get(owner.loopId), fromLoop));
         }
         return { items: collected, count: collected.length };
       }
@@ -9591,7 +9599,8 @@ async function executeWorkflowRun(
   const errorOutputOnlySkips = new Set<string>();
   /** Nodes a failed node's Error output routed to: a later success of another node does not skip them. */
   const errorOutputActivated = new Set<string>();
-  const loopInlineExecutedNodes = new Set<string>();
+  // Loop body nodes the Loop ran: the walk passes them (kept over a pause, so a resumed run does not run them again).
+  const loopInlineExecutedNodes = new Set<string>(request.resumeState?.loopInlineNodes ?? []);
 
   // try_catch error routing: maps try_catch nodeId -> error branch target nodeIds
   const tryCatchScopes = request.resumeState
@@ -9645,7 +9654,14 @@ async function executeWorkflowRun(
     return filterOutputForHandles(output, edgeHandles.get(`${parentId}\u0000${childId}`) ?? new Set());
   };
 
-  const applySuccessfulNodeRouting = (node: WorkflowNode, output: unknown) => {
+  /**
+   * The skip sets branch routing writes to: the run's (top level), or one Loop pass's when a node of a Loop body that
+   * routes branches runs (see `runLoop`).
+   */
+  type BranchSkipState = { skipped: Set<string>; errorOnly: Set<string>; activated: Set<string> };
+  const topLevelBranchState: BranchSkipState = { skipped: skippedByBranch, errorOnly: errorOutputOnlySkips, activated: errorOutputActivated };
+
+  const applySuccessfulNodeRouting = (node: WorkflowNode, output: unknown, branchState: BranchSkipState = topLevelBranchState) => {
     const outputRecord = toRecord(output);
     const activeBranch = typeof outputRecord._branchHandle === "string" ? outputRecord._branchHandle : undefined;
     const activeBranchFallback =
@@ -9680,8 +9696,8 @@ async function executeWorkflowRun(
         for (const target of targets) {
           for (const candidate of descendantCache.getNodeAndDescendants(target)) {
             if (!protectedNodes.has(candidate)) {
-              skippedByBranch.add(candidate);
-              errorOutputOnlySkips.delete(candidate);
+              branchState.skipped.add(candidate);
+              branchState.errorOnly.delete(candidate);
             }
           }
         }
@@ -9704,10 +9720,10 @@ async function executeWorkflowRun(
         const protectedNodes = descendantCache.getReachableFromRoots(takenTargets);
         for (const target of errorTargets) {
           for (const candidate of descendantCache.getNodeAndDescendants(target)) {
-            if (!protectedNodes.has(candidate) && !errorOutputActivated.has(candidate)) {
-              if (!skippedByBranch.has(candidate)) {
-                skippedByBranch.add(candidate);
-                errorOutputOnlySkips.add(candidate);
+            if (!protectedNodes.has(candidate) && !branchState.activated.has(candidate)) {
+              if (!branchState.skipped.has(candidate)) {
+                branchState.skipped.add(candidate);
+                branchState.errorOnly.add(candidate);
               }
             }
           }
@@ -9739,7 +9755,7 @@ async function executeWorkflowRun(
    * when the branch runs after this node. Only a resumed approval clears skips
    * on its error output (the state it was paused with, as before).
    */
-  const routeFailureToErrorOutput = (nodeId: string, options: { clearSkips?: boolean } = {}): boolean => {
+  const routeFailureToErrorOutput = (nodeId: string, options: { clearSkips?: boolean } = {}, branchState: BranchSkipState = topLevelBranchState): boolean => {
     const errorTargets = branchTargets.get(nodeId)?.get(ERROR_OUTPUT_HANDLE) ?? [];
     if (errorTargets.length === 0) {
       return false;
@@ -9747,11 +9763,11 @@ async function executeWorkflowRun(
     const protectedNodes = descendantCache.getReachableFromRoots(errorTargets);
     for (const target of errorTargets) {
       for (const candidate of [target, ...descendantCache.getDescendants(target)]) {
-        if (options.clearSkips || errorOutputOnlySkips.has(candidate)) {
-          skippedByBranch.delete(candidate);
-          errorOutputOnlySkips.delete(candidate);
+        if (options.clearSkips || branchState.errorOnly.has(candidate)) {
+          branchState.skipped.delete(candidate);
+          branchState.errorOnly.delete(candidate);
         }
-        errorOutputActivated.add(candidate);
+        branchState.activated.add(candidate);
       }
     }
     for (const edge of workflow.edges) {
@@ -9760,12 +9776,361 @@ async function executeWorkflowRun(
       }
       for (const candidate of descendantCache.getNodeAndDescendants(edge.target)) {
         if (!protectedNodes.has(candidate)) {
+          branchState.skipped.add(candidate);
+          branchState.errorOnly.delete(candidate);
+        }
+      }
+    }
+    return true;
+  };
+
+  /**
+   * Loop nodes that route branches (`routeBranches`): body nodes that ran on at least one pass, the body nodes of
+   * such Loops (nested ones included) and the Loops that had at least one pass. After the outermost Loop, a body node
+   * no pass ran is recorded as skipped, and so are the nodes after it outside the body (see `runLoop`).
+   */
+  const routedBodyRan = new Set<string>();
+
+  /**
+   * Runs a Loop node's passes and returns its output and labels. The caller records the Loop's own result.
+   *
+   * The body is `loopBodyOf`: without branch routing, the nodes connected straight after the Loop, each run on every
+   * pass (a failure fails the Loop). With branch routing, a pass runs only the outputs its branching nodes take, a body
+   * node's own On Error applies (Continue, or its Error output), and a node a pass skipped is not in that pass's
+   * `results`. A Loop inside a body runs its own passes on each pass of the outer one.
+   */
+  const runLoop = async (args: {
+    node: WorkflowNode;
+    nodeConfig: Record<string, unknown>;
+    loopGlobals: Record<string, unknown>;
+    templateData: Record<string, unknown>;
+    labelScope: NodeLabelScope;
+    span: ReturnType<typeof openNodeSpan>;
+    /** True for a Loop inside another Loop's body. */
+    nested?: boolean;
+  }): Promise<{ output: Record<string, unknown>; labels: DataLabels }> => {
+    const { node, nodeConfig, loopGlobals, templateData, labelScope, span: loopSpan } = args;
+    const inputKey = typeof nodeConfig.inputKey === "string" ? nodeConfig.inputKey.trim() : "";
+    const itemVariable =
+      typeof nodeConfig.itemVariable === "string" && nodeConfig.itemVariable.trim()
+        ? nodeConfig.itemVariable.trim()
+        : "item";
+    const maxIterations =
+      typeof nodeConfig.maxIterations === "number" && Number.isFinite(nodeConfig.maxIterations) && nodeConfig.maxIterations > 0
+        ? Math.floor(nodeConfig.maxIterations)
+        : 100;
+    let candidateItems = inputKey ? templateData[inputKey] : undefined;
+    if (inputKey) labelScope.readPath(inputKey);
+    if (candidateItems === undefined && inputKey) {
+      candidateItems = getValueByPath(templateData, inputKey);
+    }
+    const rawItems = Array.isArray(candidateItems) ? candidateItems : [candidateItems];
+    const scopedItems = rawItems.slice(0, maxIterations);
+    // The loop's Error output is not part of its body: it runs only when the loop fails.
+    const body = loopBodyOf(workflow, node.id, { order: nodeOrder });
+    const routing = body.routing;
+    const downstreamNodeIds = body.nodeIds;
+    const downstreamNodes = downstreamNodeIds
+      .map((childId) => graphIndexes.nodeById.get(childId))
+      .filter((child): child is WorkflowNode => Boolean(child));
+    for (const childId of body.inline) loopInlineExecutedNodes.add(childId);
+
+    const loopItems: Array<{
+      index: number;
+      item: unknown;
+      outputs: Record<string, unknown>;
+    }> = [];
+    // Phase 16 — each pass's child labels; the loop's output is their union.
+    const itemLabels = labelScope.inputLabels();
+    const passLabels: DataLabels[] = [];
+    // Branch routing: each body node's output on the last pass that ran it (what `results` holds after the loop).
+    const lastRan = new Map<string, unknown>();
+
+    for (let loopIndex = 0; loopIndex < scopedItems.length; loopIndex += 1) {
+      const loopItem = scopedItems[loopIndex];
+      const iterationGlobals: Record<string, unknown> = {
+        ...loopGlobals,
+        [itemVariable]: loopItem,
+        _loop_index: loopIndex
+      };
+      const iterationOutputs: Record<string, unknown> = {};
+      // Branch routing: what this pass's branching nodes skipped; a body node a pass skipped is not in its `results`.
+      const passBranches = { skipped: new Set<string>(), errorOnly: new Set<string>(), activated: new Set<string>() };
+      if (routing) for (const childId of downstreamNodeIds) nodeOutputs.delete(childId);
+
+      for (const childNode of downstreamNodes) {
+        if (routing && passBranches.skipped.has(childNode.id)) continue;
+        const childStarted = Date.now();
+        const childStartedAt = nowIso();
+        const childParentIds = graphIndexes.incomingExecution.get(childNode.id) ?? [];
+        const childParentOutputs: Record<string, unknown> = {};
+        for (const parentId of childParentIds) {
+          if (parentId === node.id) {
+            childParentOutputs[parentId] = {
+              [itemVariable]: loopItem,
+              item: loopItem,
+              _loop_index: loopIndex
+            };
+            continue;
+          }
+
+          if (nodeOutputs.has(parentId)) {
+            childParentOutputs[parentId] = parentOutputForEdge(parentId, childNode.id);
+          }
+        }
+
+        const childMerged = mergeParentOutputs(childParentOutputs);
+        childMerged[itemVariable] = loopItem;
+        childMerged._loop_index = loopIndex;
+        const childLabelScope = labelState.scope({
+          nodeId: childNode.id,
+          nodeType: childNode.type,
+          parents: Object.keys(childParentOutputs).map((parentId) => (parentId === node.id ? itemLabels : labelState.getFor(childNode.id, parentId))),
+          parentIds: Object.keys(childParentOutputs),
+          merged: childMerged,
+          globals: iterationGlobals
+        });
+        if (await declaresSensitiveSource(childNode, dependencies)) {
+          childLabelScope.add(SENSITIVE_LABELS);
+          labelState.record(childNode.id);
+        }
+        const childInput = captureNodeInputSnapshot(iterationGlobals, childMerged, childParentOutputs);
+        await dependencies.onNodeStart?.({
+          nodeId: childNode.id,
+          nodeType: childNode.type,
+          startedAt: childStartedAt,
+          input: childInput
+        });
+
+        // A loop body's node: a child of the Loop node's span, one per pass.
+        const childSpan = openNodeSpan(dependencies.instrument, childNode, loopSpan, loopIndex);
+        /** Records a body node's output for this pass (a success, or a failure its On Error turned into an output). */
+        const recordPassOutput = (output: unknown, labels: DataLabels) => {
+          iterationOutputs[childNode.id] = output;
+          nodeOutputs.set(childNode.id, output);
+          labelState.set(childNode.id, labels);
+          passLabels.push(labels);
+          if (routing) {
+            lastRan.set(childNode.id, output);
+            routedBodyRan.add(childNode.id);
+          }
+        };
+        try {
+          let childOutput: unknown;
+          let childAttempts = 1;
+          let childLabels: DataLabels;
+          if (childNode.type === "human_approval" && !dependencies.replayNodeHook) {
+            // A Human Approval cannot pause a pass: it fails the Loop (before, it let the pass go on with nobody asked).
+            throw WorkflowError.nodeConfig(
+              `Approvals cannot pause inside a Loop body: '${childNode.id}' is a Human Approval node. Move the approval before or after the Loop node.`
+            );
+          }
+          if (childNode.type === "loop_node") {
+            // A Loop inside the body runs all of its passes on this pass.
+            const inner = await childSpan.enter(() =>
+              runLoop({
+                node: childNode,
+                nodeConfig: toRecord(childNode.config),
+                loopGlobals: iterationGlobals,
+                templateData: { ...iterationGlobals, ...childMerged, parent_outputs: childParentOutputs },
+                labelScope: childLabelScope,
+                span: childSpan,
+                nested: true
+              })
+            );
+            childOutput = inner.output;
+            childLabels = inner.labels;
+          } else {
+            const executed = await childSpan.enter(() => executeNodeWithRetry(
+              childNode,
+              {
+                globals: iterationGlobals,
+                merged: childMerged,
+                parentOutputs: childParentOutputs,
+                nodeOutputs,
+                workflow,
+                nodeById: graphIndexes.nodeById,
+                attachmentsBySource: graphIndexes.attachmentsBySource,
+                callStack,
+                toolPolicySubject,
+                approvedHandoffKeys,
+                approvedHandoffBy,
+                writeToolCalls,
+                recordAttachmentUsage,
+                labelScope: childLabelScope
+              },
+              dependencies
+            ));
+            childOutput = executed.output;
+            childAttempts = executed.attempts;
+            childLabels = childLabelScope.finish(childOutput);
+          }
+          approvedHandoffKeys.clear();
+          writeToolCalls.clear();
+
+          recordPassOutput(childOutput, childLabels);
+          if (childNode.type === "output") {
+            finalOutput = childOutput;
+            labelState.outputNodeId = childNode.id;
+          }
+          nodeResults.push({
+            nodeId: childNode.id,
+            status: "success",
+            startedAt: childStartedAt,
+            completedAt: nowIso(),
+            durationMs: Date.now() - childStarted,
+            input: childInput,
+            output: childOutput,
+            attempts: childAttempts > 1 ? childAttempts : undefined,
+            ...labelState.resultField(childNode.id)
+          });
+          await dependencies.onNodeComplete?.({
+            nodeId: childNode.id,
+            nodeType: childNode.type,
+            status: "success",
+            completedAt: nowIso(),
+            durationMs: Date.now() - childStarted,
+            input: childInput,
+            output: childOutput
+          });
+          // Branch routing: the outputs this node did not take are skipped for the rest of the pass.
+          if (routing && childNode.type !== "try_catch") applySuccessfulNodeRouting(childNode, childOutput, passBranches);
+        } catch (caughtChildError) {
+          // Phase 11.2 — loop bodies run inline and cannot pause part-way.
+          const pauseAsked = isApprovalHandoffSignal(caughtChildError);
+          const childError = pauseAsked
+            ? WorkflowError.nodeConfig(
+                `Approvals cannot pause inside a Loop body: '${childNode.id}' asked for approval ("${caughtChildError.message}"). Move the approval before or after the Loop node.`
+              )
+            : caughtChildError;
+          const childErrorMessage = childError instanceof Error ? childError.message : "Loop iteration failed";
+          // Branch routing: the body node's own On Error applies, as at the top level (a stop, a cancellation, a run
+          // timeout, a nested Loop's failure or an approval still fail the Loop).
+          const childOnError =
+            routing && !pauseAsked && childNode.type !== "loop_node" && !isCancellationError(caughtChildError) && !dependencies.abortSignal?.aborted
+              ? nodeErrorConfigOf(childNode)?.continueOnFail === true
+                ? "continue"
+                : getOnError(toRecord(childNode.config))
+              : "stop";
+          const handledOnError =
+            childOnError === "continue" || (childOnError === "branch" && (branchTargets.get(childNode.id)?.get(ERROR_OUTPUT_HANDLE)?.length ?? 0) > 0);
+          const errorCategory =
+            childError instanceof WorkflowError ? childError.category : categorizedProviderError(childError)?.category ?? ErrorCategory.UNKNOWN;
+          nodeResults.push({
+            nodeId: childNode.id,
+            status: "error",
+            startedAt: childStartedAt,
+            completedAt: nowIso(),
+            durationMs: Date.now() - childStarted,
+            input: childInput,
+            error: childErrorMessage,
+            ...(handledOnError ? { errorCategory } : {})
+          });
+          await dependencies.onNodeComplete?.({
+            nodeId: childNode.id,
+            nodeType: childNode.type,
+            status: "error",
+            completedAt: nowIso(),
+            durationMs: Date.now() - childStarted,
+            input: childInput,
+            error: childErrorMessage
+          });
+          if (handledOnError) {
+            hadContinuedErrors = true;
+            if (childOnError === "continue") {
+              recordPassOutput({ error: childErrorMessage }, childLabelScope.pendingLabels());
+            } else {
+              routeFailureToErrorOutput(childNode.id, {}, passBranches);
+              // The Error output carries the item the node failed on and the error, as at the top level.
+              recordPassOutput(
+                {
+                  ...withoutUsage(withoutRoutingKeys(childMerged)),
+                  error: childErrorMessage,
+                  errorCategory,
+                  failedNodeId: childNode.id,
+                  failedNodeType: childNode.type,
+                  ...(caughtChildError instanceof HttpStatusError ? { status: caughtChildError.status } : {})
+                },
+                childLabelScope.inputLabels()
+              );
+            }
+            continue;
+          }
+          throw new Error(
+            `Loop node '${node.id}' failed at iteration ${loopIndex} on child '${childNode.id}': ${childErrorMessage}`
+          );
+        } finally {
+          finishNodeSpan(childSpan, nodeResults, childNode.id);
+        }
+      }
+
+      loopItems.push({
+        index: loopIndex,
+        item: loopItem,
+        outputs: iterationOutputs
+      });
+    }
+
+    const output: Record<string, unknown> = {
+      items: loopItems,
+      count: loopItems.length
+    };
+    // Collect results: `collected`, one entry per pass (the body node's output, or the pass's outputs by body node id;
+    // with branch routing, the outputs of the body's last nodes that ran on the pass).
+    if (loopCollectsResults(nodeConfig)) {
+      const collectedIds = routing ? body.leaves : downstreamNodeIds;
+      output.collected = loopItems.map((pass) => loopPassResult(pass.outputs, collectedIds));
+    }
+
+    if (routing) {
+      // After the loop, a body node's `results` entry is the last pass that ran it.
+      for (const childId of downstreamNodeIds) {
+        if (lastRan.has(childId)) nodeOutputs.set(childId, lastRan.get(childId));
+        else nodeOutputs.delete(childId);
+      }
+      if (scopedItems.length > 0) routedLoopsWithPasses.add(node.id);
+      for (const childId of downstreamNodeIds) routedBodyNodes.set(childId, node.id);
+    }
+    if (!args.nested) settleRoutedBodies();
+
+    return { output, labels: labelState.finalize(unionLabels([itemLabels, ...passLabels]), output) };
+  };
+  /** Body nodes of Loops that route branches, by their Loop, since the outermost Loop started. */
+  const routedBodyNodes = new Map<string, string>();
+  const routedLoopsWithPasses = new Set<string>();
+
+  /**
+   * After the outermost Loop: a body node of a Loop that routes branches that no pass ran (while its Loop had passes)
+   * is recorded as skipped, and the nodes after it outside the bodies are skipped too, unless a body node that ran
+   * reaches them. A Loop with no items skips nothing, as before.
+   */
+  const settleRoutedBodies = () => {
+    const neverRan = [...routedBodyNodes.entries()]
+      .filter(([childId, loopId]) => routedLoopsWithPasses.has(loopId) && !routedBodyRan.has(childId))
+      .map(([childId]) => childId);
+    if (neverRan.length > 0) {
+      // Only paths that leave the bodies from a node that ran protect a node.
+      const leftFromRan = [...routedBodyRan].flatMap((childId) => (graphIndexes.outgoingExecution.get(childId) ?? []).filter((target) => !routedBodyNodes.has(target)));
+      const protectedNodes = descendantCache.getReachableFromRoots(leftFromRan);
+      for (const childId of neverRan) {
+        nodeResults.push({
+          nodeId: childId,
+          status: "skipped",
+          startedAt: nowIso(),
+          completedAt: nowIso(),
+          durationMs: 0,
+          output: { reason: "branch_not_taken" }
+        });
+        for (const candidate of descendantCache.getDescendants(childId)) {
+          if (routedBodyNodes.has(candidate) || protectedNodes.has(candidate)) continue;
           skippedByBranch.add(candidate);
           errorOutputOnlySkips.delete(candidate);
         }
       }
     }
-    return true;
+    routedBodyNodes.clear();
+    routedLoopsWithPasses.clear();
+    routedBodyRan.clear();
   };
 
   if (request.resumeState && request.approvalDecision) {
@@ -10043,6 +10408,7 @@ async function executeWorkflowRun(
       nodeOutputs: serializeNodeOutputs(nodeOutputs),
       nodeResults,
       skippedByBranch: [...skippedByBranch],
+      ...(loopInlineExecutedNodes.size > 0 ? { loopInlineNodes: [...loopInlineExecutedNodes] } : {}),
       tryCatchScopes: serializeTryCatchScopes(tryCatchScopes),
       hadContinuedErrors,
       finalOutput,
@@ -10387,211 +10753,17 @@ async function executeWorkflowRun(
       }
 
       if (node.type === "loop_node") {
-        const inputKey = typeof nodeConfig.inputKey === "string" ? nodeConfig.inputKey.trim() : "";
-        const itemVariable =
-          typeof nodeConfig.itemVariable === "string" && nodeConfig.itemVariable.trim()
-            ? nodeConfig.itemVariable.trim()
-            : "item";
-        const maxIterations =
-          typeof nodeConfig.maxIterations === "number" && Number.isFinite(nodeConfig.maxIterations) && nodeConfig.maxIterations > 0
-            ? Math.floor(nodeConfig.maxIterations)
-            : 100;
-        const templateData: Record<string, unknown> = {
-          ...globals,
-          ...merged,
-          parent_outputs: parentOutputs
-        };
-        let candidateItems = inputKey ? templateData[inputKey] : undefined;
-        if (inputKey) labelScope.readPath(inputKey);
-        if (candidateItems === undefined && inputKey) {
-          candidateItems = getValueByPath(templateData, inputKey);
-        }
-        const rawItems = Array.isArray(candidateItems) ? candidateItems : [candidateItems];
-        const scopedItems = rawItems.slice(0, maxIterations);
-        // The loop's Error output is not part of its body: it runs only when the loop fails.
-        const downstreamNodeIds = [
-          ...new Set(workflow.edges.filter((edge) => edge.source === node.id && isExecutionEdge(edge) && edge.sourceHandle !== ERROR_OUTPUT_HANDLE).map((edge) => edge.target))
-        ];
-        const downstreamNodes = downstreamNodeIds
-          .map((childId) => graphIndexes.nodeById.get(childId))
-          .filter((child): child is WorkflowNode => Boolean(child));
-
-        for (const child of downstreamNodes) {
-          const childParents = graphIndexes.incomingExecution.get(child.id) ?? [];
-          const isLoopScopedChild = childParents.length > 0 && childParents.every((parentId) => parentId === node.id);
-          if (isLoopScopedChild) {
-            loopInlineExecutedNodes.add(child.id);
-          }
-        }
-
-        const loopItems: Array<{
-          index: number;
-          item: unknown;
-          outputs: Record<string, unknown>;
-        }> = [];
-        // Phase 16 — each pass's child labels; the loop's output is their union.
-        const itemLabels = labelScope.inputLabels();
-        const passLabels: DataLabels[] = [];
-
-        for (let loopIndex = 0; loopIndex < scopedItems.length; loopIndex += 1) {
-          const loopItem = scopedItems[loopIndex];
-          const iterationGlobals: Record<string, unknown> = {
-            ...globals,
-            [itemVariable]: loopItem,
-            _loop_index: loopIndex
-          };
-          const iterationOutputs: Record<string, unknown> = {};
-
-          for (const childNode of downstreamNodes) {
-            const childStarted = Date.now();
-            const childStartedAt = nowIso();
-            const childParentIds = graphIndexes.incomingExecution.get(childNode.id) ?? [];
-            const childParentOutputs: Record<string, unknown> = {};
-            for (const parentId of childParentIds) {
-              if (parentId === node.id) {
-                childParentOutputs[parentId] = {
-                  [itemVariable]: loopItem,
-                  item: loopItem,
-                  _loop_index: loopIndex
-                };
-                continue;
-              }
-
-              if (nodeOutputs.has(parentId)) {
-                childParentOutputs[parentId] = parentOutputForEdge(parentId, childNode.id);
-              }
-            }
-
-            const childMerged = mergeParentOutputs(childParentOutputs);
-            childMerged[itemVariable] = loopItem;
-            childMerged._loop_index = loopIndex;
-            const childLabelScope = labelState.scope({
-              nodeId: childNode.id,
-              nodeType: childNode.type,
-              parents: Object.keys(childParentOutputs).map((parentId) => (parentId === node.id ? itemLabels : labelState.getFor(childNode.id, parentId))),
-              parentIds: Object.keys(childParentOutputs),
-              merged: childMerged,
-              globals: iterationGlobals
-            });
-            if (await declaresSensitiveSource(childNode, dependencies)) {
-              childLabelScope.add(SENSITIVE_LABELS);
-              labelState.record(childNode.id);
-            }
-            const childInput = captureNodeInputSnapshot(iterationGlobals, childMerged, childParentOutputs);
-            await dependencies.onNodeStart?.({
-              nodeId: childNode.id,
-              nodeType: childNode.type,
-              startedAt: childStartedAt,
-              input: childInput
-            });
-
-            // A loop body's node: a child of the Loop node's span, one per pass.
-            const childSpan = openNodeSpan(dependencies.instrument, childNode, nodeSpan, loopIndex);
-            try {
-              const { output: childOutput, attempts: childAttempts } = await childSpan.enter(() => executeNodeWithRetry(
-                childNode,
-                {
-                  globals: iterationGlobals,
-                  merged: childMerged,
-                  parentOutputs: childParentOutputs,
-                  nodeOutputs,
-                  workflow,
-                  nodeById: graphIndexes.nodeById,
-                  attachmentsBySource: graphIndexes.attachmentsBySource,
-                  callStack,
-                  toolPolicySubject,
-                  approvedHandoffKeys,
-                  approvedHandoffBy,
-                  writeToolCalls,
-                  recordAttachmentUsage,
-                  labelScope: childLabelScope
-                },
-                dependencies
-              ));
-              approvedHandoffKeys.clear();
-              writeToolCalls.clear();
-
-              iterationOutputs[childNode.id] = childOutput;
-              nodeOutputs.set(childNode.id, childOutput);
-              const childLabels = childLabelScope.finish(childOutput);
-              labelState.set(childNode.id, childLabels);
-              passLabels.push(childLabels);
-              if (childNode.type === "output") {
-                finalOutput = childOutput;
-                labelState.outputNodeId = childNode.id;
-              }
-              nodeResults.push({
-                nodeId: childNode.id,
-                status: "success",
-                startedAt: childStartedAt,
-                completedAt: nowIso(),
-                durationMs: Date.now() - childStarted,
-                input: childInput,
-                output: childOutput,
-                attempts: childAttempts > 1 ? childAttempts : undefined,
-                ...labelState.resultField(childNode.id)
-              });
-              await dependencies.onNodeComplete?.({
-                nodeId: childNode.id,
-                nodeType: childNode.type,
-                status: "success",
-                completedAt: nowIso(),
-                durationMs: Date.now() - childStarted,
-                input: childInput,
-                output: childOutput
-              });
-            } catch (caughtChildError) {
-              // Phase 11.2 — loop bodies run inline and cannot pause part-way.
-              const childError = isApprovalHandoffSignal(caughtChildError)
-                ? WorkflowError.nodeConfig(
-                    `Approvals cannot pause inside a Loop body: '${childNode.id}' asked for approval ("${caughtChildError.message}"). Move the approval before or after the Loop node.`
-                  )
-                : caughtChildError;
-              const childErrorMessage = childError instanceof Error ? childError.message : "Loop iteration failed";
-              nodeResults.push({
-                nodeId: childNode.id,
-                status: "error",
-                startedAt: childStartedAt,
-                completedAt: nowIso(),
-                durationMs: Date.now() - childStarted,
-                input: childInput,
-                error: childErrorMessage
-              });
-              await dependencies.onNodeComplete?.({
-                nodeId: childNode.id,
-                nodeType: childNode.type,
-                status: "error",
-                completedAt: nowIso(),
-                durationMs: Date.now() - childStarted,
-                input: childInput,
-                error: childErrorMessage
-              });
-              throw new Error(
-                `Loop node '${node.id}' failed at iteration ${loopIndex} on child '${childNode.id}': ${childErrorMessage}`
-              );
-            } finally {
-              finishNodeSpan(childSpan, nodeResults, childNode.id);
-            }
-          }
-
-          loopItems.push({
-            index: loopIndex,
-            item: loopItem,
-            outputs: iterationOutputs
-          });
-        }
-
-        const output: Record<string, unknown> = {
-          items: loopItems,
-          count: loopItems.length
-        };
-        // Collect results: `collected`, one entry per pass (the body node's output, or the pass's outputs by body node id).
-        if (loopCollectsResults(nodeConfig)) {
-          output.collected = loopItems.map((pass) => loopPassResult(pass.outputs, downstreamNodeIds));
-        }
+        const { output, labels: loopLabels } = await runLoop({
+          node,
+          nodeConfig,
+          loopGlobals: globals,
+          templateData: { ...globals, ...merged, parent_outputs: parentOutputs },
+          labelScope,
+          span: nodeSpan
+        });
 
         nodeOutputs.set(node.id, output);
-        labelState.set(node.id, labelState.finalize(unionLabels([itemLabels, ...passLabels]), output));
+        labelState.set(node.id, loopLabels);
         applySuccessfulNodeRouting(node, output);
         nodeResults.push({
           nodeId: node.id,

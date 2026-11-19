@@ -57,7 +57,7 @@ The approved output carries the incoming fields, the edited values, the proposed
 }
 ```
 
-A gate cannot be the body of a Loop node: loop bodies run inline and cannot pause part-way. Gate the loop's input or its output instead. Any other approval inside a Loop body (an Execute Workflow node whose sub-workflow has a gate, or an agent with the write-tool gate) fails the loop with "Approvals cannot pause inside a Loop body".
+A gate cannot be the body of a Loop node: loop bodies run inline and cannot pause part-way. Gate the loop's input or its output instead. Any other approval inside a Loop body (a Human Approval node, an Execute Workflow node whose sub-workflow has a gate, or an agent with the write-tool gate) fails the loop with "Approvals cannot pause inside a Loop body". In a Loop whose branches route, this applies to the passes that reach the approval: one on a branch no pass takes never runs.
 
 ### Nothing skips a gate
 
