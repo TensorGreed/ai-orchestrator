@@ -1,6 +1,6 @@
 ---
 title: "Starter templates that run without setup"
-description: "Ten everyday automations to start from: webhooks, schedules, forms, CSV, approvals, retries, loops, sub-workflows, document search and MCP tools. Each runs on built-in sample data, with no model or key."
+description: "Ten everyday automations to start from, from webhooks and forms to approvals and MCP tools. Each runs on built-in sample data, with no model or key."
 ---
 
 # Starter templates
