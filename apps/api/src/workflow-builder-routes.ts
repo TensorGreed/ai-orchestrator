@@ -1,7 +1,8 @@
 /**
  * Describe-it builder.
  *
- *   GET  /api/workflow-builder         builder+: { enabled, defaultModel? } (the model a build in ?projectId= uses)
+ *   GET  /api/workflow-builder         builder+: { enabled, defaultModel? } (the model a build in ?projectId= uses, with
+ *                                      the id of the saved credential it uses)
  *   POST /api/workflow-builder/build   builder+: a description in, a workflow draft preview out (nothing is saved)
  *
  * The model is the one the request names, else the default model (a provider whose key the server's environment sets,
@@ -118,7 +119,11 @@ export function registerWorkflowBuilderRoutes(deps: WorkflowBuilderRoutesDeps): 
     const projectId = typeof request.query.projectId === "string" && request.query.projectId ? request.query.projectId : DEFAULT_PROJECT_ID;
     if (!(await deps.canCreateIn(user, projectId)).ok) return { enabled: true };
     const model = await defaultModelFor(user, projectId);
-    return { enabled: true, defaultModel: { providerId: model.providerId, model: model.model } };
+    // The saved credential it uses goes by its id (never the key), so the dialog shows the credential a build uses.
+    return {
+      enabled: true,
+      defaultModel: { providerId: model.providerId, model: model.model, ...(model.secretRef?.secretId ? { secretRef: { secretId: model.secretRef.secretId } } : {}) }
+    };
   });
 
   app.post<{ Body: unknown }>("/api/workflow-builder/build", async (request, reply) => {

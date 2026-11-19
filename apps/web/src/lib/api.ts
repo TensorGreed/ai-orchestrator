@@ -621,7 +621,10 @@ export async function duplicateWorkflow(
  */
 export async function fetchWorkflowBuilderStatus(projectId?: string) {
   const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
-  return apiRequest<{ enabled: boolean; defaultModel?: { providerId: string; model: string } }>(`/api/workflow-builder${query}`);
+  // `secretRef` names the saved credential the default model uses (its id only, never the key).
+  return apiRequest<{ enabled: boolean; defaultModel?: { providerId: string; model: string; secretRef?: { secretId: string } } }>(
+    `/api/workflow-builder${query}`
+  );
 }
 
 /** Describe-it builder: a description in, a workflow draft preview out (nothing is saved). */
