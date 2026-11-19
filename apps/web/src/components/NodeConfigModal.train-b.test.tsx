@@ -160,6 +160,19 @@ describe("a view-only inspector", () => {
     await waitFor(() => expect(document.querySelectorAll("[draggable='true']").length).toBe(0));
   });
 
+  it("shows no helper chips, no Run node and no permission error from the preview", async () => {
+    vi.mocked(api.previewExpression).mockRejectedValue(new api.ApiError("Insufficient permissions", 403));
+    renderInspector(
+      <NodeInspector {...props({ readOnlyReason: "You have the viewer role.", node: node("after", "http_request", { method: "GET", urlTemplate: "{{count}}" }) })} />
+    );
+    const url = screen.getByLabelText("URL Template") as HTMLTextAreaElement;
+    fireEvent.focus(url);
+    expect(screen.queryByRole("button", { name: "$json" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Run node" })).toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    expect(screen.queryByText("Insufficient permissions")).toBeNull();
+  });
+
   it("makes Input fields draggable for someone who may edit", async () => {
     renderInspector(<NodeInspector {...props()} />);
     const inputTab = screen.queryByRole("tab", { name: "Input" });

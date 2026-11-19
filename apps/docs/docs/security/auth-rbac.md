@@ -181,11 +181,12 @@ in `MFA_REQUIRED_ROLES`, see [MFA required per role](#mfa-required-per-role)).
   users). `POST /api/projects/:id/members` takes `{ "email": "..." }` in place of `userId`, and the member list carries
   each member's `email`.
 - **What the editor shows.** Viewers and operators open workflows read-only: Save, Add node and Clear are disabled, and
-  their tooltip says why; viewers cannot run. Operators run the saved workflow where they have `workflow:execute`
+  their tooltip says why; viewers cannot run. Operators run the released version where they have `workflow:execute`
   (Run and Webhook run). A builder sees the same for a workflow they may only view (one shared with them, or in a
-  project where their role is view-only); a workflow they may run but not change runs as saved. On a read-only
-  workflow nodes open but cannot be moved, connected or saved, outputs show no `+`, the inspector offers no <span v-pre>`{{`</span>
-  suggestions and no Input fields to drag in, and the workflow settings in **More actions** are not offered.
+  project where their role is view-only); a workflow they may run but not change runs its released version. On a
+  read-only workflow nodes open but cannot be moved, connected or saved, the node ring offers only Edit, outputs show
+  no `+`, the inspector offers no <span v-pre>`{{`</span> suggestions, helper chips, Input fields to drag in or
+  **Run node**, and the workflow settings in **More actions** are not offered.
   `GET /api/workflows/:id/access` answers what the signed-in user may do.
 - **Shared with this project.** The Workflows page lists the workflows other projects share to the active one, with
   the access members get there (`GET /api/projects/:id/shared-workflows`).

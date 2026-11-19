@@ -83,6 +83,7 @@ import {
   fetchProviderModels,
   fetchWorkflow,
   fetchWorkflows,
+  ApiError,
   previewExpression,
   testCodeNode,
   testConnector,
@@ -1284,7 +1285,8 @@ function ExpressionField({
         .catch((error) => {
           if (cancelled) return;
           setPreviewText("");
-          setPreviewError(error instanceof Error ? error.message : "Preview failed.");
+          // A role that may not preview (a viewer) sees no preview rather than a permission error under every field.
+          setPreviewError(error instanceof ApiError && error.status === 403 ? "" : error instanceof Error ? error.message : "Preview failed.");
           setMissingPaths([]);
         });
     }, 350);
@@ -1374,7 +1376,7 @@ function ExpressionField({
       />
       {autocomplete.list}
       {formatError && <div className="cfg-field-error">{formatError}</div>}
-      {focusWithin ? (
+      {focusWithin && !assist?.readOnly ? (
         <div className="expression-suggestions" aria-label={`${label} suggestions`}>
           {EXPRESSION_SUGGESTIONS.map((item) => (
             <button
@@ -1390,7 +1392,7 @@ function ExpressionField({
           ))}
         </div>
       ) : null}
-      {mode === "template" && editing && (
+      {mode === "template" && editing && !assist?.readOnly && (
         <div className="cfg-tip" data-testid="template-scope-tip">
           <code>{"{{field}}"}</code> reads the steps connected straight into this one. For an earlier step, use{" "}
           <code>{"{{results.<nodeId>.field}}"}</code>. Type <code>{"{{"}</code> for the fields of the last run, or drag a
@@ -10771,9 +10773,12 @@ export function NodeInspector({
             <path d="M6 3v10M10 3v10" stroke="currentColor" />
           </svg>
         </button>
-        <button className="insp-btn accent insp-run" type="button" onClick={onExecuteStep} title="Run this node with the data it received">
-          Run node
-        </button>
+        {/* Running one node is an editor option (builders and admins); a read-only inspector does not offer it. */}
+        {readOnlyReason ? null : (
+          <button className="insp-btn accent insp-run" type="button" onClick={onExecuteStep} title="Run this node with the data it received">
+            Run node
+          </button>
+        )}
         <button type="button" className="insp-close" aria-label="Close inspector" onClick={() => requestClose()}>
           ×
         </button>
