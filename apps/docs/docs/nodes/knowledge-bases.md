@@ -5,7 +5,7 @@ description: "Built-in L2M knowledge bases: a SQLite-backed vector store with no
 
 # Knowledge Bases (built-in persistent vector store)
 
-Phase 9.1 ships a SQLite-backed vector store with no external dependencies. Create a knowledge base, ingest documents (programmatically or via the upcoming Studio UI), and target it from a `rag_retrieve` node — chunks survive across workflow runs.
+Phase 9.1 ships a SQLite-backed vector store with no external dependencies. Create a knowledge base, ingest documents (on the **Knowledge** page or with the API), and target it from a `rag_retrieve` node — chunks survive across workflow runs.
 
 Concepts: <Term id="rag">retrieval-augmented generation</Term>, <Term id="vector-store">vector store</Term>, <Term id="hybrid-search">hybrid search</Term>. The [RAG knowledge base recipe](/recipes/rag-knowledge-base) builds one that runs with no API key.
 
@@ -45,8 +45,16 @@ curl -X POST http://localhost:4000/api/knowledge-bases \
 
 `embedderId` is one of:
 
-- `token-embedder` — zero-deps hash-based 64-d embedder. Demo only — quality is poor.
+- `token-embedder` — built in, needs no key, and nothing leaves the server. Its 64-d vectors are a hash of the words,
+  so on their own they rank poorly; searches with it therefore run [hybrid](#hybrid-search-phase-9-3) by default
+  (keywords and vectors, fused), which finds the passages that share the question's words. For search by meaning, use
+  one of the model embedders below.
 - `openai-embedder`, `azure-openai-embedder`, `cohere-embedder`, `mistral-embedder`, `google-vertex-embedder`, `huggingface-embedder` — real embedders. Pass credentials via `embedderConfig.secretRef.secretId` (preferred) or the matching `*_API_KEY` env var.
+
+Without a key, use the `token-embedder`: L2M ships no model weights and has no local model embedder. `pnpm install`
+reports `Ignored build scripts: ... onnxruntime-node`: that package belongs to the optional
+[names and addresses service](../operations/entity-service.md), not to knowledge bases. Its install script only
+downloads GPU libraries, and the CPU build it uses is already in the package, so the warning is safe to ignore.
 
 `embedderConfig` is the same shape that `rag_retrieve.vectorStoreConfig` uses (`baseUrl`, `model`, `endpoint`, `deployment`, `apiVersion`, `secretRef`). Whatever you set here is what the API uses on `/ingest` and `/search`; on a workflow run you must pass the matching `embedderId` on the `rag_retrieve` node so the query vector lives in the same space as the indexed chunks.
 
@@ -71,7 +79,7 @@ curl -X POST http://localhost:4000/api/knowledge-bases/<id>/upload \
 Response:
 
 ```json
-{ "sourceId": "support-faq-v1", "documentsLoaded": 1, "chunksInserted": 4, "dimensions": 64 }
+{ "sourceId": "support-faq-v1", "documentsLoaded": 1, "chunksInserted": 4, "dimensions": 64, "kind": "markdown" }
 ```
 
 Loaders ship for:
@@ -81,7 +89,42 @@ Loaders ship for:
 - **CSV** — RFC-4180-ish parser; either pick a `csv.textColumn` (other columns become metadata) or omit it to flatten every column into `key: value` lines per row
 - **JSON** / **NDJSON** — array elements become docs; objects with `{ text, metadata }` are honored verbatim
 
-`kind` is auto-inferred from the filename extension; pass an explicit `kind` to override. PDF and DOCX are intentionally deferred (each needs a binary parser); use `POST /ingest` with externally pre-extracted text in the meantime.
+- **PDF** — sent as the file's bytes in `contentBase64` (below). The text of each page is read and every chunk keeps
+  its page in `metadata.page` (1-based), with `metadata.pageCount`.
+
+`kind` is auto-inferred from the filename extension; pass an explicit `kind` to override.
+
+### PDFs and other files
+
+Send a PDF as its bytes, base64-encoded, in `contentBase64` instead of `content`. The Knowledge page does this when you
+pick a `.pdf` file.
+
+```bash
+curl -X POST http://localhost:4000/api/knowledge-bases/<id>/upload \
+  -H "content-type: application/json" \
+  --cookie "ao_session=..." \
+  -d "{\"filename\": \"loyalty.pdf\", \"contentBase64\": \"$(base64 -w0 loyalty.pdf)\"}"
+```
+
+```json
+{ "sourceId": "loyalty.pdf", "documentsLoaded": 2, "chunksInserted": 2, "dimensions": 64, "kind": "pdf", "pageCount": 2 }
+```
+
+- The bytes decide what the file is, not its name. A PDF is read in the same sandboxed reader that content rule
+  document scans and Extract from File use, under the same limits (`CONTENT_SCAN_MAX_BYTES`,
+  `CONTENT_SCAN_MAX_PAGES`, `CONTENT_SCAN_MAX_CHARS`, `CONTENT_SCAN_PDF_TIMEOUT_MS`). Comments, form fields and
+  attachments are not added.
+- **Scanned PDFs** (pictures of pages) have no text, and there is no text recognition (OCR): such a PDF is refused
+  with `400` and code `pdf_no_text`. Pages without text in an otherwise readable PDF are skipped, and the answer's
+  `notice` says how many.
+- A password-protected PDF (`pdf_password`) or a damaged one (`pdf_unreadable`) is refused, and so is one that takes
+  longer than `CONTENT_SCAN_PDF_TIMEOUT_MS` to read (`422`, `pdf_timeout`).
+- Text files sent as bytes may be UTF-8, UTF-16 (with a byte order mark) or Latin-1 / Windows-1252.
+- **Word, Excel, PowerPoint** and other office files cannot be read yet (`office_file`): save them as a PDF with
+  selectable text, or as plain text. Images and other binary files are refused too (`not_text`).
+- A PDF sent as text in `content` is refused (`pdf_as_text`): reading a PDF as text loses its contents.
+
+Nothing is stored when an upload is refused; the answer is `{ "error": "...", "code": "..." }`.
 
 ## Ingesting documents
 
@@ -148,6 +191,7 @@ Each retrieved document carries provenance metadata:
 - `chunkId` — stable ID for the chunk row
 - `chunkIndex`
 - `sourceId`
+- `page` and `pageCount` — for chunks of an uploaded PDF
 - `similarityScore` — cosine similarity, 0–1, rounded to 3 decimals
 
 Use these in downstream prompt templates to ask the LLM for source-cited answers (Phase 9.4 will make citations first-class).
@@ -167,15 +211,23 @@ curl -X POST http://localhost:4000/api/knowledge-bases/:id/search \
   -d '{ "query": "how do I change my password", "topK": 5 }'
 ```
 
-Returns the top-K chunks with the same provenance metadata as the workflow path.
+Returns the top-K chunks with the same provenance metadata as the workflow path, and `mode`: `hybrid` for a knowledge
+base built with the `token-embedder`, `vector` otherwise.
 
 ## Hybrid search (Phase 9.3)
 
 Built-in KBs index every chunk for keyword search at insert time, so keyword search and dense vector search both target the same content. On SQLite the index is an FTS5 table ranked with BM25; on Postgres it is a `tsvector` column (`to_tsvector('english', content)`, GIN-indexed) ranked with `ts_rank_cd`. The mode is called `bm25` on both. The `rag_retrieve` node accepts `searchMode`:
 
-- `vector` (default) — cosine over dense embeddings only. Catches paraphrases and semantic similarity.
+- `vector` — cosine over dense embeddings only. Catches paraphrases and semantic similarity. The default with every
+  model embedder.
 - `bm25` — keyword search only. Catches exact-keyword matches, rare terms, identifiers, error codes.
 - `hybrid` — fuses both via Reciprocal Rank Fusion (RRF). Industry-standard combiner — each ranker contributes `1 / (k + rank)` per doc; the sum across rankers is the final score. Great for catching both kinds of matches in one query.
+  The default with the built-in `token-embedder` (and when no embedder is set): its vectors alone rank poorly. The
+  editor says so under **Search Mode**; pick **Vector** to keep vector-only search. The editor saves the mode you
+  pick. Before this release it saved **Vector** as no mode, so such a node now runs hybrid: pick Vector again.
+
+The Knowledge page's test search (`POST /api/knowledge-bases/:id/search`) ranks the same way a node with no
+`searchMode` does, and its answer says which: `"mode": "hybrid"` or `"mode": "vector"`.
 
 ```json
 {

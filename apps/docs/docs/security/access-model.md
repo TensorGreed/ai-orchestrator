@@ -108,7 +108,7 @@ Details: [Sharing a workflow with people](./auth-rbac.md#sharing-a-workflow-with
 
 Someone who has a workflow only through a person share sees only their own runs of it: the runs they started, and the
 runs that used their session memory. It applies when they are not a member of its project with a role that reads it,
-cannot read it through a project share, and are not an admin.
+are not a member of a project it is shared to, and are not an admin.
 
 - Anyone else's run answers `404`, as a missing run. Lists are filtered before paging.
 - They see and decide only the approvals and tool questions of their own runs.
@@ -116,7 +116,11 @@ cannot read it through a project share, and are not an admin.
   dead-letter queue) leaves the workflow out.
 - `GET /api/workflows/:id/access` answers `ownRunsOnly: true`.
 
-In practice this needs `PROJECT_ISOLATION=strict`. Under `role`, a person's global role already reads every project.
+It holds under both `PROJECT_ISOLATION` settings. Under `role`, the global role that opens every project to a
+non-member does not count for a workflow shared with them: the person share decides, and they see their own runs.
+Workflows that are not shared with them keep the view their role gives. A builder in that position can still edit and
+publish the shared workflow through their role, but sees none of what is built from other people's runs: golden sets,
+evals, release-gate reasons and replay captures. Add them to the project to give them those.
 
 Details: [Own runs only](./auth-rbac.md#own-runs-only).
 

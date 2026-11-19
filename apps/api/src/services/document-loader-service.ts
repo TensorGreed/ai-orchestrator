@@ -11,9 +11,9 @@
  *   - HTML uses a tiny regex-based stripper rather than `cheerio` to avoid a
  *     new runtime dep. Good enough for typical web pages and markdown-ish
  *     HTML; for full-DOM extraction we'd add cheerio later.
- *   - PDF / DOCX are deliberately out of scope for 9.2. They each need a
- *     binary parser and platform-specific binaries; will land as 9.2.x
- *     follow-ups so this commit stays focused.
+ *   - PDFs are read by knowledge-upload.ts with the sandboxed PDF reader
+ *     (one document per page); office files and other binary files are
+ *     refused there, before any loader here sees them.
  *   - All loaders are pure — they don't touch the network, FS, or DB. Easy
  *     to test in isolation.
  */

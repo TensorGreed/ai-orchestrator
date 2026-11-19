@@ -38,7 +38,7 @@ function secretIdOf(config: Record<string, unknown>): string {
 }
 
 const EMBEDDER_OPTIONS: Array<{ value: string; label: string; hint: string }> = [
-  { value: "token-embedder", label: "Token (built-in, demo only)", hint: "Zero-deps 64-d hash. Quality is poor — use only to demo the pipeline." },
+  { value: "token-embedder", label: "Token (built-in, no key)", hint: "Needs no key and nothing leaves the server. Its vectors are a simple word hash, so searches run hybrid (keywords and vectors, fused) to find the right passages; for search by meaning, pick a model embedder." },
   { value: "openai-embedder", label: "OpenAI (text-embedding-3-small)", hint: "Requires OPENAI_API_KEY or a key from Secrets." },
   { value: "azure-openai-embedder", label: "Azure OpenAI", hint: "Set the endpoint and deployment below." },
   { value: "cohere-embedder", label: "Cohere (embed-english-v3.0)", hint: "Requires COHERE_API_KEY or a key from Secrets." },
@@ -114,7 +114,7 @@ export function KnowledgeBasePage({ isAdmin, activeProjectId }: KnowledgeBasePag
         <div className="page-head-copy">
           <h2 className="page-title">Knowledge bases</h2>
           <p className="page-sub">
-            Persistent SQLite-backed vector store. Upload documents, chunk + embed them, then reference the KB id from a <code>rag_retrieve</code> node with <code>vectorStoreId: "knowledge-base"</code>.
+            Upload documents (PDF, text, Markdown, HTML, CSV or JSON); they are split into chunks and stored for search. To use one in a workflow, add a RAG Retrieve node, set its Vector Store to Knowledge base and pick it.
           </p>
         </div>
         {isAdmin && (
@@ -409,7 +409,7 @@ function KnowledgeBaseDetail({
 
       <UploadPanel kbId={kbId} onUploaded={async () => { await refresh(); await onChanged(); }} onError={setError} />
 
-      <SearchPanel kbId={kbId} onError={setError} />
+      <SearchPanel kbId={kbId} embedderId={kb.embedderId} onError={setError} />
 
       <section className="kb-section">
         <h4>Sources ({sources.length})</h4>
@@ -454,6 +454,7 @@ function KnowledgeBaseDetail({
                 <div className="kb-chunk-meta">
                   <span>#{c.chunkIndex}</span>
                   {c.sourceId && <span><code>{c.sourceId}</code></span>}
+                  {typeof c.metadata?.page === "number" && <span>page {c.metadata.page}</span>}
                 </div>
                 <div className="kb-chunk-content">{c.content}</div>
               </li>
@@ -463,6 +464,21 @@ function KnowledgeBaseDetail({
       </section>
     </div>
   );
+}
+
+/** Files read as text in the browser; anything else (a PDF) is sent as its bytes. */
+const TEXT_FILE = /\.(txt|md|markdown|html?|csv|json|ndjson)$/i;
+function isTextFile(name: string): boolean {
+  return TEXT_FILE.test(name);
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const step = 0x8000;
+  for (let index = 0; index < bytes.length; index += step) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + step));
+  }
+  return btoa(binary);
 }
 
 function UploadPanel({
@@ -483,7 +499,9 @@ function UploadPanel({
   const [chunkOverlap, setChunkOverlap] = useState("80");
   const [csvTextColumn, setCsvTextColumn] = useState("");
   const [busy, setBusy] = useState(false);
-  const [lastResult, setLastResult] = useState<{ sourceId: string; documentsLoaded: number; chunksInserted: number } | null>(null);
+  /** A file that is not plain text (a PDF): sent as its bytes, and the server reads it. */
+  const [fileBytes, setFileBytes] = useState<{ name: string; base64: string } | null>(null);
+  const [lastResult, setLastResult] = useState<{ sourceId: string; documentsLoaded: number; chunksInserted: number; kind?: string; pageCount?: number; notice?: string } | null>(null);
 
   const effectiveKind: DocumentKind = useMemo(() => {
     if (kindOverride !== "auto") return kindOverride;
@@ -499,12 +517,31 @@ function UploadPanel({
 
   const handleFile = useCallback(async (file: File) => {
     setFilename(file.name);
-    setContent(await file.text());
+    setLastResult(null);
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (isTextFile(file.name)) {
+      // UTF-8 text goes in the editor; a file in another encoding (UTF-16, Latin-1) goes as bytes and the server
+      // decodes it, since reading it as UTF-8 here would mangle it.
+      try {
+        const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes).replace(/^\uFEFF/, "");
+        setFileBytes(null);
+        setContent(text);
+        return;
+      } catch {
+        setContent("");
+        setFileBytes({ name: file.name, base64: bytesToBase64(bytes) });
+        return;
+      }
+    }
+    // A PDF (or anything else that is not text) goes as its bytes: read as text it would be garbage. The server reads
+    // a PDF's pages and refuses other files with a message.
+    setContent("");
+    setFileBytes({ name: file.name, base64: bytesToBase64(bytes) });
   }, []);
 
   const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!content.trim()) {
+    if (!fileBytes && !content.trim()) {
       onError("Content is empty.");
       return;
     }
@@ -515,19 +552,27 @@ function UploadPanel({
         chunkSize: Number(chunkSize),
         chunkOverlap: Number(chunkOverlap)
       };
-      const res = await uploadKnowledgeBaseDocument(kbId, {
-        filename: filename || undefined,
-        kind: effectiveKind,
-        content,
-        sourceId: sourceId.trim() || undefined,
-        chunking,
-        csv: effectiveKind === "csv" && csvTextColumn.trim()
-          ? { textColumn: csvTextColumn.trim() }
-          : undefined
-      });
+      const res = await uploadKnowledgeBaseDocument(kbId, fileBytes
+        ? {
+            filename: fileBytes.name,
+            contentBase64: fileBytes.base64,
+            sourceId: sourceId.trim() || undefined,
+            chunking
+          }
+        : {
+            filename: filename || undefined,
+            kind: effectiveKind,
+            content,
+            sourceId: sourceId.trim() || undefined,
+            chunking,
+            csv: effectiveKind === "csv" && csvTextColumn.trim()
+              ? { textColumn: csvTextColumn.trim() }
+              : undefined
+          });
       setLastResult(res);
       setContent("");
       setFilename("");
+      setFileBytes(null);
       setSourceId("");
       await onUploaded();
     } catch (err) {
@@ -535,7 +580,7 @@ function UploadPanel({
     } finally {
       setBusy(false);
     }
-  }, [content, strategy, chunkSize, chunkOverlap, kbId, filename, effectiveKind, sourceId, csvTextColumn, onUploaded, onError]);
+  }, [content, fileBytes, strategy, chunkSize, chunkOverlap, kbId, filename, effectiveKind, sourceId, csvTextColumn, onUploaded, onError]);
 
   return (
     <section className="kb-section">
@@ -545,7 +590,7 @@ function UploadPanel({
           <label>File
             <input
               type="file"
-              accept=".txt,.md,.markdown,.html,.htm,.csv,.json,.ndjson"
+              accept=".pdf,.txt,.md,.markdown,.html,.htm,.csv,.json,.ndjson"
               onChange={(e) => {
                 const f = e.target.files?.[0];
                 if (f) void handleFile(f);
@@ -556,6 +601,7 @@ function UploadPanel({
             <input type="text" value={sourceId} onChange={(e) => setSourceId(e.target.value)} placeholder="auto-generated if empty" />
           </label>
         </div>
+        {!fileBytes && (
         <div className="kb-form-row kb-form-row-2">
           <label>Kind
             <select value={kindOverride} onChange={(e) => setKindOverride(e.target.value as DocumentKind | "auto")}>
@@ -570,6 +616,19 @@ function UploadPanel({
             <label>CSV text column<input type="text" value={csvTextColumn} onChange={(e) => setCsvTextColumn(e.target.value)} placeholder="body" /></label>
           )}
         </div>
+        )}
+        {fileBytes ? (
+          <div className="kb-form-row kb-file-picked" role="status">
+            <span>
+              <strong>{fileBytes.name}</strong>: {/\.pdf$/i.test(fileBytes.name)
+                ? "the text of each page is read and every chunk keeps its page number. Scanned pages have no text and are skipped."
+                : "not a text file; it is checked when you upload."}
+            </span>
+            <button type="button" className="kb-link-btn" onClick={() => { setFileBytes(null); setFilename(""); }}>
+              Clear
+            </button>
+          </div>
+        ) : (
         <div className="kb-form-row">
           <label>Content (or pick a file above)
             <textarea
@@ -581,6 +640,7 @@ function UploadPanel({
             />
           </label>
         </div>
+        )}
         <div className="kb-form-row kb-form-row-3">
           <label>Strategy
             <select value={strategy} onChange={(e) => setStrategy(e.target.value as ChunkStrategy)}>
@@ -593,13 +653,18 @@ function UploadPanel({
           <label>Overlap<input type="number" min="0" value={chunkOverlap} onChange={(e) => setChunkOverlap(e.target.value)} /></label>
         </div>
         <div className="kb-form-row">
-          <button type="submit" className="pg-btn primary" disabled={busy || !content.trim()}>
+          <button type="submit" className="pg-btn primary" disabled={busy || (!fileBytes && !content.trim())}>
             {busy ? "Ingesting…" : "Upload & ingest"}
           </button>
         </div>
         {lastResult && (
           <div className="kb-success">
-            ✓ Ingested <strong>{lastResult.chunksInserted}</strong> chunk{lastResult.chunksInserted === 1 ? "" : "s"} from {lastResult.documentsLoaded} document{lastResult.documentsLoaded === 1 ? "" : "s"} under source <code>{lastResult.sourceId}</code>.
+            ✓ Ingested <strong>{lastResult.chunksInserted}</strong> chunk{lastResult.chunksInserted === 1 ? "" : "s"} from{" "}
+            {lastResult.kind === "pdf"
+              ? `${lastResult.documentsLoaded} page${lastResult.documentsLoaded === 1 ? "" : "s"} with text${lastResult.pageCount !== undefined ? ` (of ${lastResult.pageCount})` : ""}`
+              : `${lastResult.documentsLoaded} document${lastResult.documentsLoaded === 1 ? "" : "s"}`}{" "}
+            under source <code>{lastResult.sourceId}</code>.
+            {lastResult.notice && <div className="kb-subtle">{lastResult.notice}</div>}
           </div>
         )}
       </form>
@@ -607,10 +672,11 @@ function UploadPanel({
   );
 }
 
-function SearchPanel({ kbId, onError }: { kbId: string; onError: (msg: string) => void }) {
+function SearchPanel({ kbId, embedderId, onError }: { kbId: string; embedderId: string; onError: (msg: string) => void }) {
   const [query, setQuery] = useState("");
   const [topK, setTopK] = useState("5");
-  const [results, setResults] = useState<Array<{ id: string; text: string; metadata: Record<string, unknown> & { sourceId?: string | null; similarityScore?: number } }>>([]);
+  const [results, setResults] = useState<Array<{ id: string; text: string; metadata: Record<string, unknown> & { sourceId?: string | null; similarityScore?: number; page?: number; retrieval?: { rrfScore?: number } } }>>([]);
+  const [mode, setMode] = useState<"vector" | "hybrid" | null>(null);
   const [busy, setBusy] = useState(false);
 
   const handleSearch = useCallback(async (e: React.FormEvent) => {
@@ -620,6 +686,7 @@ function SearchPanel({ kbId, onError }: { kbId: string; onError: (msg: string) =
     try {
       const r = await searchKnowledgeBase(kbId, query, Number(topK));
       setResults(r.results);
+      setMode(r.mode ?? null);
     } catch (err) {
       onError(formatError(err));
     } finally {
@@ -631,7 +698,8 @@ function SearchPanel({ kbId, onError }: { kbId: string; onError: (msg: string) =
     <section className="kb-section">
       <h4>Test search</h4>
       <p className="kb-subtle">
-        Run a similarity search using the KB's configured embedder. Useful for sanity-checking retrieval before wiring it into a workflow.
+        Try a question before wiring the knowledge base into a workflow. It ranks the way a RAG Retrieve node does by default:{" "}
+        {embedderId === "token-embedder" ? "hybrid (keywords and the built-in Token embedder's vectors, fused)." : "by meaning, with the knowledge base's embedder."}
       </p>
       <form onSubmit={handleSearch} className="kb-create-form">
         <div className="kb-form-row kb-form-row-2">
@@ -650,8 +718,13 @@ function SearchPanel({ kbId, onError }: { kbId: string; onError: (msg: string) =
             <li key={r.id} className="kb-chunk-item">
               <div className="kb-chunk-meta">
                 <span>#{idx + 1}</span>
-                <span>score {(r.metadata.similarityScore ?? 0).toFixed(3)}</span>
+                <span>
+                  {mode === "hybrid" && typeof r.metadata.retrieval?.rrfScore === "number"
+                    ? `fused score ${r.metadata.retrieval.rrfScore.toFixed(3)}`
+                    : `score ${(r.metadata.similarityScore ?? 0).toFixed(3)}`}
+                </span>
                 {r.metadata.sourceId && <span><code>{r.metadata.sourceId}</code></span>}
+                {typeof r.metadata.page === "number" && <span>page {r.metadata.page}</span>}
               </div>
               <div className="kb-chunk-content">{r.text}</div>
             </li>

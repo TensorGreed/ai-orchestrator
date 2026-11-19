@@ -138,6 +138,7 @@ export function GuardProfilesView({ projects, workflows, activeProjectId, role }
               <li key={profile.id}>
                 <button type="button" className={profile.id === selectedId ? "guard-profile-item active" : "guard-profile-item"} aria-current={profile.id === selectedId} onClick={() => setSelectedId(profile.id)}>
                   <span className="guard-profile-name">{profile.name}</span>
+                  {profile.builtIn && profile.description && <span className="guard-cell-sub">{profile.description}</span>}
                   <span className="mono-cell guard-cell-sub">
                     {profile.id} · v{profile.latestVersion}
                     {profile.builtIn ? " · built-in" : ""}
@@ -417,7 +418,7 @@ function GuardProfileEditor({
             )}
           </div>
         </div>
-        {summary.builtIn && <p className="kb-subtle">The built-in rule set ships with L2M and cannot be edited. Duplicate it to make a rule set you can change.</p>}
+        {summary.builtIn && <p className="kb-subtle">Built-in rule sets ship with L2M and cannot be edited. Use this one as it is (pick it on a Content Rules node or in Bindings above), or duplicate it to make a rule set you can change.</p>}
 
         <div className="guard-settings-grid">
           <label>

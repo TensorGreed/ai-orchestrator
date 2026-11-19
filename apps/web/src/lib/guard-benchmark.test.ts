@@ -66,7 +66,7 @@ describe("content rules benchmark helpers", () => {
     expect(canRunBenchmark("viewer")).toBe(false);
     expect(benchmarkDraftDenial("admin", { builtIn: true })).toBeNull();
     expect(benchmarkDraftDenial("builder", { builtIn: false })).toBeNull();
-    expect(benchmarkDraftDenial("builder", { builtIn: true })).toMatch(/default rule set is read-only/);
+    expect(benchmarkDraftDenial("builder", { builtIn: true })).toMatch(/Built-in rule sets are read-only/);
     expect(benchmarkDraftDenial("builder", { builtIn: false, enforced: true })).toMatch(/A project enforces/);
     expect(benchmarkDraftDenial("operator", { builtIn: false })).toMatch(/Only admins and builders/);
   });

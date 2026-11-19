@@ -102,7 +102,7 @@ export function benchmarkComparisonLine(comparison: GuardBenchmarkJudgement | nu
 export function benchmarkDraftDenial(role: string, profile: { builtIn: boolean; enforced?: boolean }): string | null {
   if (role === "admin") return null;
   if (role !== "builder") return "Only admins and builders can run content rules benchmarks.";
-  if (profile.builtIn) return "The default rule set is read-only: only an admin can benchmark a draft of it. Duplicate it to benchmark your own.";
+  if (profile.builtIn) return "Built-in rule sets are read-only: only an admin can benchmark a draft of this one. Duplicate it to benchmark your own.";
   if (profile.enforced) return "A project enforces this rule set: only an admin can benchmark a draft of it.";
   return null;
 }

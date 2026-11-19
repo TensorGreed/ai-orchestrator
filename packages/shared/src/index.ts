@@ -62,3 +62,4 @@ export * from "./node-ids";
 export * from "./node-outputs";
 export * from "./workflow-builder";
 export * from "./public-entry";
+export * from "./rag-search";

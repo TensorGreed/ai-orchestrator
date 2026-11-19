@@ -86,7 +86,8 @@ import {
   type WorkflowExecutionState,
   type WorkflowNode,
   WorkflowError,
-  WORKFLOW_TOOL_ADAPTER_ID
+  WORKFLOW_TOOL_ADAPTER_ID,
+  defaultRagSearchMode
 } from "@ai-orchestrator/shared";
 import { diffWorkflows } from "@ai-orchestrator/shared";
 import { BUDGET_SCOPE_TYPES, isBudgetScopeType, readTraceCarrier, repairWorkflowErrorConfigs, type BudgetScopeType } from "@ai-orchestrator/shared";
@@ -119,6 +120,7 @@ import {
   GoogleVertexEmbeddingAdapter,
   HuggingFaceEmbeddingAdapter,
   chunkDocuments,
+  pdfExtractionLimits,
   convertExternalWorkflow,
   ExternalWorkflowImportError,
   outputLabelsOf,
@@ -130,7 +132,8 @@ import {
   type KnowledgeBaseStore,
   type ReplayNodeHook
 } from "@ai-orchestrator/workflow-engine";
-import { loadDocuments, inferDocumentKind, type DocumentKind } from "./services/document-loader-service";
+import { type DocumentKind } from "./services/document-loader-service";
+import { KnowledgeUploadError, loadKnowledgeUpload, type LoadedUpload } from "./services/knowledge-upload.js";
 import { type McpServerRecord } from "./db/database";
 import { PostgresStore } from "./db/postgres-store.js";
 import {
@@ -4778,6 +4781,7 @@ export async function createApp(
     listProjectIds: async () => (await store.listProjects()).map((project) => project.id),
     canAccessWorkflow: async (user, workflow, permission) => await rbacService.canAccessWorkflow(user, workflow, permission),
     canInProject: async (user, projectId, permission) => await rbacService.can(user, projectId, permission),
+    canInProjectAsMember: async (user, projectId, permission) => await rbacService.canAsMember(user, projectId, permission),
     listWorkflowIdsSharedToProject: async (projectId) => (await store.listWorkflowsSharedToProject(projectId)).map((share) => share.workflowId),
     projectExists: async (projectId) => Boolean(await store.getProject(projectId)),
     listWorkflowIdsSharedToUser: async (userId) => (await store.listWorkflowsSharedToUser(userId)).map((share) => share.workflowId),
@@ -8211,16 +8215,23 @@ export async function createApp(
    *   {
    *     filename: "support-faq.md",       // optional; drives kind inference
    *     kind: "markdown",                 // optional explicit override
-   *     content: "...",                   // raw text
+   *     content: "...",                   // raw text, or:
+   *     contentBase64: "...",             // the file's bytes (a PDF); the bytes decide what it is
    *     sourceId: "support-faq-v1",       // groups chunks; defaults to filename
    *     chunking: { strategy: "recursive", chunkSize: 800, chunkOverlap: 80 }
    *     csv: { textColumn: "body", metadataColumns: ["topic"] }   // optional
    *   }
+   * A PDF's text is read page by page in the sandboxed PDF reader; each chunk's metadata has its `page`. Scanned PDFs
+   * (no text layer), office files and other binary files are refused (knowledge-upload.ts).
    * Returns:
-   *   { sourceId, documentsLoaded, chunksInserted, dimensions }
+   *   { sourceId, documentsLoaded, chunksInserted, dimensions, kind, pageCount?, notice? }
    */
+  // A file sent as base64 is a third larger than its bytes, so the route takes up to that much more than the file
+  // limit (CONTENT_SCAN_MAX_BYTES), and never less than the API's own body limit.
+  const knowledgeUploadBodyLimit = Math.max(config.API_BODY_LIMIT_BYTES, Math.ceil((pdfExtractionLimits().maxBytes * 4) / 3) + 64 * 1024);
   app.post<{ Params: { id: string }; Body: unknown }>(
     "/api/knowledge-bases/:id/upload",
+    { bodyLimit: knowledgeUploadBodyLimit },
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
@@ -8229,32 +8240,43 @@ export async function createApp(
       const kb = access.kb;
       const body = request.body as Partial<{
         filename: string;
-        kind: DocumentKind;
+        kind: DocumentKind | "pdf";
         content: string;
+        contentBase64: string;
         sourceId: string;
         chunking: ChunkOptions;
         csv: { textColumn?: string; metadataColumns?: string[] };
         metadata: Record<string, unknown>;
       }> | undefined;
-      if (!body || typeof body.content !== "string" || !body.content.length) {
+      if (!body || ((typeof body.content !== "string" || !body.content.length) && (typeof body.contentBase64 !== "string" || !body.contentBase64.length))) {
         reply.code(400);
-        return { error: "content (string) is required" };
+        return { error: "content (string) or contentBase64 is required" };
       }
-      const kind: DocumentKind = body.kind ?? (body.filename ? inferDocumentKind(body.filename) : "text");
       const sourceId = body.sourceId ?? body.filename ?? `src_${crypto.randomUUID().slice(0, 8)}`;
 
       // 1. Load
-      let loaded;
+      let upload: LoadedUpload;
+      // A client that goes away stops the PDF read, so it does not hold a reader slot.
+      const uploadAbort = new AbortController();
+      const onClientGone = () => {
+        if (!reply.raw.writableFinished) uploadAbort.abort();
+      };
+      reply.raw.on("close", onClientGone);
+      if (reply.raw.destroyed && !reply.raw.writableFinished) uploadAbort.abort();
       try {
-        loaded = loadDocuments(kind, body.content, {
-          sourceId,
-          metadata: body.metadata ?? {},
-          csv: body.csv
-        });
+        const pdfLimits = pdfExtractionLimits();
+        upload = await loadKnowledgeUpload(body, sourceId, { maxBytes: pdfLimits.maxBytes, maxChars: pdfLimits.maxChars }, uploadAbort.signal);
       } catch (err) {
-        reply.code(400);
-        return { error: `Loader failed: ${err instanceof Error ? err.message : String(err)}` };
+        if (err instanceof KnowledgeUploadError) {
+          reply.code(err.statusCode);
+          return { error: err.message, code: err.code };
+        }
+        throw err;
+      } finally {
+        reply.raw.off("close", onClientGone);
       }
+      const kind = upload.kind;
+      const loaded = upload.documents;
       if (loaded.length === 0) {
         reply.code(400);
         return { error: "Loader produced zero documents — content may be empty after parsing" };
@@ -8321,7 +8343,10 @@ export async function createApp(
           sourceId,
           documentsLoaded: loaded.length,
           chunksInserted: result.inserted,
-          dimensions: result.dimensions
+          dimensions: result.dimensions,
+          kind,
+          ...(upload.pageCount !== undefined ? { pageCount: upload.pageCount } : {}),
+          ...(upload.notice ? { notice: upload.notice } : {})
         };
       } catch (err) {
         reply.code(400);
@@ -8414,8 +8439,11 @@ export async function createApp(
         request.params.id
       );
       const topK = body.topK && body.topK > 0 ? Math.floor(body.topK) : 5;
-      const results = await adapter.similaritySearch(body.query, topK, embedder);
-      return { query: body.query, results };
+      // The same ranking a RAG Retrieve node on this knowledge base uses when it sets no search mode: hybrid (keyword
+      // and vector, fused) with the built-in Token embedder, vector otherwise.
+      const mode = defaultRagSearchMode(kb.embedderId);
+      const results = mode === "hybrid" ? await adapter.hybridSearch(body.query, topK, embedder) : await adapter.similaritySearch(body.query, topK, embedder);
+      return { query: body.query, mode, results };
     }
   );
 

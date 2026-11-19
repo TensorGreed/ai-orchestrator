@@ -103,7 +103,7 @@ export const POLL_MAX_RETRIES = 5;
 export function simulateDenial(role: string, profile: { builtIn: boolean; enforced?: boolean }): string | null {
   if (role === "admin") return null;
   if (role !== "builder") return "Only admins and builders can simulate rule set changes.";
-  if (profile.builtIn) return "The built-in rule set is read-only: only an admin can simulate changes to it. Duplicate it to simulate your own.";
+  if (profile.builtIn) return "Built-in rule sets are read-only: only an admin can simulate changes to this one. Duplicate it to simulate your own.";
   if (profile.enforced) return "A project enforces this rule set: only an admin can change or simulate it.";
   return null;
 }

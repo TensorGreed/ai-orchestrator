@@ -12,7 +12,7 @@ describe("guard simulation helpers", () => {
   it("lets admins simulate any profile and builders only profiles they may save", () => {
     expect(simulateDenial("admin", { builtIn: true, enforced: true })).toBeNull();
     expect(simulateDenial("builder", { builtIn: false })).toBeNull();
-    expect(simulateDenial("builder", { builtIn: true })).toMatch(/built-in rule set is read-only/);
+    expect(simulateDenial("builder", { builtIn: true })).toMatch(/Built-in rule sets are read-only/);
     expect(simulateDenial("builder", { builtIn: false, enforced: true })).toMatch(/A project enforces this rule set/);
     expect(simulateDenial("viewer", { builtIn: false })).toMatch(/Only admins and builders/);
   });
