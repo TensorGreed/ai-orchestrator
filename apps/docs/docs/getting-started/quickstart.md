@@ -17,6 +17,8 @@ description: "Install and run L2M locally: prerequisites (Node.js 24+, pnpm 10+)
 pnpm install
 ```
 
+pnpm may warn that it ignored the build script of `onnxruntime-node`: that is safe to ignore (it belongs to the optional names service and is not needed to run L2M).
+
 ## Configure env
 
 ```bash
