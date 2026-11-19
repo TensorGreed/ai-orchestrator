@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ENTRY_NODE_TYPES, isEntryNodeType, nodeDefinitions } from "./definitions";
+import { ENTRY_NODE_TYPES, LIVE_ENTRY_NODE_TYPES, isEntryNodeType, isLiveEntryOff, liveEntryOffMessage, nodeDefinitions } from "./definitions";
 
 /**
  * Entry nodes whose executor reads or consumes from an external system when it runs as the first node: a worker lost
@@ -59,5 +59,22 @@ describe("effect-free entry nodes", () => {
     for (const type of ["llm_call", "agent_orchestrator", "http_request", "mcp_tool", "code_node", "community_widget", ""]) {
       expect(isEntryNodeType(type)).toBe(false);
     }
+  });
+});
+
+describe("live entry points that can be switched off", () => {
+  it("covers webhooks, forms, chats, MCP triggers and schedules, each with an `active` switch; unset is on", () => {
+    expect([...LIVE_ENTRY_NODE_TYPES].sort()).toEqual(["chat_trigger", "form_trigger", "mcp_server_trigger", "schedule_trigger", "webhook_input"]);
+    for (const type of LIVE_ENTRY_NODE_TYPES) {
+      const definition = nodeDefinitions.find((node) => node.type === type)!;
+      expect((definition.configSchema as { properties: Record<string, unknown> }).properties.active, type).toEqual({ type: "boolean" });
+      expect(isLiveEntryOff({ type, config: { active: false } })).toBe(true);
+      expect(isLiveEntryOff({ type, config: { active: true } })).toBe(false);
+      expect(isLiveEntryOff({ type, config: {} })).toBe(false);
+      expect(isLiveEntryOff({ type })).toBe(false);
+    }
+    expect(isLiveEntryOff({ type: "manual_trigger", config: { active: false } })).toBe(false);
+    expect(liveEntryOffMessage("webhook_input")).toBe("This webhook is turned off. Turn it on in the workflow editor to accept live calls.");
+    expect(liveEntryOffMessage("form_trigger")).toMatch(/^This form is turned off/);
   });
 });

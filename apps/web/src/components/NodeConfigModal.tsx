@@ -1,4 +1,4 @@
-import { describeHttpSecretAuth, readHttpSecretAuth } from "@ai-orchestrator/shared";
+import { LIVE_ENTRY_NODE_TYPES, describeHttpSecretAuth, readHttpSecretAuth } from "@ai-orchestrator/shared";
 import { McpToolArgsForm, McpUseFormButton, OpenApiOperationForm, usesMcpArgsForm, usesOpenApiOperation } from "./IntegrationForms";
 import { buildSchemaForm } from "../lib/mcp-schema-form";
 import { createContext, useCallback, useContext, useEffect, useId, useImperativeHandle, useMemo, useRef, useState, type Ref } from "react";
@@ -10413,6 +10413,76 @@ export function NodeInspector({
     );
   };
 
+  /** A webhook, form, chat, MCP trigger or schedule that is off (a starter's starts so): one line and a way to turn it on. */
+  const renderLiveEntryNotice = () => {
+    const type = node.data.nodeType;
+    if (!LIVE_ENTRY_NODE_TYPES.has(type)) return null;
+    if (config.active !== false) {
+      // Turned on in this edit: it takes live calls once saved.
+      return savedNodeConfig.active === false ? (
+        <div className="cfg-tip" data-testid="live-entry-on">
+          Turned on: it takes live calls once you save.
+        </div>
+      ) : null;
+    }
+    const what =
+      type === "form_trigger"
+        ? "Off: the form's page and submissions answer \u201cnot found\u201d until you turn it on."
+        : type === "chat_trigger"
+          ? "Off: chat messages answer \u201cnot found\u201d until you turn it on."
+          : type === "mcp_server_trigger"
+            ? "Off: MCP calls answer \u201cnot found\u201d and toolsets leave the tool out until you turn it on."
+            : type === "schedule_trigger"
+              ? "Off: the schedule starts no run until you turn it on."
+              : "Off: calls to its URL answer \u201cnot found\u201d until you turn it on.";
+    return (
+      <div className="cfg-tip cfg-legacy" data-testid="live-entry-off">
+        {what} Run in the editor works either way.{" "}
+        {readOnlyReason ? null : (
+          <button
+            type="button"
+            className="auth-link-btn"
+            onClick={() =>
+              setConfig((current) => {
+                // A schedule keeps an explicit switch; the others are on without one, as nodes saved before it were.
+                if (type === "schedule_trigger") return { ...current, active: true };
+                const { active: _off, ...rest } = current;
+                return rest;
+              })
+            }
+          >
+            Turn on
+          </button>
+        )}
+      </div>
+    );
+  };
+
+  /** The switch behind the notice, for webhooks, forms, chats and MCP triggers (a schedule has its own Active field). */
+  const renderLiveEntrySwitch = () => {
+    const type = node.data.nodeType;
+    if (!LIVE_ENTRY_NODE_TYPES.has(type) || type === "schedule_trigger") return null;
+    return (
+      <AdvancedFields setCount={config.active === false ? 1 : 0}>
+        <SelectField
+          label="Live calls"
+          value={config.active === false ? "off" : "on"}
+          onChange={(next) =>
+            setConfig((current) => {
+              const { active: _active, ...rest } = current;
+              return next === "off" ? { ...rest, active: false } : rest;
+            })
+          }
+          options={[
+            { value: "on", label: "Accept" },
+            { value: "off", label: "Off (answer \u201cnot found\u201d)" }
+          ]}
+          help="Production calls only. Run in the editor works either way."
+        />
+      </AdvancedFields>
+    );
+  };
+
   const renderSlots = () => {
     if (!isAgentNode) return null;
     const visibleSlots = SLOT_DEFINITIONS.filter((slot) => slot.handle !== "worker" || node.data.nodeType === "supervisor_node");
@@ -10752,7 +10822,9 @@ export function NodeInspector({
             form={
               <>
                 {renderLegacyNotice()}
+                {renderLiveEntryNotice()}
                 {renderParameters()}
+                {renderLiveEntrySwitch()}
               </>
             }
             settings={<div className="insp-settings">{renderSettings()}</div>}

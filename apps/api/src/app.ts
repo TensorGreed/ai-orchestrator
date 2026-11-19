@@ -294,6 +294,7 @@ import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { registerUserInviteRoutes } from "./user-invite-routes.js";
 import { registerWorkflowBuilderRoutes } from "./workflow-builder-routes.js";
 import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
+import { LIVE_ENTRY_OFF_CODE, isLiveEntryOff, liveEntryOffMessage } from "@ai-orchestrator/shared";
 import { envModelProviders } from "@ai-orchestrator/shared";
 import {
   CONTENT_FILTER_CODE,
@@ -13340,6 +13341,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         return deactivated ? `<h1>${escapeHtml(DEACTIVATED_MESSAGE)}</h1>` : "<h1>Form not found</h1>";
       }
       const cfg = asRecord(found.node.config);
+      if (isLiveEntryOff(found.node)) {
+        reply.code(404);
+        reply.type("text/html");
+        return `<h1>${escapeHtml(liveEntryOffMessage("form_trigger"))}</h1>`;
+      }
       if (cfg.authMode === "session") {
         const user = await requireRole(request, reply, ["viewer"]);
         if (!user) return;
@@ -13366,6 +13372,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         return { error: deactivated ? DEACTIVATED_MESSAGE : "Form not found" };
       }
       const cfg = asRecord(found.node.config);
+      if (isLiveEntryOff(found.node)) {
+        reply.code(404);
+        return { error: liveEntryOffMessage("form_trigger"), code: LIVE_ENTRY_OFF_CODE };
+      }
       // A signed-in submission is the submitter's own run, kept to their sessions where theirs are kept apart.
       let submitter: { triggeredByUserId?: string; sessionOwner?: string } = {};
       if (cfg.authMode === "session") {
@@ -13427,6 +13437,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       if (!chatNode) {
         reply.code(400);
         return { error: "Workflow has no chat_trigger node" };
+      }
+      if (isLiveEntryOff(chatNode)) {
+        reply.code(404);
+        return { error: liveEntryOffMessage("chat_trigger"), code: LIVE_ENTRY_OFF_CODE };
       }
       const cfg = asRecord(chatNode.config);
       const authMode = typeof cfg.authMode === "string" ? cfg.authMode : "public";
@@ -13535,9 +13549,16 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     return { error: deactivated ? DEACTIVATED_MESSAGE : "MCP server not found" };
   };
 
+  /** An MCP trigger switched off: no manifest and no calls until it is turned on. */
+  const mcpServerOff = (reply: FastifyReply): { error: string; code: string } => {
+    reply.code(404);
+    return { error: liveEntryOffMessage("mcp_server_trigger"), code: LIVE_ENTRY_OFF_CODE };
+  };
+
   app.get<{ Params: { path: string } }>("/api/mcp-server/:path/manifest", async (request, reply) => {
     const found = await findMcpServerWorkflow(request.params.path);
     if (!found) return await mcpServerMissing(reply, request.params.path);
+    if (isLiveEntryOff(found.node)) return mcpServerOff(reply);
     const cfg = asRecord(found.node.config);
     return {
       name: cfg.toolName ?? "",
@@ -13551,6 +13572,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     async (request, reply) => {
       const found = await findMcpServerWorkflow(request.params.path);
       if (!found) return await mcpServerMissing(reply, request.params.path);
+      if (isLiveEntryOff(found.node)) return mcpServerOff(reply);
       const cfg = asRecord(found.node.config);
       if (cfg.authMode === "bearer") {
         const secret = await secretService.resolveSecret(toSecretReference(cfg.secretRef));
@@ -14043,6 +14065,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             hint: "Ensure workflow is saved and webhook node path/method match this request.",
             availableEndpoints: methodMatches
           };
+        }
+
+        // A webhook switched off (a starter's, until its owner turns it on) takes no production calls; /webhook-test/ and
+        // the editor's runs still work.
+        if (!isTestRoute && match.endpoint.config.active === false) {
+          reply.code(404);
+          return { error: liveEntryOffMessage("webhook_input"), code: LIVE_ENTRY_OFF_CODE, path: request.params.path };
         }
 
         // Phase 13.2 — the trigger's own address list (optional), checked before its auth.

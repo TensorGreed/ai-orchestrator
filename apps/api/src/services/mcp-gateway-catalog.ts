@@ -18,6 +18,7 @@ import {
   CONTENT_RULES_TOOLS_ADAPTER_ID,
   CONTENT_RULES_TOOLS_SERVER_LABEL,
   SCAN_DOCUMENT_TOOL_NAME,
+  isLiveEntryOff,
   scanDocumentDescription,
   scanDocumentInputSchema,
   type ContentRulesDocumentsOptions,
@@ -156,6 +157,11 @@ export async function buildGatewayCatalog(input: {
       for (const node of triggers) {
         const config = asRecord(node.config);
         const toolName = typeof config.toolName === "string" && config.toolName.trim() ? config.toolName.trim() : node.id;
+        // Switched off in the editor: the tool is left out until it is turned on.
+        if (isLiveEntryOff(node)) {
+          warnings.push(`Workflow '${workflow.name}': the "Expose as MCP Tool" trigger '${toolName}' is turned off, so it adds no tool.`);
+          continue;
+        }
         const description =
           typeof config.toolDescription === "string" && config.toolDescription.trim()
             ? config.toolDescription.trim()

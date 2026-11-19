@@ -4,7 +4,7 @@
   "workflow": {
     "id": "starter-approval",
     "name": "Approval before it goes out",
-    "description": "Pauses for a person to approve a refund (with the amount editable) and then takes the approved or rejected path. Run it, then decide in Approvals. Self-approval is on so you can try it alone: whoever starts a run may approve it. Before real use, clear \"Let the person who started the run approve it\" on the Approve refund node.",
+    "description": "Pauses for a person to approve a refund (with the amount editable) and then takes the approved or rejected path. Run it, then decide in Approvals. Self-approval is on: whoever starts a run may approve it themselves, so you can try it alone. Before real use, clear \"Let the person who started the run approve it\" on the Approve refund node.",
     "schemaVersion": "1.0.0",
     "workflowVersion": 1,
     "nodes": [
@@ -34,7 +34,7 @@
           "y": 200
         },
         "config": {
-          "message": "Refund {{amount}} USD to {{customer}} for {{orderId}}?",
+          "message": "Refund {{amount}} USD to {{customer}} for {{orderId}}? (Self-approval is on: the person who started this run may approve it.)",
           "approverRoles": [
             "builder",
             "admin"

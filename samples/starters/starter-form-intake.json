@@ -4,7 +4,7 @@
   "workflow": {
     "id": "starter-form-intake",
     "name": "Form intake: route requests",
-    "description": "A public form collects a request, a Switch routes it by topic, and each branch tags it for the right team. Click Webhook run to try it with sample answers, or open the form URL.",
+    "description": "A public form collects a request, a Switch routes it by topic, and each branch tags it for the right team. Click Webhook run to try it with sample answers. The form starts switched off, so its page answers \"not found\" until you turn it on in the Contact form node.",
     "schemaVersion": "1.0.0",
     "workflowVersion": 1,
     "nodes": [
@@ -22,6 +22,7 @@
           "description": "Tell us what you need and we will route it to the right team.",
           "submitLabel": "Send",
           "authMode": "public",
+          "active": false,
           "successMessage": "Thanks, we got your request.",
           "fields": [
             {
