@@ -252,6 +252,15 @@ history keeps masked or as placeholders (see [content rules](/product/content-ru
 3. RAG:
    - `text_input -> rag_retrieve -> prompt_template -> llm_call -> output`
 
+### What a webhook's caller gets
+
+A run started by a webhook (its URL, `/webhook-test/`, `POST /api/webhooks/execute` and its stream) answers with the
+reply of the last **Webhook Response** node that ran, even when other nodes (an Output node, a notification) run after
+it. The run's output in Runs is that reply too, so it shows what the caller got. The caller gets the run's output
+instead when no Webhook Response ran, or when the webhook trigger's **Response Mode** is **Last Node Output**. A run that
+fails after its Webhook Response answers with the error. Runs that no webhook started (the editor's **Run**,
+sub-workflows, schedules) keep their Output node's result.
+
 ## Validation behavior
 
 Validation checks include:

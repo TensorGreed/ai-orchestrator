@@ -213,4 +213,34 @@ describe("an error workflow's run", () => {
     expect((await runsOf(context, admin, "wf-handler")).map((row) => row.id)).toEqual([errorRunId]);
     expect(await context.store.getExecutionHistory(errorWorkflowRunId(errorRunId))).toBeNull();
   });
+
+  it("stays an error workflow run after it pauses for an approval and resumes, and its failure then starts no other error run", async () => {
+    const context = await createTestContext("role");
+    const admin = await login(context, "admin", "ada");
+    const handler = handlerWorkflow("wf-handler", { alsoFails: true });
+    handler.nodes.splice(1, 0, { id: "ask", type: "human_approval", name: "Approve", position, config: { approvalMessage: "Handle it?", timeoutMinutes: 30 } } as Workflow["nodes"][number]);
+    handler.edges = [
+      { id: "e0", source: "trigger", target: "ask" },
+      { id: "e1", source: "ask", target: "sub" },
+      { id: "e2", source: "sub", target: "out" }
+    ];
+    await context.store.upsertWorkflow(handler);
+    await context.store.upsertWorkflow(failingWorkflow("wf-fails", "wf-handler"));
+    const failed = await call(context, "POST", "/api/workflows/wf-fails/execute", admin.cookie, {});
+    const failedRunId = failed.json<{ executionId: string }>().executionId;
+    const errorRunId = errorWorkflowRunId(failedRunId);
+    await vi.waitFor(async () => expect((await context.store.getExecutionHistory(errorRunId))?.status).toBe("waiting_approval"), { timeout: 10_000 });
+    const approved = await call(context, "POST", `/api/approvals/${errorRunId}/approve`, admin.cookie, {});
+    // The resumed run fails, so the approval answers 400 with it, as a failed execute does.
+    expect(approved.statusCode, approved.body).toBe(400);
+    await vi.waitFor(async () => expect((await context.store.getExecutionHistory(errorRunId))?.status).toBe("error"), { timeout: 10_000 });
+
+    const errorRun = (await call(context, "GET", `/api/executions/${errorRunId}`, admin.cookie)).json<Record<string, any>>();
+    expect(errorRun.triggerType).toBe("error");
+    expect(errorRun.errorWorkflowSource).toMatchObject({ executionId: failedRunId });
+    const failedRun = (await call(context, "GET", `/api/executions/${failedRunId}`, admin.cookie)).json<Record<string, any>>();
+    expect(failedRun.errorWorkflowRun).toMatchObject({ executionId: errorRunId, status: "error" });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await context.store.getExecutionHistory(errorWorkflowRunId(errorRunId))).toBeNull();
+  });
 });

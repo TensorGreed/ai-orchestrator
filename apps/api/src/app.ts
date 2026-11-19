@@ -6018,6 +6018,11 @@ export async function createApp(
         // resumed run's triggered_by, also of the paused row when it paused again), else as the paused row records it.
         const [firstRequest] = await store.listApprovalRequestsForExecution(job.executionId);
         const startedBy = firstRequest?.requestedBy ?? pending.triggeredBy ?? resumeHistory?.triggeredBy ?? undefined;
+        // An error workflow's run that paused stays one when it resumes: listed under the trigger `error`, linked to the
+        // failed run (its stored input names it), and its own failure starts no other error workflow.
+        const resumedErrorRun = asRecord(state.globals).trigger_type === ERROR_WORKFLOW_TRIGGER_TYPE;
+        const resumeTriggerType = resumedErrorRun ? ERROR_WORKFLOW_TRIGGER_TYPE : "approval_resume";
+        const errorRunInput = resumedErrorRun ? asRecord(resumeHistory?.input) : {};
         const gatewayGuard =
           parseGatewayGuardStack(state.gatewayGuard) ?? parseGatewayGuardStack(asRecord(resumeHistory?.customData)[GATEWAY_GUARD_CUSTOM_DATA_KEY]);
         // 12.6 — and its usage stays the gateway client's and counts toward the toolset's project (not the approver's).
@@ -6053,7 +6058,7 @@ export async function createApp(
           policyActor: actor,
           workflow: resumeWorkflow,
           executionId: job.executionId,
-          triggerType: "approval_resume",
+          triggerType: resumeTriggerType,
           // "Started by" stays who started the run; the approver is recorded on the decision (approval_requests).
           triggeredBy: startedBy,
           // The resumed run is its own span, linked (not parented) to the node that paused, hours or days earlier.
@@ -6072,11 +6077,12 @@ export async function createApp(
           executionId: job.executionId,
           workflow: state.workflow,
           result,
-          triggerType: "approval_resume",
+          triggerType: resumeTriggerType,
           triggeredBy: startedBy,
           ...(resumeCustomData ? { customData: { ...(result.customData ?? {}), ...resumeCustomData } } : {}),
           ...(gatewayUsage ? { gatewayUsage } : {}),
           requestInput: {
+            ...errorRunInput,
             decision: decided,
             approvalId: job.executionId,
             requestId: job.requestId,

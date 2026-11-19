@@ -1293,6 +1293,12 @@ function runAnswersWebhook(request: { triggerType?: string; inputTriggerType?: s
 
 /** The last Webhook Response node that ran successfully in this run, with its output (the reply), or undefined. */
 function lastWebhookReply(workflow: Workflow, nodeResults: NodeExecutionResult[]): { nodeId: string; output: unknown } | undefined {
+  // A webhook trigger set to answer with the last node's output (Response Mode "Last Node Output") keeps that answer.
+  const ranIds = new Set(nodeResults.filter((entry) => entry.status === "success").map((entry) => entry.nodeId));
+  const startedBy = workflow.nodes.filter((node) => node.type === "webhook_input" && ranIds.has(node.id));
+  if (startedBy.length > 0 && startedBy.every((node) => (node.config as Record<string, unknown> | undefined)?.responseMode === "lastNode")) {
+    return undefined;
+  }
   const replyNodes = new Set(workflow.nodes.filter((node) => node.type === "webhook_response").map((node) => node.id));
   if (replyNodes.size === 0) return undefined;
   for (let index = nodeResults.length - 1; index >= 0; index -= 1) {
@@ -11526,7 +11532,14 @@ async function executeWorkflowRun(
 
   // A webhook's caller gets the reply of the last Webhook Response node that ran, even when nodes ran after it, so the
   // run records what the caller got. Runs no webhook started (the editor's Run, sub-workflows) keep their Output node's.
-  const webhookReply = runAnswersWebhook(request) ? lastWebhookReply(workflow, nodeResults) : undefined;
+  // A resumed run is answered as the run that paused: its trigger is in the restored globals.
+  const answersWebhook = request.resumeState
+    ? runAnswersWebhook({
+        triggerType: typeof globals.trigger_type === "string" ? globals.trigger_type : undefined,
+        inputTriggerType: typeof globals.input_trigger_type === "string" ? globals.input_trigger_type : undefined
+      })
+    : runAnswersWebhook(request);
+  const webhookReply = answersWebhook ? lastWebhookReply(workflow, nodeResults) : undefined;
   if (webhookReply) {
     finalOutput = webhookReply.output;
     labelState.outputNodeId = webhookReply.nodeId;

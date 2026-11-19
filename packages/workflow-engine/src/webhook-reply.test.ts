@@ -3,8 +3,8 @@ import { createDefaultAgentRuntime } from "@ai-orchestrator/agent-runtime";
 import { createDefaultConnectorRegistry } from "@ai-orchestrator/connector-sdk";
 import { createDefaultMCPRegistry } from "@ai-orchestrator/mcp-sdk";
 import { createDefaultProviderRegistry } from "@ai-orchestrator/provider-sdk";
-import type { Workflow } from "@ai-orchestrator/shared";
-import { executeWorkflow } from "./executor";
+import type { Workflow, WorkflowExecutionState } from "@ai-orchestrator/shared";
+import { executeWorkflow, resumeWorkflowExecution } from "./executor";
 
 /**
  * A run a webhook started answers its caller with the reply of the last Webhook Response node that ran, even when nodes
@@ -99,5 +99,37 @@ describe("a webhook run's reply", () => {
     ];
     const result = await executeWorkflow({ workflow, webhookPayload: payload, triggerType: "webhook" }, dependencies());
     expect(result.output).toEqual({ result: { fullName: "Grace Hopper" } });
+  });
+
+  it("a webhook run that paused for an approval after its reply records the reply when it resumes", async () => {
+    const base = starterLike();
+    const workflow = {
+      ...base,
+      nodes: [...base.nodes, { id: "ask", type: "human_approval", name: "Approve", position, config: { approvalMessage: "OK?", timeoutMinutes: 5 } }],
+      edges: [...base.edges.filter((edge) => edge.target !== "out"), { id: "e-ask", source: "reply", target: "ask" }, { id: "e-out", source: "ask", target: "out" }]
+    } as Workflow;
+    const paused: WorkflowExecutionState[] = [];
+    const deps = {
+      ...dependencies(),
+      persistPausedExecution: async (input: { state: WorkflowExecutionState }) => {
+        paused.push(JSON.parse(JSON.stringify(input.state)) as WorkflowExecutionState);
+      }
+    };
+    const first = await executeWorkflow({ workflow, executionId: "exec-resume-reply", triggerType: "webhook", webhookPayload: payload, input: payload }, deps);
+    expect(first.status).toBe("waiting_approval");
+    const resumed = await resumeWorkflowExecution({ executionId: "exec-resume-reply", state: paused.at(-1)!, decision: "approve", actedBy: "lead@example.com" }, deps);
+    expect(resumed.status).toBe("success");
+    expect(resumed.output).toMatchObject({ __webhookResponse: { statusCode: 201 } });
+  });
+
+  it("a webhook set to answer with the last node's output keeps doing so; one set to wait for the response node gets the reply", async () => {
+    const withMode = (responseMode: string) => {
+      const workflow = starterLike();
+      return { ...workflow, nodes: workflow.nodes.map((node) => (node.id === "webhook" ? { ...node, config: { ...node.config, responseMode } } : node)) } as Workflow;
+    };
+    const lastNode = await executeWorkflow({ workflow: withMode("lastNode"), triggerType: "webhook", webhookPayload: payload, input: payload }, dependencies());
+    expect(lastNode.output).not.toHaveProperty("__webhookResponse");
+    const responseNode = await executeWorkflow({ workflow: withMode("responseNode"), triggerType: "webhook", webhookPayload: payload, input: payload }, dependencies());
+    expect(responseNode.output).toMatchObject({ __webhookResponse: { statusCode: 201 } });
   });
 });
