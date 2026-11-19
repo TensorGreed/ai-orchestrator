@@ -42,6 +42,47 @@ Open the palette with **Add node**, a double-click on empty canvas, or the `+` b
 
 The canvas pans to show a node it adds when the node would land out of view.
 
+## Describe a workflow
+
+Builders and admins can say what a workflow should do and get a draft to review. **Describe it…** is on the Workflows
+page (Home) and on an empty canvas.
+
+1. Write what should start the workflow and what it should do, for example "When a form is submitted, check the
+   email address, post the details to our CRM API and reply with a thank-you".
+2. **Build** asks the model for a workflow. The model reads the node catalog (the node types, their settings, their
+   outputs and an agent's model, memory, tool and worker ports) and hands in a workflow. That workflow is checked
+   against the workflow schema and the same graph rules as a save; when something is wrong, the problems go back to
+   the model, which fixes them (three tries in all). If the description is too vague, the model asks a question
+   instead: add the answer to your description and build again.
+3. The preview shows a small drawing of the workflow and lists what it creates, the credentials to pick, the settings
+   still to fill in and the addresses it calls when it runs. Nothing is saved yet. **Edit description** goes back.
+4. **Create draft** saves it as a new workflow and opens it. It never replaces a workflow you have.
+
+What the builder never does:
+
+- It runs nothing while it builds. The model's answer is only read as a workflow and checked.
+- It never fills in credentials. Credential values and secret references in the model's answer are left out (the
+  preview says so); pick saved credentials on the nodes afterwards. Settings only an admin may make, such as a
+  trigger's input trust, are left out too.
+- It never takes a model or a model server address from the model's answer. A new **LLM Call** uses the model the
+  builder used; a chain node such as **Summarization Chain** stays on the upstream model unless the answer gave it one,
+  and then it gets the builder's model too; a dedicated chat model node keeps its placeholder address (the preview
+  says so), so you set your server on it.
+- Triggers get paths no other workflow uses.
+
+It uses the same model a new **LLM Call** starts on (see [Model nodes](#model-nodes)), with the keys saved in the
+project; the dialog shows which one. Under **More** you can choose
+another one (a provider, a model, a base URL for an OpenAI-compatible server, Azure OpenAI or Ollama, and a saved
+credential); the browser remembers the choice, never a key. On **Echo** nothing is sent to a model: Echo only repeats its
+input, so the dialog says a real model is needed and offers the three closest templates (on a tie, those that run
+without a model first).
+
+An admin can turn the builder off with `WORKFLOW_BUILDER_ENABLED=false` on the API server: **Describe it…** goes away and
+`POST /api/workflow-builder/build` answers `403` with `code: "workflow_builder_disabled"`. Each build is audited as
+`workflow.builder.build` (the model, the outcome and the number of tries, never the description). One build runs at a
+time per person (and a few at a time per server), for at most two minutes; closing the dialog stops it. The project's
+model allowlist applies, and a model's error message is redacted before it is shown.
+
 ## Undo and redo
 
 `Ctrl+Z` undoes the last canvas change and `Ctrl+Shift+Z` or `Ctrl+Y` redoes it (`Cmd` on macOS). Every change is
@@ -69,9 +110,10 @@ The agent's **Language Models** drawer offers **LLM Call** too, so an agent can 
 
 ## Workflow settings
 
-The **⋯** menu in the editor's top bar holds the settings of the whole workflow (they are saved with it):
-**No write tools**, **Strict templates**, **Ask before write tools…**, **Subject references…** and **Error
-workflow…**. A tick shows the ones that are on.
+The **⋯** menu in the editor's top bar holds the settings of the whole workflow (they are saved with it), under
+**More settings**: **No write tools**, **Strict templates**, **Ask before write tools…**, **Subject references…** and
+**Error workflow…**. Most workflows leave them as they are. **More settings** says how many are on, and a tick shows
+which.
 
 **Strict templates** makes a <span v-pre>`{{ }}`</span> without a value fail its node instead of rendering empty
 (`settings.strictTemplates`; off by default). See [strict templates](../runtime/templates-and-expressions.md#strict-templates).
@@ -149,18 +191,25 @@ for every node, so it keeps its shape while you move between nodes; on a narrow 
   line between panes, or focus it and use the arrow keys, to resize. Both are remembered. The panes give way when the
   window is narrow, so the parameters and the Output pane stay in view. Before a node has run, its empty Input and
   Output panes start as rails so the parameters get the room.
-- **Parameters** shows the fields you set most. A node type's rarely used fields (for example a GET request's
-  headers and an HTTP request's timeout and response type, a model's temperature and max tokens, an agent's iteration and tool output limits, a
-  content rules node's approval settings) are under **Advanced**, closed by default; its title counts the fields
-  that differ from their defaults. A POST, PUT or PATCH request shows its **Body** and **Headers** next to the URL; a
+- **Parameters** shows the fields a first workflow needs. Everything else sits in one **More** section at the end of
+  the form, closed by default: first the node type's rarely used fields (for example a GET request's headers, an HTTP
+  request's timeout, response type and retried statuses, a Loop's item variable and maximum, a Filter's **Items
+  from**, a model's temperature and max tokens, an agent's iteration and tool output limits, a content rules node's
+  approval settings), then what every node has: error handling (retries, delays, on error), input mapping, data
+  labels, **Disabled** and the accent colour. Its title counts the settings that differ from their defaults, and it
+  opens by itself when one of them needs fixing. A POST, PUT or PATCH request shows its **Body** and **Headers** next to the URL; a
   body that is valid JSON is sent as `application/json` unless the headers set a `Content-Type`. Help for a field is
   behind the **?** next to its label. The expression helpers
   under a template field show while you edit it, and its preview shows when the result differs from what you typed
   (or the expression has an error). Typing <span v-pre>`{{`</span> in a template field lists the last run's fields, variables and steps
   to insert, and a field name dragged from the **Input** pane inserts its <span v-pre>`{{path}}`</span>; a note under the field names
   any <span v-pre>`{{ }}`</span> the last run had no value for (see [writing templates in the editor](../runtime/templates-and-expressions.md#writing-templates-in-the-editor)). A code node's **Test Run** stays in view, with its test input folded under it.
-- **Settings** holds what every node has: disabled, accent colour, error handling (retries, delay, on error), input
-  mapping and data labels. A dot on the tab means one of them differs from the default.
+- **A node saved with an earlier behaviour** shows the switch for it, with a one-line note and **Upgrade to the new
+  behaviour** (until you save, **Keep the earlier behaviour** takes the upgrade back). New nodes start on the new
+  behaviour and show neither. This covers a Loop's **Collect results** and **Branches route in the loop**, an HTTP
+  Request's **Fail on HTTP error status**, a Filter's **Pass or stop** mode and a Set field's **Text (as before)**
+  type. Nothing changes for a saved node until you upgrade it. A node set to the earlier behaviour on purpose (for
+  example by an import) shows the switch without the note.
 - **Trace** shows timing, token use, the agent's activity and tool policy decisions for the run.
 - Large values stay fast: tables show 50 rows at a time and JSON over 20,000 characters is cut until you ask for all
   of it. A nested object or list in a table cell whose JSON is longer than 80 characters shows as one line (its first

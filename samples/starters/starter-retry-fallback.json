@@ -1,0 +1,132 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "starter-retry-fallback",
+    "name": "Retry, then fall back",
+    "description": "Calls a sample endpoint that answers 503, retries twice with backoff, then takes the Error output to a fallback. Change 503 to 200 in the URL to see the success path.",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "start",
+        "type": "manual_trigger",
+        "name": "Run",
+        "position": {
+          "x": 80,
+          "y": 200
+        },
+        "config": {
+          "label": "Run manually"
+        }
+      },
+      {
+        "id": "call",
+        "type": "http_request",
+        "name": "Call the service",
+        "position": {
+          "x": 360,
+          "y": 200
+        },
+        "config": {
+          "method": "GET",
+          "urlTemplate": "$L2M_API_BASE/api/sample-data/status/503",
+          "headersTemplate": "{}",
+          "responseType": "json",
+          "timeoutMs": 15000,
+          "failOnHttpError": true,
+          "retryCount": 2,
+          "retryDelayMs": 200,
+          "onError": "branch"
+        }
+      },
+      {
+        "id": "ok",
+        "type": "set_node",
+        "name": "Use the answer",
+        "position": {
+          "x": 640,
+          "y": 120
+        },
+        "config": {
+          "assignments": [
+            {
+              "key": "path",
+              "valueTemplate": "success",
+              "type": "string"
+            },
+            {
+              "key": "status",
+              "valueTemplate": "{{status}}",
+              "type": "auto"
+            }
+          ]
+        }
+      },
+      {
+        "id": "fallback",
+        "type": "set_node",
+        "name": "Fallback",
+        "position": {
+          "x": 640,
+          "y": 280
+        },
+        "config": {
+          "assignments": [
+            {
+              "key": "path",
+              "valueTemplate": "fallback",
+              "type": "string"
+            },
+            {
+              "key": "reason",
+              "valueTemplate": "{{error}}",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      {
+        "id": "out",
+        "type": "output",
+        "name": "Result",
+        "position": {
+          "x": 920,
+          "y": 200
+        },
+        "config": {
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e_start_out_call",
+        "source": "start",
+        "target": "call"
+      },
+      {
+        "id": "e_call_out_ok",
+        "source": "call",
+        "target": "ok"
+      },
+      {
+        "id": "e_call_error_fallback",
+        "source": "call",
+        "target": "fallback",
+        "sourceHandle": "error"
+      },
+      {
+        "id": "e_ok_out_out",
+        "source": "ok",
+        "target": "out"
+      },
+      {
+        "id": "e_fallback_out_out",
+        "source": "fallback",
+        "target": "out"
+      }
+    ]
+  },
+  "exportedAt": "2026-11-19T00:00:00.000Z"
+}

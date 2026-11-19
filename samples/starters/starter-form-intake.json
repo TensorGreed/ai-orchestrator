@@ -1,0 +1,229 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "starter-form-intake",
+    "name": "Form intake: route requests",
+    "description": "A public form collects a request, a Switch routes it by topic, and each branch tags it for the right team. Click Webhook run to try it with sample answers, or open the form URL.",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "form",
+        "type": "form_trigger",
+        "name": "Contact form",
+        "position": {
+          "x": 80,
+          "y": 220
+        },
+        "config": {
+          "path": "starter-contact",
+          "title": "Contact us",
+          "description": "Tell us what you need and we will route it to the right team.",
+          "submitLabel": "Send",
+          "authMode": "public",
+          "successMessage": "Thanks, we got your request.",
+          "fields": [
+            {
+              "name": "name",
+              "label": "Name",
+              "type": "text",
+              "required": true
+            },
+            {
+              "name": "email",
+              "label": "Email",
+              "type": "email",
+              "required": true
+            },
+            {
+              "name": "topic",
+              "label": "Topic",
+              "type": "select",
+              "required": true,
+              "options": [
+                "Sales",
+                "Support",
+                "Other"
+              ]
+            },
+            {
+              "name": "message",
+              "label": "Message",
+              "type": "textarea",
+              "required": true
+            }
+          ]
+        }
+      },
+      {
+        "id": "route",
+        "type": "switch_node",
+        "name": "Route by topic",
+        "position": {
+          "x": 360,
+          "y": 220
+        },
+        "config": {
+          "switchValue": "{{topic}}",
+          "cases": [
+            {
+              "value": "Sales",
+              "label": "sales"
+            },
+            {
+              "value": "Support",
+              "label": "support"
+            }
+          ],
+          "defaultLabel": "default"
+        }
+      },
+      {
+        "id": "sales",
+        "type": "set_node",
+        "name": "Sales team",
+        "position": {
+          "x": 640,
+          "y": 80
+        },
+        "config": {
+          "assignments": [
+            {
+              "key": "team",
+              "valueTemplate": "sales",
+              "type": "string"
+            },
+            {
+              "key": "from",
+              "valueTemplate": "{{name}} <{{email}}>",
+              "type": "string"
+            },
+            {
+              "key": "message",
+              "valueTemplate": "{{message}}",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      {
+        "id": "support",
+        "type": "set_node",
+        "name": "Support team",
+        "position": {
+          "x": 640,
+          "y": 220
+        },
+        "config": {
+          "assignments": [
+            {
+              "key": "team",
+              "valueTemplate": "support",
+              "type": "string"
+            },
+            {
+              "key": "from",
+              "valueTemplate": "{{name}} <{{email}}>",
+              "type": "string"
+            },
+            {
+              "key": "message",
+              "valueTemplate": "{{message}}",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      {
+        "id": "general",
+        "type": "set_node",
+        "name": "General inbox",
+        "position": {
+          "x": 640,
+          "y": 360
+        },
+        "config": {
+          "assignments": [
+            {
+              "key": "team",
+              "valueTemplate": "general",
+              "type": "string"
+            },
+            {
+              "key": "from",
+              "valueTemplate": "{{name}} <{{email}}>",
+              "type": "string"
+            },
+            {
+              "key": "message",
+              "valueTemplate": "{{message}}",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      {
+        "id": "out",
+        "type": "output",
+        "name": "Routed request",
+        "position": {
+          "x": 920,
+          "y": 220
+        },
+        "config": {
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e_form_out_route",
+        "source": "form",
+        "target": "route"
+      },
+      {
+        "id": "e_route_sales_sales",
+        "source": "route",
+        "target": "sales",
+        "sourceHandle": "sales"
+      },
+      {
+        "id": "e_route_support_support",
+        "source": "route",
+        "target": "support",
+        "sourceHandle": "support"
+      },
+      {
+        "id": "e_route_default_general",
+        "source": "route",
+        "target": "general",
+        "sourceHandle": "default"
+      },
+      {
+        "id": "e_sales_out_out",
+        "source": "sales",
+        "target": "out"
+      },
+      {
+        "id": "e_support_out_out",
+        "source": "support",
+        "target": "out"
+      },
+      {
+        "id": "e_general_out_out",
+        "source": "general",
+        "target": "out"
+      }
+    ],
+    "settings": {
+      "testWebhookPayload": {
+        "name": "Grace Hopper",
+        "email": "grace@example.com",
+        "topic": "Support",
+        "message": "My invoice shows the wrong address."
+      }
+    }
+  },
+  "exportedAt": "2026-11-19T00:00:00.000Z"
+}

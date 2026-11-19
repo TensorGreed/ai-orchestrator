@@ -89,6 +89,7 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "app.ts", match: "const stored = await store.getWorkflow(sourceId);", kind: "not_run", why: "a JSON import reads the stored workflow with the file's id: to name and diff it, and (12.2) to keep its trigger trust settings on a replace; nothing runs" },
   { file: "app.ts", match: "if (!await store.getWorkflow(workflowId)) {", kind: "not_run", why: "a tool policy rule's workflow principal must exist when the rule is saved; nothing runs" },
   { file: "app.ts", match: "const gatedWorkflow = await store.getWorkflow(workflowId);", kind: "not_run", why: "whether the reader of a release gate's cases sees every run of the workflow; nothing runs" },
+  { file: "app.ts", match: "const releasedWorkflow = await store.getWorkflow(workflowId);", kind: "not_run", why: "whether the reader of the publish preview or the release history sees every run of the workflow; nothing runs" },
 
   // app.ts: production traffic.
   { file: "app.ts", match: "const workflow = productionWorkflow(request.params.workflowId);", kind: "production", why: "Slack, GitHub, Stripe, Telegram, Discord app webhooks and chat", count: 6 },
@@ -104,6 +105,7 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "app.ts", match: '(channel === "production" ? productionWorkflow(payload.sourceWorkflowId) : store.getWorkflow(payload.sourceWorkflowId))', kind: "production", why: "the error workflow follows the failing run's channel" },
   { file: "app.ts", match: "const loadForRoute = (id: string) => (isTestRoute ? store.getWorkflow(id) : productionTriggerWorkflow(id));", kind: "production", why: "/webhook/ runs the published version (an unfinished one answers 409), /webhook-test/ the draft" },
   { file: "execution-routes.ts", match: 'const workflow = executeChannel.channel === "production" ? productionWorkflow(access.workflow.id) : access.workflow;', kind: "production", why: "/execute and /execute/stream: API-key callers run the published version (or the draft with channel=draft and workflow:write), the editor the draft", count: 2 },
+  { file: "app.ts", match: "const workflow = mayEdit ? access.workflow : productionWorkflow(access.workflow.id);", kind: "production", why: "the manual trigger route: someone who may edit the workflow runs the draft, anyone else the published version" },
   { file: "execution-routes.ts", match: 'const workflow = retryChannel === "production" ? productionWorkflow(sourceExecution.workflowId) : store.getWorkflow(sourceExecution.workflowId);', kind: "production", why: "a retry of a production run runs what production runs now; a draft run's retry runs the draft" },
   { file: "app.ts", match: "const workflow = releaseService.deactivatedProductionWorkflow(summary.id);", kind: "not_run", why: "a deactivated gated workflow's paths, only to answer \"deactivated\" rather than \"not found\"" },
   { file: "app.ts", match: "const entry = workflowVersionService.get(request.params.id, version);", kind: "not_run", why: "reading or diffing a saved version in the history panel", count: 2 },
@@ -115,6 +117,7 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "app.ts", match: "const version = store.getWorkflowVersion(execution.workflowId, ranOn.version);", kind: "not_run", why: "v74: the version a production run ran, checked for declared sensitive sources; nothing runs" },
   { file: "app.ts", match: "const current = store.getWorkflow(candidate.workflow.id);", kind: "draft", why: "a replay job's case: the candidate's current project" },
   { file: "execution-routes.ts", match: "const workflow = store.getWorkflow(source.workflowId);", kind: "draft", why: "executions replay (cassette) runs the draft" },
+  { file: "app.ts", match: "const forEditCheck = store.getWorkflow(workflowId);", kind: "not_run", why: "a replay job's case re-checks the edit rule on the workflow's project; nothing runs from it" },
   { file: "app.ts", match: "const current = store.getWorkflow(pending.workflowId);", kind: "not_run", why: "an approval resume runs the paused snapshot; only its current project is read" },
   { file: "app.ts", match: "getWorkflow: (id) => store.getWorkflow(id),", kind: "draft", why: "run-access and run-scope dependencies: access checks and draft-run sub-workflows", count: 2 },
   { file: "app.ts", match: "store.getWorkflow(workflow.id)", exact: true, kind: "draft", why: "approval routes: whether a draft can be executed by the user" },
@@ -305,10 +308,10 @@ describe("every run names its release channel", () => {
 
   it("the draft runs only where a person runs it on purpose, and every computed channel is a known one", () => {
     const channels = calls.map((entry) => /\bchannel\s*:\s*([^,\n]+)/.exec(entry.text)?.[1]?.trim() ?? "");
-    // Eval run, executions replay, manual trigger, replay sandbox.
-    expect(channels.filter((value) => value === '"draft"').length).toBe(4);
+    // Eval run, executions replay (for those who may edit), replay sandbox.
+    expect(channels.filter((value) => value === '"draft"').length).toBe(3);
     const computed = [...new Set(channels.filter((value) => value !== '"draft"' && value !== '"production"'))].sort();
-    expect(computed).toEqual(['executeChannel.channel', 'isTestRoute ? "draft" : "production"', 'retryChannel', 'state.releaseChannel === "production" ? "production" : "draft"'].sort());
+    expect(computed).toEqual(['executeChannel.channel', 'isTestRoute ? "draft" : "production"', 'mayEdit ? "draft" : "production"', 'retryChannel', 'state.releaseChannel === "production" ? "production" : "draft"'].sort());
   });
 });
 

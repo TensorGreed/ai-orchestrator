@@ -116,7 +116,8 @@ on Pass and its discarded output on Stopped.
 
 ### Set / Transform
 
-Each field has a **Type** (`type`):
+Each field has a **Type** (`type`). A field on `auto` keeps its type under **More** (**Type of** the field's key); a
+field with another type shows it in its row.
 
 | Type | The value |
 |---|---|
@@ -173,12 +174,24 @@ nodes after every one of its outputs run once, after the loop, and a body node's
 fails the Loop). Turn the option on to make that Loop route; check what its later nodes read first, since the nodes
 on the branching node's outputs then run once per item.
 
-A pass cannot pause for a person. An Approval Gate in a body is refused when you save, and a Human Approval node in a
-body fails the Loop when a pass reaches it (the editor warns). On a branch no pass takes, neither runs.
+A **Human Approval** node in a body asks once per pass that reaches it. The run pauses, and the request shows the
+item's message and the pass (**Pass 2 of 3**). After the decision, the run goes on in that pass at that node, then
+with the later passes; nothing that ran before the approval runs again. A Loop of 3 items can ask 3 times, one
+request after another.
+
+- **Approve**: the pass goes on to the nodes after the approval.
+- **Reject** or a timeout: in a Loop whose branches route, an approval whose On Error is **Execute Fallback Branch**
+  sends that pass to its Error output, and the loop goes on with the next item. Otherwise the run stops, as it does
+  for a rejection outside a Loop. **Continue Anyway** never continues past an approval, set on the approval or on
+  the Loop.
+- A Loop inside a Loop body pauses and resumes the same way.
+
+An Approval Gate in a body is refused when you save. An approval an agent's tool gate or a sub-workflow asks for
+inside a body fails the Loop. To ask once for all the items, put the approval before or after the Loop.
 
 ## Errors and retries
 
-Every node has the same error settings on its **Settings** tab.
+Every node has the same error settings, under **More** in its inspector.
 
 ### Retries
 
@@ -214,7 +227,8 @@ Every node has the same error settings on its **Settings** tab.
 
 - **Fail on HTTP error status** (`failOnHttpError`): a status outside 200–299 fails the node, so retries and the Error
   output apply. The error names the status, the method and the URL (without user name, password, query or fragment).
-  Off, the response is returned as before, with `status` and `ok: false`. New HTTP Request nodes have it on.
+  Off, the response is returned as before, with `status` and `ok: false`. New HTTP Request nodes have it on and do
+  not show the switch; a node saved without it shows it with **Upgrade to the new behaviour**, and one set off shows it.
   `304 Not Modified` is not an error.
 - **Retry on status** (`retryOnStatus`): the statuses that are retried, as codes (`503`), classes (`5xx`) or ranges
   (`500-504`). Empty means `429, 5xx`. Any other status fails at once, without retrying.
@@ -223,11 +237,20 @@ Every node has the same error settings on its **Settings** tab.
   statuses on its retry list are retried and fail the node once the retries are spent; other error statuses are still
   returned. The editor says so on such a node. Turn the option on to fail on every error status, or off to never fail.
 - A node's `errorConfig` in the workflow JSON (`retryOnFail`, `maxRetries`, `retryIntervalMs`, `continueOnFail`) is
-  kept when the workflow is saved and takes precedence over the Settings fields; the Settings tab shows it. A save
+  kept when the workflow is saved and takes precedence over the fields under More, which show it. A save
   refuses invalid values (a negative `maxRetries`, for example). A workflow stored with such values before saves
   checked them still runs, with the invalid fields ignored; the editor names them when the workflow is opened, and
-  **Remove invalid values** on the node's Settings tab removes them with the next save.
+  **Remove invalid values** under the node's More (which opens for it) removes them with the next save.
 - Network failures and timeouts name the method and URL the same way and are retried as set under Retries on Failure.
+
+### HTTP Request secrets
+
+- A secret picked on the node (`secretRef`) is sent as `Authorization: Bearer <secret>`, as before.
+- `secretAuth` sends it another way: `{ "type": "basic" }` (the secret holds `user:password`),
+  `{ "type": "header", "name": "X-API-Key" }` or `{ "type": "query", "name": "api_key" }`. Nodes made from an API
+  operation set it from the spec (see [Your integrations](./integrations.md)); a node without it is unchanged.
+- A secret in its own header or in the query stays with the site: a redirect to another host fails the node. The
+  query secret is never part of the URL in run logs or error messages.
 
 ## Output Parser (`output_parser`)
 

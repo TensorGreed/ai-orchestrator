@@ -402,7 +402,7 @@ export const STAFF_SECTION_SQL = {
   projectRoles: "SELECT project_id, role, custom_role_id, created_at, updated_at FROM user_project_roles WHERE user_id = ? ORDER BY project_id LIMIT ?",
   apiKeys: "SELECT id, name, key_prefix, scopes_json, last_used_at, expires_at, revoked_at, created_at FROM api_keys WHERE user_id = ? ORDER BY created_at LIMIT ?",
   runsTriggered:
-    "SELECT id, workflow_id, workflow_name, status, trigger_type, started_at, completed_at FROM execution_history WHERE triggered_by IN (?, ?) ORDER BY started_at LIMIT ?",
+    "SELECT id, workflow_id, workflow_name, status, trigger_type, started_at, completed_at FROM execution_history WHERE triggered_by IN (?, ?) OR triggered_by_user_id = ? ORDER BY started_at LIMIT ?",
   workflowsCreated: "SELECT id, name, project_id, created_at FROM workflows WHERE created_by IN (?, ?) ORDER BY created_at LIMIT ?",
   approvals:
     "SELECT id, execution_id, workflow_id, project_id, kind, status, requested_by, decided_by, decided_at, created_at FROM approval_requests WHERE requested_by IN (?, ?) OR decided_by IN (?, ?) ORDER BY created_at LIMIT ?",

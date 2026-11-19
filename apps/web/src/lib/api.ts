@@ -65,9 +65,11 @@ import type {
   McpPlaygroundCallResponse
 } from "@ai-orchestrator/shared";
 import type { DocumentScanRequest, DocumentScanResult } from "@ai-orchestrator/shared";
+import type { CatalogPaletteEntry, CatalogSourceSummary, OpenApiOperation } from "@ai-orchestrator/shared";
 import { EVAL_RUN_FINISHED_STATUSES } from "@ai-orchestrator/shared";
 import type { GuardEntityEngineInfo } from "@ai-orchestrator/shared";
 import type { WorkflowDiff } from "@ai-orchestrator/shared";
+import type { WorkflowBuilderRequest, WorkflowBuilderResult } from "@ai-orchestrator/shared";
 import type {
   EvalCaseDetail,
   EvalCaseResult,
@@ -614,6 +616,24 @@ export async function duplicateWorkflow(
 }
 
 /**
+ * Whether "Describe it" is on for this server (builders only), and the model a build in the project would use (the
+ * server picks it: a key in its environment, else a saved secret the person may use in the project, else Echo).
+ */
+export async function fetchWorkflowBuilderStatus(projectId?: string) {
+  const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+  return apiRequest<{ enabled: boolean; defaultModel?: { providerId: string; model: string } }>(`/api/workflow-builder${query}`);
+}
+
+/** Describe-it builder: a description in, a workflow draft preview out (nothing is saved). */
+export async function buildWorkflowFromDescription(payload: WorkflowBuilderRequest, signal?: AbortSignal) {
+  return apiRequest<WorkflowBuilderResult>("/api/workflow-builder/build", {
+    method: "POST",
+    body: JSON.stringify(payload),
+    ...(signal ? { signal } : {})
+  });
+}
+
+/**
  * Imports a workflow JSON file. `mode: "new"` (the default) makes a new workflow: the file's id is kept when it is
  * free, otherwise the import gets a new id. `mode: "replace"` overwrites the stored workflow with the file's id.
  */
@@ -1107,6 +1127,7 @@ export async function fetchDefinitions() {
     mcpServers: Array<{ id: string; label: string; description: string }>;
     /** Hosted model providers whose API key the server's environment sets (builders only). */
     envModelProviders?: string[];
+    /** Whether "Describe it" is on (builders only; absent on older servers). */
   }>("/api/definitions");
 }
 
@@ -1980,7 +2001,6 @@ export async function fetchWorkflowAccess(workflowId: string) {
     canEdit: boolean;
     canRun: boolean;
     canShare: boolean;
-    canShareWithProjects?: boolean;
     /** A share with you is all you have: run lists and run data hold only your own runs. */
     ownRunsOnly?: boolean;
   }>(
@@ -2970,10 +2990,12 @@ export interface TemplateListItem {
   featured?: boolean;
 }
 
-export async function fetchTemplates(filters?: { category?: string; search?: string }) {
+export async function fetchTemplates(filters?: { category?: string; search?: string; withoutSetupOnly?: boolean }) {
   const params = new URLSearchParams();
   if (filters?.category) params.set("category", filters.category);
   if (filters?.search) params.set("search", filters.search);
+  // Only templates that run without setup (no model, key, server or service to configure).
+  if (filters?.withoutSetupOnly) params.set("setup", "none");
   const suffix = params.toString() ? `?${params.toString()}` : "";
   return apiRequest<{ templates: TemplateListItem[] }>(`/api/templates${suffix}`);
 }
@@ -2983,7 +3005,8 @@ export async function fetchTemplate(id: string) {
 }
 
 export async function useTemplate(templateId: string) {
-  return apiRequest<{ workflowId: string; name: string }>(`/api/templates/${templateId}/use`, {
+  // `companions`: the workflows the template brought along (a sub-workflow it calls), created next to it.
+  return apiRequest<{ workflowId: string; name: string; companions?: Array<{ workflowId: string; name: string }> }>(`/api/templates/${templateId}/use`, {
     method: "POST"
   });
 }
@@ -5263,4 +5286,65 @@ export async function fetchAiGatewayUsage(query: { window?: "24h" | "7d" | "30d"
   for (const [key, value] of Object.entries(query)) if (value) params.set(key, value);
   const suffix = params.toString() ? `?${params.toString()}` : "";
   return apiRequest<AiGatewayUsageSummary>(`/api/ai-gateway/usage${suffix}`);
+}
+
+// ---------------------------------------------------------------------------
+// Integration catalog: MCP server tools and OpenAPI operations in the palette
+// ---------------------------------------------------------------------------
+
+export interface OpenApiSpecView {
+  id: string;
+  projectId: string;
+  name: string;
+  sourceUrl: string | null;
+  baseUrl: string;
+  title: string;
+  version: string;
+  operationCount: number;
+  warnings: string[];
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  fetchedAt: string;
+  operations?: OpenApiOperation[];
+}
+
+export async function fetchIntegrationCatalog(projectId?: string | null) {
+  const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+  return apiRequest<{ projectId: string; entries: CatalogPaletteEntry[]; sources: CatalogSourceSummary[] }>(`/api/catalog${qs}`);
+}
+
+export async function fetchOpenApiSpecs(projectId?: string | null) {
+  const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+  return apiRequest<{ specs: OpenApiSpecView[] }>(`/api/catalog/openapi-specs${qs}`);
+}
+
+export async function fetchOpenApiSpec(id: string) {
+  return apiRequest<{ spec: OpenApiSpecView & { operations: OpenApiOperation[] } }>(`/api/catalog/openapi-specs/${encodeURIComponent(id)}`);
+}
+
+export async function createOpenApiSpec(payload: { projectId?: string | null; name?: string; url?: string; specText?: string; baseUrl?: string }) {
+  const { projectId, ...rest } = payload;
+  return apiRequest<{ spec: OpenApiSpecView }>("/api/catalog/openapi-specs", {
+    method: "POST",
+    body: JSON.stringify({ ...rest, ...(projectId ? { projectId } : {}) })
+  });
+}
+
+export async function updateOpenApiSpec(id: string, payload: { name?: string; baseUrl?: string }) {
+  return apiRequest<{ spec: OpenApiSpecView }>(`/api/catalog/openapi-specs/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function refreshOpenApiSpec(id: string, specText?: string) {
+  return apiRequest<{ spec: OpenApiSpecView; added: string[]; removed: string[] }>(`/api/catalog/openapi-specs/${encodeURIComponent(id)}/refresh`, {
+    method: "POST",
+    body: JSON.stringify(specText ? { specText } : {})
+  });
+}
+
+export async function deleteOpenApiSpec(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/catalog/openapi-specs/${encodeURIComponent(id)}`, { method: "DELETE" });
 }

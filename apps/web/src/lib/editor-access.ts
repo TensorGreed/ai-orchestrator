@@ -26,6 +26,15 @@ export function roleMayUseEditorRunOptions(role: Role | undefined): boolean {
   return role === "admin" || role === "builder";
 }
 
+/**
+ * Whether the editor may send its run options (pinned data, recording, running one node or from a node) for the open
+ * workflow: a builder role or higher and, once the workflow's access is known, edit access to it. A builder who may
+ * only run the workflow runs the saved workflow as an operator does (the server refuses the options for them).
+ */
+export function mayUseEditorRunOptions(role: Role | undefined, access: WorkflowAccessView | null): boolean {
+  return roleMayUseEditorRunOptions(role) && (access ? access.canEdit : true);
+}
+
 const NO_RUN = "You do not have permission to run this workflow.";
 
 export function editorAccess(role: Role | undefined, access: WorkflowAccessView | null): EditorAccess {

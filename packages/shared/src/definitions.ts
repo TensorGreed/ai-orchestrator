@@ -140,7 +140,12 @@ const baseNodeDefinitions: NodeDefinition[] = [
         // Fail on a status outside 200–299 (new nodes: true; unset: only its retried statuses, when the node asks for retries).
         failOnHttpError: { type: "boolean" },
         // Statuses retried when failing on them: codes, Nxx classes, ranges ("429, 5xx" when empty).
-        retryOnStatus: { type: "string" }
+        retryOnStatus: { type: "string" },
+        // How the secret is sent: bearer (unset), basic, a named header or a query parameter.
+        secretAuth: { type: "object" },
+        // Set on a node made from an OpenAPI operation: the spec and operation, and the operation form's values.
+        openapiOperation: { type: "object" },
+        operationValues: { type: "object" }
       },
       required: ["method", "urlTemplate"]
     },
@@ -782,6 +787,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
         resourceUri: { type: "string" },
         toolName: { type: "string" },
         argsTemplate: { type: "string" },
+        // The tool form's values (field path → text); the form writes argsTemplate from them.
+        argValues: { type: "object" },
         connection: {
           type: "object",
           properties: {

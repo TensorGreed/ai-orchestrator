@@ -68,7 +68,7 @@ export class ModelAllowlistUnavailableError extends Error {
  * Where a model call comes from, for the audit event. `deployment`: a call made through the deployment-wide registry
  * with no run, session or request behind it (a fallback; every built-in path has its own source).
  */
-export type ModelCallSource = "run" | "gateway_sampling" | "ai_gateway" | "provider_test" | "eval_judge" | "knowledge_base" | "deployment";
+export type ModelCallSource = "run" | "gateway_sampling" | "ai_gateway" | "provider_test" | "eval_judge" | "knowledge_base" | "workflow_builder" | "deployment";
 
 export interface ModelAllowlistFinding {
   providerId: string;

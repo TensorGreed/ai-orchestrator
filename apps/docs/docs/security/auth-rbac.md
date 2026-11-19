@@ -7,6 +7,8 @@ description: "Authentication and access control in L2M: session cookies, admin, 
 
 Concepts: [Identity for AI platforms](/learn/operations/identity-for-ai-platforms) explains how people, automation and MCP clients sign in and what each may do.
 
+On one page: [Who can see and run what](./access-model.md) sums up roles, projects, shares, sessions, keys and approvals.
+
 ## Session model
 
 - Every sign-in (password, the MFA step, OIDC, SAML, LDAP) creates a persisted session record in the database
@@ -99,6 +101,8 @@ needs a role also accepts every role above it.
 
 - Workflow read: all authenticated roles
 - Workflow create/update/delete: `builder`, `admin`
+- Describe a workflow (`POST /api/workflow-builder/build`, a draft preview from a description): `builder`, `admin` with
+  `workflow:write` in the project, and `secret:use` for a credential the request names
 - Execute workflow/webhook API trigger: `operator`, `builder`, `admin` with `workflow:execute` (operators run the saved
   workflow with their input; see [Running workflows by role](#running-workflows-by-role))
 - Secrets list/create: `builder`, `admin`
@@ -188,7 +192,7 @@ in `MFA_REQUIRED_ROLES`, see [MFA required per role](#mfa-required-per-role)).
   no `+`, the inspector offers no <span v-pre>`{{`</span> suggestions, helper chips, Input fields to drag in or
   **Run node**, and the workflow settings in **More actions** are not offered.
   `GET /api/workflows/:id/access` answers what the signed-in user may do: `canEdit`, `canRun`, `canShare` (share with
-  people, as the share routes allow), `canShareWithProjects`, and `ownRunsOnly` (they see only their own runs: see
+  people or with other projects, as the share routes allow: `project:invite`), and `ownRunsOnly` (they see only their own runs: see
   [Own runs only](#own-runs-only)).
 - **Shared with this project.** The Workflows page lists the workflows other projects share to the active one, with
   the access members get there (`GET /api/projects/:id/shared-workflows`).
@@ -197,24 +201,30 @@ in `MFA_REQUIRED_ROLES`, see [MFA required per role](#mfa-required-per-role)).
 
 `POST /api/workflows/:id/execute`, `/execute/stream`, `POST /api/webhooks/execute` and `/stream` take operators and up,
 with `workflow:execute` on the workflow (a project membership, an execute share to a project, or an execute share to
-the person). Someone who may edit the workflow runs the draft from a signed-in session, as before; anyone else
-(an operator, a share-only runner, an API key) runs the released version (production: the published version, or the
+the person). Someone who may edit the workflow (a global role of builder or higher **and** `workflow:write` on it)
+runs the draft from a signed-in session, as before; anyone else (an operator, also one with an editor membership; a
+builder who may only run it; a share-only runner; an API key) runs the released version (production: the published version, or the
 saved workflow while nothing is published and no release gate is on), and gets `403` for `channel=draft`. They run it
 with the caller's input: `input`, `payload`, `variables`, `system_prompt`, `user_prompt`,
-`sessionId`, `customData` and a timeout. An operator's run uses no pinned data, and its timeout is at most
-`WORKFLOW_EXECUTION_TIMEOUT_MS`. Options that change what runs stay with builders and admins: `startNodeId`,
+`sessionId`, `customData` and a timeout. The run of someone who may not edit the workflow uses no pinned data, and its
+timeout is at most `WORKFLOW_EXECUTION_TIMEOUT_MS`. Options that change what runs stay with those who may edit it:
+`startNodeId`,
 `runMode: "single_node"`, `usePinnedData`, `pinnedData`, `nodeOutputs`, `sourceExecutionId`, `nodeOutputsExecutionId`,
-`record`, and a `workflow`, `nodes` or `edges` sent with the request; an operator who sends one gets `403` with
-`refusedOptions`, before any other check. Viewers are refused. Runs are audited as before.
+`record`, and a `workflow`, `nodes` or `edges` sent with the request. Anyone else who sends one gets `403` with
+`refusedOptions`: below builder before any other check, a builder once the workflow's access is known, before budgets. The
+manual trigger route (`POST /api/triggers/manual/:workflowId`) and a retry follow the same rule: a builder who may only
+run the workflow runs the released version there, without the editor's options or pinned data. Replaying a run with
+its recorded MCP calls runs the draft, so it needs someone who may edit the workflow. Viewers are refused. Runs are audited as before.
 
-**Session memory is kept to the person for operators and share-only runners.** A run started by a signed-in operator,
-or by anyone who may run the workflow only through a share with them, reads and writes session memory, the session
+**Session memory is kept to the person for those who may not edit the workflow and for share-only runners.** A run
+started by a signed-in person who may not edit the workflow (an operator, also with an editor membership; a builder
+who may only run it), or by anyone who may run or read the workflow only through a share with them, reads and writes session memory, the session
 tool cache and session artifacts under that person's own key. Another person who sends the same session id starts an
 empty session, so knowing someone's session id does not continue their conversation. The run's sub-workflows and
 error workflow, and its resumed part after an approval (whoever decides it), use the same person's key, and so do the
 person's queued runs (`POST /api/workflows/:id/enqueue`) and their messages to a chat trigger set to signed-in
 sessions. Someone who may run a workflow only through a share with them keeps their own key with an API key of their
-own too. Builders and admins with access through their projects, other API keys and service accounts (whatever role
+own too, whatever their role and the key's role ceiling. People who may edit the workflow (and admins), other API keys and service accounts (whatever role
 the key has), schedules and webhooks keep the workflow's sessions, as before; their runs do not see the sessions kept to a person, and a person's
 runs do not see theirs. A run records whose sessions it used, and a retry or an MCP replay of it keeps them: the
 person's own retry continues their sessions; anyone else's runs under that person's key in a namespace of its own, so
@@ -254,6 +264,10 @@ or `POST /api/workflows/:id/user-shares` with `{ "email": "...", "accessLevel": 
 - **Audit.** `workflow.user_share` (with `targetUserId`, `targetEmail`, `accessLevel`, `effectiveAccess`) and
   `workflow.user_unshare`, in the `sharing` category.
 
+Sharing a workflow with another project (`POST /api/workflows/:id/shares`, `DELETE /api/workflows/:id/shares/:projectId`)
+takes the same as sharing with people: `project:invite` on the workflow's own project (or an admin) and the same
+step-up. Project editors cannot share workflows; a project admin can.
+
 ### Own runs only
 
 Someone who has a workflow only through a share with them sees only their own runs of it: the runs they started and
@@ -262,6 +276,14 @@ their inputs, outputs and node data, stay hidden. This applies when the share is
 workflow's project with a role that reads it, not through a share to a project they can read, and not an admin. A
 project member keeps the full view, and so does anyone who also has the workflow through their project.
 
+- **Whose run it is.** A run records the user id of the person who started it: from the app, with their API key, or
+  by a signed-in form submission or chat (a signed-in form also keeps the submitter's session memory to them, as a
+  signed-in chat does). The run stays theirs, and keeps them as "started by", when someone else approves it; the
+  approver is recorded on the decision. An email never counts: migration v80 recorded the user id on older runs once,
+  for the account with that email created before the run started (for a run that asked for an approval, the first
+  request's requester), and left it empty where it could tell nobody (a
+  deleted account's email, an email a new account got later, two accounts). Runs with no user id, like runs no person
+  started (webhooks, schedules, public forms and chats, MCP and gateway calls), are nobody's own.
 - **Lists.** The run history, the editor's run picker (it reads **Your runs** then) and the restored run data show only
   their runs, filtered before paging, so totals count only those.
 - **Single runs.** Someone else's run answers `404`, the same answer as a run that does not exist: its detail, its live
@@ -275,6 +297,9 @@ project member keeps the full view, and so does anyone who also has the workflow
   over them), release gate cases and release requests, captured runs, recorded MCP cassettes (their own run's
   cassette still opens from the run), eval and replay runs, content rule events and statistics, simulations of content
   rules, recent tool calls in the MCP catalog and the dead-letter queue leave such a workflow out or answer `404`.
+- **Releases.** The publish dialog shows them the gate's verdict with a note instead of its reasons and figures, and
+  the release history leaves out each release's gate reasons and replay job: the gate judges golden runs taken from
+  other people's runs, and its reasons can name required cases. Both answers carry `detailsHidden: true`.
 - **The editor.** `GET /api/workflows/:id/access` answers `ownRunsOnly: true` for them.
 
 **Opening shared workflows.** A link to a workflow (`?workflowId=`) opens it for anyone who can read it, through their
@@ -334,10 +359,11 @@ on top of the global role:
 | List or read workflows, versions, pins, variables, export | `workflow:read` |
 | Create, update, import, move, duplicate, activate, restore, pin | `workflow:write` (on the workflow and on the project it lands in) |
 | Delete a workflow | `workflow:delete` |
-| Execute, stream, enqueue, manual trigger, retry, MCP replay, cancel, eval run | `workflow:execute` |
+| Execute, stream, enqueue, manual trigger, retry, cancel | `workflow:execute` (the draft, run options and MCP replay need the edit rule below) |
+| MCP replay, eval runs, golden-run replays, replay jobs and estimates (they run the draft) | a builder role and `workflow:write` (`runAccess.mayEdit`) |
 | Approve or reject a paused run | `workflow:execute` |
 | Read executions, manifests, audit bundles, rule events, eval runs, golden runs | `workflow:read` |
-| Save or delete a golden run / replay one | `workflow:write` / `workflow:execute` |
+| Save or delete a golden run | `workflow:write` |
 | Read or search a knowledge base / ingest into one | `workflow:read` / `workflow:write` in the KB's project |
 | Read MCP cassettes (list, detail, export) | `workflow:read` on the recorded workflow |
 | Answer an MCP elicitation | `workflow:execute` (seeing it needs `workflow:read`; a request from a run someone else started is shown only to that person and to users with `workflow:execute` in the workflow's project, except for queued runs, whose requests anyone who can read the workflow sees) |

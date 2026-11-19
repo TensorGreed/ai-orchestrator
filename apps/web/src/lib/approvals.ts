@@ -195,3 +195,38 @@ export function matchesApprovalFilter(view: ApprovalInboxItem, filter: string): 
     .toLowerCase();
   return haystack.includes(needle);
 }
+
+/** How long to wait between checks after a queued decision: a few seconds in all, a little longer each time. */
+export const NEXT_REQUEST_POLL_DELAYS_MS: readonly number[] = [400, 700, 1000, 1500, 2000, 3000, 4000];
+
+/** Run statuses after which no new request of the run can come. */
+const FINISHED_RUN_STATUSES = new Set(["success", "error", "partial", "canceled", "failed", "timed_out"]);
+
+/**
+ * After a decision that resumed its run on the queue: wait until the run asks again (a Human Approval in a Loop body
+ * asks on the next pass) or ends, checking with a short backoff. "request" when a new pending request of the run is
+ * in, "ended" when the run finished, "gave_up" after the last delay or when `stopped()` (the page went away).
+ */
+export async function waitForNextRunRequest(input: {
+  executionId: string;
+  decidedRequestId: string;
+  hasOtherPendingRequest: (executionId: string, decidedRequestId: string) => Promise<boolean>;
+  runStatus: (executionId: string) => Promise<string | null>;
+  stopped: () => boolean;
+  sleep?: (ms: number) => Promise<void>;
+  delays?: readonly number[];
+}): Promise<"request" | "ended" | "gave_up"> {
+  const sleep = input.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  for (const delay of input.delays ?? NEXT_REQUEST_POLL_DELAYS_MS) {
+    await sleep(delay);
+    if (input.stopped()) return "gave_up";
+    try {
+      if (await input.hasOtherPendingRequest(input.executionId, input.decidedRequestId)) return "request";
+      const status = await input.runStatus(input.executionId);
+      if (status && FINISHED_RUN_STATUSES.has(status)) return "ended";
+    } catch {
+      // A failed check is retried at the next delay; the Refresh button stays.
+    }
+  }
+  return "gave_up";
+}

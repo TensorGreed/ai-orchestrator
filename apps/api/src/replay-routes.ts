@@ -164,6 +164,11 @@ export function registerReplayRoutes(deps: ReplayRoutesDeps): void {
     }
     const access = await runAccess.run(user, record, "workflow:execute", "Golden run");
     if (!access.ok) return deny(reply, access);
+    // A replay runs the workflow's draft or a candidate (builder tooling), so it follows the one edit rule.
+    if (!access.workflow || !(await runAccess.mayEdit(user, access.workflow))) {
+      reply.code(403);
+      return { error: "Replaying a golden run runs this workflow's draft, so it needs permission to edit the workflow (workflow:write)." };
+    }
     const refusal = candidateRefusal(record);
     if (refusal) {
       reply.code(409);

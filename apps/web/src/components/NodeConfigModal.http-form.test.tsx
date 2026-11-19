@@ -75,7 +75,7 @@ describe("HTTP Request form", () => {
     act(() => url.focus());
     fireEvent.change(url, { target: { value: "https://api.example.com/items" } });
     expect(screen.getByLabelText("URL Template suggestions")).toBeInTheDocument();
-    const summary = within(screen.getByTestId("advanced-fields")).getByText("Advanced");
+    const summary = within(screen.getByTestId("advanced-fields")).getByText("More");
 
     // Press on the Advanced title: the field blurs while the button is still down.
     act(() => {

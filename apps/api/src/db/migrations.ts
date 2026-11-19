@@ -3120,6 +3120,106 @@ export const MIGRATIONS: Migration[] = [
     down: `
       ALTER TABLE execution_history DROP COLUMN IF EXISTS session_owner;
     `
+  },
+  {
+    version: 80,
+    description: "The user id of the person who started a run",
+    // triggered_by_user_id: the id of the signed-in person who started the run (a run route, an API key, a signed-in
+    // form or chat), or NULL (a webhook, a schedule, a public trigger). Set once and kept: a resume by an approver does
+    // not change it. "Own runs" (run-access.ts) judge by it and by session_owner only.
+    //
+    // Runs recorded before v80 get it here, once. Who started a run: for a run that asked for an approval, its first
+    // request's requester (an older build wrote the approver into triggered_by when it resumed), by user id, else by
+    // email; a resumed run with no request names nobody; any other run, its triggered_by. That reference names the
+    // account with that user id, or with that email (in any case) when the account was created before the run started.
+    // A reference that names no account, one created after the run (the email was given to someone new), or two
+    // accounts leaves NULL: nobody's own run. Done now, so renaming an account later neither brings it other people's
+    // runs nor takes its own away. In batches of 5000 runs by id, so a large table is not joined in one statement.
+    up: `
+      ALTER TABLE execution_history ADD COLUMN IF NOT EXISTS triggered_by_user_id TEXT;
+      DO $$
+      DECLARE
+        last_id TEXT := '';
+        batch_ids TEXT[];
+        step BIGINT;
+        matched BIGINT := 0;
+      BEGIN
+        LOOP
+          SELECT array_agg(b.id ORDER BY b.id) INTO batch_ids FROM (
+            SELECT id FROM execution_history
+            WHERE id > last_id AND triggered_by_user_id IS NULL
+            ORDER BY id LIMIT 5000
+          ) b;
+          EXIT WHEN batch_ids IS NULL;
+          -- Three equality joins (by the request's user id, by id, by email) instead of one join on OR, so each is a
+          -- hash join: the OR form compared every run of a batch with every account.
+          UPDATE execution_history eh SET triggered_by_user_id = m.user_id
+          FROM (
+            WITH s AS (
+              SELECT h.id, h.started_at,
+                fr.requested_by_user_id AS ref_id,
+                CASE WHEN fr.execution_id IS NOT NULL THEN fr.requested_by
+                     WHEN h.trigger_type = 'approval_resume' THEN NULL
+                     ELSE h.triggered_by END AS ref
+              FROM execution_history h
+              LEFT JOIN LATERAL (
+                SELECT a.execution_id, a.requested_by_user_id, a.requested_by FROM approval_requests a
+                WHERE a.execution_id = h.id ORDER BY a.created_at, a.id LIMIT 1
+              ) fr ON TRUE
+              WHERE h.id = ANY(batch_ids)
+            ),
+            c AS (
+              SELECT s.id, u.id AS user_id FROM s JOIN users u ON u.id = s.ref_id
+              UNION
+              SELECT s.id, u.id FROM s JOIN users u ON u.id = s.ref WHERE s.ref_id IS NULL
+              UNION
+              SELECT s.id, u.id FROM s JOIN users u ON LOWER(u.email) = LOWER(s.ref)
+              WHERE s.ref_id IS NULL AND u.created_at <= s.started_at
+            )
+            SELECT c.id, MIN(c.user_id) AS user_id FROM c GROUP BY c.id HAVING COUNT(*) = 1
+          ) m
+          WHERE eh.id = m.id;
+          GET DIAGNOSTICS step = ROW_COUNT;
+          matched := matched + step;
+          last_id := batch_ids[array_length(batch_ids, 1)];
+        END LOOP;
+        IF matched > 0 THEN
+          RAISE NOTICE 'L2M v80: recorded the starter''s user id on % earlier runs', matched;
+        END IF;
+      END $$;
+    `,
+    // An older build ignores the column; going forward again runs the backfill again.
+    down: `
+      ALTER TABLE execution_history DROP COLUMN IF EXISTS triggered_by_user_id;
+    `
+  },
+  {
+    version: 81,
+    description: "OpenAPI specs offered as palette entries (one row per spec, kept to a project)",
+    // openapi_specs: a spec a builder added from a URL or a file. spec_text is the body as read (at most 2 MB);
+    // catalog_json the operations parsed from it, which the palette and the operation forms read. No credentials:
+    // nodes made from it pick a secret (secretRef) themselves. Removed with its project (deleteProject).
+    up: `
+      CREATE TABLE IF NOT EXISTS openapi_specs (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        source_url TEXT,
+        base_url TEXT NOT NULL DEFAULT '',
+        spec_text TEXT NOT NULL,
+        catalog_json TEXT NOT NULL,
+        operation_count INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        fetched_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_openapi_specs_project ON openapi_specs(project_id);
+    `,
+    // An older build ignores the table; dropping it removes every stored spec (nodes made from one keep working).
+    down: `
+      DROP TABLE IF EXISTS openapi_specs;
+    `
   }
 ];
 

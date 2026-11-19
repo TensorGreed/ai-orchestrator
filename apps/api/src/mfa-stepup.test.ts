@@ -874,3 +874,36 @@ describe("with service accounts and signed-in sessions", () => {
     expect((await booted.store.getSession(otherDevice))?.revokedAt).toBeTruthy();
   });
 });
+
+describe("sharing a workflow with another project takes the member-change step-up", () => {
+  it("asks a stale session for a code before sharing or unsharing, as sharing with people does", async () => {
+    const booted = await boot({ STEP_UP_MAX_AGE_MINUTES: "10" });
+    const admin = await register(booted, "root@example.com", "admin");
+    const { secret, backupCodes } = await enrolTotp(booted, admin);
+    const session = await signIn(booted, "root@example.com", secret);
+    await booted.store.upsertProject({ id: "team", name: "Team" });
+    await booted.store.upsertProject({ id: "ops", name: "Ops" });
+    await booted.store.upsertWorkflow({
+      id: "wf-team",
+      name: "Team flow",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "team",
+      nodes: [{ id: "start", type: "manual_trigger", name: "Start", position: { x: 0, y: 0 }, config: {} }],
+      edges: []
+    });
+    // Fresh from the sign-in code step.
+    expect((await booted.app.inject({ method: "POST", url: "/api/workflows/wf-team/shares", payload: { projectId: "ops", accessLevel: "read" }, ...as(session) })).statusCode).toBe(200);
+
+    await setMfaVerifiedAt(booted, session, new Date(Date.now() - 11 * 60_000).toISOString());
+    const stale = await booted.app.inject({ method: "DELETE", url: "/api/workflows/wf-team/shares/ops", ...as(session) });
+    expect(stale.statusCode).toBe(403);
+    expect(stale.json()).toMatchObject({ code: "step_up_required", stepUp: { action: "project_member.change" } });
+    const staleShare = await booted.app.inject({ method: "POST", url: "/api/workflows/wf-team/shares", payload: { projectId: "ops", accessLevel: "execute" }, ...as(session) });
+    expect(staleShare.statusCode).toBe(403);
+    expect((await booted.store.listWorkflowShares("wf-team")).map((share) => share.accessLevel)).toEqual(["read"]);
+
+    expect((await booted.app.inject({ method: "POST", url: "/api/auth/step-up", payload: { code: backupCodes[0] }, ...as(session) })).statusCode).toBe(200);
+    expect((await booted.app.inject({ method: "DELETE", url: "/api/workflows/wf-team/shares/ops", ...as(session) })).statusCode).toBe(200);
+  });
+});

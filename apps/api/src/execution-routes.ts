@@ -41,7 +41,7 @@ import {
   normalizeSessionId,
   retryAfterSeconds
 } from "./run-helpers.js";
-import { editorRunOptionsError, editorRunOptionsRefused, savedRunLimits } from "./run-editor-options.js";
+import { editorRunOptionsError, editorRunOptionsRefused, roleMayEdit, savedRunLimits } from "./run-editor-options.js";
 import { startSseHeartbeat, type SseSessionWatch } from "./sse-heartbeat.js";
 import { traceUrlFor } from "./telemetry/trace-url.js";
 import { maskRunEvent, maskRunNodeData, runViewHidesNodeData } from "./response-run-view.js";
@@ -140,19 +140,22 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
    * person, whoever repeats it: never the workflow's sessions or the repeating person's. The person's own repeat
    * continues their sessions; anyone else's runs under the person's key in a namespace of its own (a repeat owner,
    * db/person-sessions.ts), so it reads none of their memory, whatever its session templates say, and writes nowhere
-   * they read. A run whose owner went unrecorded (a canceled, expired or reconciled run) is judged by who started it,
-   * failing closed. A run that used the workflow's sessions is repeated in the repeating person's scope, as a new run
-   * of theirs would be. `null`: the person was deleted, so the run is not repeated (their sessions are gone).
+   * they read. A run whose owner went unrecorded (a canceled, expired or reconciled run) is judged by who started it
+   * (their user id, v80), failing closed: a run that records nobody is repeated in the repeating person's scope, as a run
+   * that used the workflow's sessions is, like a new run of theirs. `null`: the person was deleted, so the run is not repeated (their sessions are gone).
    */
   const repeatSessionScope = async (
-    source: { id: string; triggeredBy?: string | null },
+    source: { id: string },
     user: SafeUser,
     workflow: Workflow,
     executionId: string
   ): Promise<{ sessionOwner?: string } | null> => {
     let owner = await deps.store.getExecutionSessionOwner(source.id);
-    if (!owner && source.triggeredBy) {
-      const starter = await deps.store.getUserByEmail(source.triggeredBy.toLowerCase());
+    if (!owner) {
+      const starterId = await deps.store.getExecutionStarter(source.id);
+      const starter = starterId ? await deps.store.getUserById(starterId) : null;
+      // The person who started it no longer has an account: their sessions are gone, so it is not run again.
+      if (starterId && !starter) return null;
       if (starter) {
         owner = (await deps.sessionOwnerFor({ id: starter.id, email: starter.email, role: starter.role as SafeUser["role"], ...(starter.kind === "service" ? { serviceAccount: true as const } : {}) }, workflow)) ?? null;
       }
@@ -204,15 +207,22 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     if (!user) {
       return;
     }
-    // The editor's options are refused before anything else is checked (budgets included).
-    const refusedOptions = editorRunOptionsRefused(user.role, request.body);
-    if (refusedOptions.length > 0) {
+    // The editor's options are refused before anything else is checked (budgets included): below builder at once, and
+    // then unless the person may edit this workflow.
+    const roleRefused = editorRunOptionsRefused(roleMayEdit(user.role), request.body);
+    if (roleRefused.length > 0) {
       reply.code(403);
-      return editorRunOptionsError(refusedOptions);
+      return editorRunOptionsError(roleRefused);
     }
 
     const access = await runAccess.workflow(user, request.params.id, "workflow:execute");
     if (!access.ok) return denyRunAccess(reply, access);
+    const mayEdit = await runAccess.mayEdit(user, access.workflow);
+    const refusedOptions = editorRunOptionsRefused(mayEdit, request.body);
+    if (refusedOptions.length > 0) {
+      reply.code(403);
+      return editorRunOptionsError(refusedOptions);
+    }
     const executeChannel = await executeChannelFor(request, user, access.workflow.id);
     // Phase 15.6 — an API-key run on the production channel may be captured; it stays a `manual` run everywhere else.
     const executeTrigger = "manual";
@@ -299,7 +309,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       captureInputOrigin: captureSource ? "user" : undefined,
       // Operators run the saved workflow: no pinned data, and no longer than the deployment's timeout.
       ...savedRunLimits(
-        user.role,
+        mayEdit,
         normalizeExecutionTimeoutMs(executionPayload.executionTimeoutMs, executionPayload.execution_timeout_ms, config.WORKFLOW_EXECUTION_TIMEOUT_MS),
         config.WORKFLOW_EXECUTION_TIMEOUT_MS
       )
@@ -323,15 +333,22 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     if (!user) {
       return;
     }
-    // The editor's options are refused before anything else is checked (budgets included).
-    const refusedOptions = editorRunOptionsRefused(user.role, request.body);
-    if (refusedOptions.length > 0) {
+    // The editor's options are refused before anything else is checked (budgets included): below builder at once, and
+    // then unless the person may edit this workflow.
+    const roleRefused = editorRunOptionsRefused(roleMayEdit(user.role), request.body);
+    if (roleRefused.length > 0) {
       reply.code(403);
-      return editorRunOptionsError(refusedOptions);
+      return editorRunOptionsError(roleRefused);
     }
 
     const access = await runAccess.workflow(user, request.params.id, "workflow:execute");
     if (!access.ok) return denyRunAccess(reply, access);
+    const mayEdit = await runAccess.mayEdit(user, access.workflow);
+    const refusedOptions = editorRunOptionsRefused(mayEdit, request.body);
+    if (refusedOptions.length > 0) {
+      reply.code(403);
+      return editorRunOptionsError(refusedOptions);
+    }
     const executeChannel = await executeChannelFor(request, user, access.workflow.id);
     // Phase 15.6 — an API-key run on the production channel may be captured; it stays a `manual_stream` run everywhere else.
     const executeTrigger = "manual_stream";
@@ -448,7 +465,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
         captureInputOrigin: captureSource ? "user" : undefined,
         // Operators run the saved workflow: no pinned data, and no longer than the deployment's timeout.
         ...savedRunLimits(
-          user.role,
+          mayEdit,
           normalizeExecutionTimeoutMs(executionPayload.executionTimeoutMs, executionPayload.execution_timeout_ms, config.WORKFLOW_EXECUTION_TIMEOUT_MS),
           config.WORKFLOW_EXECUTION_TIMEOUT_MS
         )
@@ -616,6 +633,14 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const sourceAccess = await runAccess.run(user, await store.getExecutionHistory(request.params.id), "workflow:execute");
     if (!sourceAccess.ok) return denyRunAccess(reply, sourceAccess);
     const sourceExecution = sourceAccess.run;
+    // A builder who may only run the workflow retries as they run it: the released version, with none of the editor's
+    // options, no pinned data and within the deployment's timeout.
+    const mayEdit = sourceAccess.workflow ? await runAccess.mayEdit(user, sourceAccess.workflow) : false;
+    const refusedOptions = editorRunOptionsRefused(mayEdit, request.body);
+    if (refusedOptions.length > 0) {
+      reply.code(403);
+      return editorRunOptionsError(refusedOptions);
+    }
 
     if (!["error", "partial", "canceled"].includes(sourceExecution.status)) {
       reply.code(409);
@@ -628,11 +653,13 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     // A run whose channel went unrecorded (older history, a record that failed to save, a run that fell out of
     // the in-flight bookkeeping) fails closed: on a gated workflow it retries as production, never the draft.
     const ranOn = await store.getExecutionRelease(sourceExecution.id);
-    const retryChannel: ReleaseChannel = ranOn
-      ? ranOn.channel
-      : (await store.getReleaseGate(sourceExecution.workflowId))?.enabled
-        ? "production"
-        : "draft";
+    const retryChannel: ReleaseChannel = !mayEdit
+      ? "production"
+      : ranOn
+        ? ranOn.channel
+        : (await store.getReleaseGate(sourceExecution.workflowId))?.enabled
+          ? "production"
+          : "draft";
     const workflow = retryChannel === "production" ? await productionWorkflow(sourceExecution.workflowId) : await store.getWorkflow(sourceExecution.workflowId);
     if (!workflow) return await productionMissing(reply, sourceExecution.workflowId);
 
@@ -648,7 +675,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const prepared = await prepareWorkflowExecutionPayload({
       ...parsed.data,
       sourceExecutionId: sourceExecution.id,
-      usePinnedData: parsed.data.usePinnedData ?? true
+      usePinnedData: mayEdit ? parsed.data.usePinnedData ?? true : false
     }, reply, user);
     if (!prepared) {
       return { error: "Source execution not found" };
@@ -673,11 +700,13 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       channel: retryChannel,
       policyActor: user,
       workflow,
-      startNodeId: executionPayload.startNodeId,
-      runMode: executionPayload.runMode,
+      // The source run's editor options (a start node, one node, its node outputs) carry over only for someone who may
+      // edit the workflow; anyone else retries the whole released workflow from the start.
+      ...(mayEdit
+        ? { startNodeId: executionPayload.startNodeId, runMode: executionPayload.runMode, nodeOutputs: prepared.nodeOutputs }
+        : { runMode: "workflow" as const }),
       usePinnedData: executionPayload.usePinnedData,
       pinnedData: executionPayload.pinnedData,
-      nodeOutputs: prepared.nodeOutputs,
       // v74 — content copied from a run that was sensitive work.
       ...(prepared.sensitiveInput ? { sensitiveInput: true } : {}),
       directInput: executionPayload.input,
@@ -687,9 +716,9 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       sessionId: normalizeSessionId(executionPayload.sessionId, executionPayload.session_id),
       // v79 — the failed run's session scope (see repeatSessionScope).
       ...retryScope,
-      executionTimeoutMs: normalizeExecutionTimeoutMs(
-        executionPayload.executionTimeoutMs,
-        executionPayload.execution_timeout_ms,
+      ...savedRunLimits(
+        mayEdit,
+        normalizeExecutionTimeoutMs(executionPayload.executionTimeoutMs, executionPayload.execution_timeout_ms, config.WORKFLOW_EXECUTION_TIMEOUT_MS),
         config.WORKFLOW_EXECUTION_TIMEOUT_MS
       ),
       customData: executionPayload.customData,
@@ -733,6 +762,11 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const sourceAccess = await runAccess.run(user, await store.getExecutionHistory(request.params.id), "workflow:execute");
     if (!sourceAccess.ok) return denyRunAccess(reply, sourceAccess);
     const source = sourceAccess.run;
+    // A replay runs the draft: it is for someone who may edit the workflow (a builder role and workflow:write).
+    if (!sourceAccess.workflow || !(await runAccess.mayEdit(user, sourceAccess.workflow))) {
+      reply.code(403);
+      return { error: "Replaying a run with its recorded MCP calls runs the draft: it needs a builder role and workflow:write on the workflow." };
+    }
     const cassette = parsed.data.cassetteId ? await store.getMcpCassette(parsed.data.cassetteId) : await store.getMcpCassetteForExecution(source.id);
     if (!cassette) {
       reply.code(404);
@@ -805,7 +839,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/executions/:id/cancel", async (request, reply) => {
-    const user = await requireRole(request, reply, ["operator", "builder", "admin"]);
+    const user = await requireRole(request, reply, ["operator"]);
     if (!user) {
       return;
     }

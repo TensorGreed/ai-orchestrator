@@ -1,0 +1,153 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "starter-approval",
+    "name": "Approval before it goes out",
+    "description": "Pauses for a person to approve a refund (with the amount editable) and then takes the approved or rejected path. Run it, then decide in Approvals. Self-approval is on so you can try it alone: whoever starts a run may approve it. Before real use, clear \"Let the person who started the run approve it\" on the Approve refund node.",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "start",
+        "type": "manual_trigger",
+        "name": "Refund request",
+        "position": {
+          "x": 80,
+          "y": 200
+        },
+        "config": {
+          "label": "Run manually",
+          "testData": {
+            "customer": "Alan Turing",
+            "orderId": "ord_1003",
+            "amount": 310.25
+          }
+        }
+      },
+      {
+        "id": "gate",
+        "type": "approval_gate",
+        "name": "Approve refund",
+        "position": {
+          "x": 360,
+          "y": 200
+        },
+        "config": {
+          "message": "Refund {{amount}} USD to {{customer}} for {{orderId}}?",
+          "approverRoles": [
+            "builder",
+            "admin"
+          ],
+          "approverUsers": [],
+          "allowSelfApproval": true,
+          "timeoutMinutes": 1440,
+          "timeoutOutcome": "reject",
+          "requireRejectReason": false,
+          "editableFields": [
+            {
+              "key": "amount",
+              "label": "Amount (USD)",
+              "type": "number",
+              "valueTemplate": "{{amount}}",
+              "required": true
+            }
+          ]
+        }
+      },
+      {
+        "id": "approved",
+        "type": "set_node",
+        "name": "Refund approved",
+        "position": {
+          "x": 640,
+          "y": 120
+        },
+        "config": {
+          "assignments": [
+            {
+              "key": "decision",
+              "valueTemplate": "approved",
+              "type": "string"
+            },
+            {
+              "key": "orderId",
+              "valueTemplate": "{{orderId}}",
+              "type": "string"
+            },
+            {
+              "key": "amount",
+              "valueTemplate": "{{amount}}",
+              "type": "number"
+            }
+          ]
+        }
+      },
+      {
+        "id": "rejected",
+        "type": "set_node",
+        "name": "Refund rejected",
+        "position": {
+          "x": 640,
+          "y": 280
+        },
+        "config": {
+          "assignments": [
+            {
+              "key": "decision",
+              "valueTemplate": "rejected",
+              "type": "string"
+            },
+            {
+              "key": "orderId",
+              "valueTemplate": "{{orderId}}",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      {
+        "id": "out",
+        "type": "output",
+        "name": "Decision",
+        "position": {
+          "x": 920,
+          "y": 200
+        },
+        "config": {
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e_start_out_gate",
+        "source": "start",
+        "target": "gate"
+      },
+      {
+        "id": "e_gate_approved_approved",
+        "source": "gate",
+        "target": "approved",
+        "sourceHandle": "approved"
+      },
+      {
+        "id": "e_gate_rejected_rejected",
+        "source": "gate",
+        "target": "rejected",
+        "sourceHandle": "rejected"
+      },
+      {
+        "id": "e_approved_out_out",
+        "source": "approved",
+        "target": "out"
+      },
+      {
+        "id": "e_rejected_out_out",
+        "source": "rejected",
+        "target": "out"
+      }
+    ]
+  },
+  "exportedAt": "2026-11-19T00:00:00.000Z"
+}

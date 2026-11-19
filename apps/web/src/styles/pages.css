@@ -630,6 +630,163 @@
   gap: 8px;
 }
 
+/* "Describe a workflow" dialog */
+.builder-modal {
+  width: min(560px, 100%);
+}
+.builder-modal-wide {
+  width: min(920px, 100%);
+}
+.builder-body form,
+.builder-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.builder-more summary {
+  cursor: pointer;
+  color: var(--fg-muted);
+  font-size: var(--fs-sm);
+}
+.builder-more-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+  align-items: end;
+}
+.builder-callout {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg-elev);
+  font-size: var(--fs-sm);
+}
+.builder-callout p {
+  margin: 0 0 8px;
+}
+.builder-callout-error {
+  border-color: var(--err);
+  background: var(--err-soft);
+}
+.builder-callout ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+.builder-templates {
+  list-style: none;
+  padding: 0 !important;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.builder-templates li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+.builder-muted {
+  color: var(--fg-muted);
+  font-size: var(--fs-xs);
+}
+.builder-preview-title {
+  margin: 0;
+  font-size: var(--fs-md);
+}
+.builder-preview-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 14px;
+  align-items: start;
+}
+.builder-preview-canvas {
+  width: 100%;
+  max-height: 360px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--canvas-bg);
+}
+.builder-preview-node rect {
+  fill: var(--node-bg);
+  stroke: var(--node-border);
+}
+.builder-preview-node text {
+  fill: var(--fg);
+  font-size: 12px;
+  font-family: var(--font-body);
+}
+.builder-preview-node .builder-preview-type {
+  fill: var(--fg-muted);
+  font-size: 10px;
+  font-family: var(--font-mono);
+}
+.builder-preview-edge line {
+  stroke: var(--edge);
+  stroke-width: 1.5;
+}
+.builder-preview-edge.attachment line {
+  stroke-dasharray: 4 4;
+}
+.builder-preview-edge text {
+  fill: var(--fg-muted);
+  font-size: 10px;
+}
+.builder-preview-lists {
+  font-size: var(--fs-sm);
+  max-height: 360px;
+  overflow: auto;
+}
+.builder-preview-lists h5 {
+  margin: 10px 0 4px;
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-muted);
+}
+.builder-preview-lists h5:first-child {
+  margin-top: 0;
+}
+.builder-preview-lists ul {
+  margin: 0;
+  padding-left: 18px;
+}
+.builder-preview-lists code {
+  word-break: break-all;
+}
+.builder-notes {
+  margin-top: 10px !important;
+  color: var(--fg-muted);
+}
+.canvas-empty-start {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 18px 22px;
+  max-width: calc(100% - 32px);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow-md);
+  text-align: center;
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+}
+.canvas-empty-start p {
+  margin: 0;
+}
+@media (max-width: 720px) {
+  .builder-preview-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* What a saved draft still lacks (editor notice) */
 .draft-warnings ul {
   margin: 4px 0 6px;
@@ -2365,6 +2522,14 @@ button.tag-chip:hover {
   color: var(--accent);
 }
 
+/* A thin rule between the categories and the "Runs without setup" filter. */
+.tpl-categories-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 4px 4px;
+  background: var(--line);
+}
+
 .tpl-loading,
 .tpl-empty {
   padding: 40px 20px;
@@ -2683,6 +2848,11 @@ button.tag-chip:hover {
 
 .kb-create-form small.kb-subtle {
   font-size: var(--fs-xs);
+}
+
+/* The embedder's setting fields reuse the inspector's field labels: one line, left-aligned. */
+.kb-create-form label.cfg-field-label {
+  flex-direction: row;
 }
 
 .kb-success {

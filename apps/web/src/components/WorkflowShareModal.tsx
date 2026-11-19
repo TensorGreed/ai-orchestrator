@@ -62,6 +62,9 @@ export function WorkflowShareModal({
     refresh();
   }, [refresh]);
 
+  // The server lists the people only to whoever may manage the workflow's shares (project:invite on its project, or an
+  // admin); the same people may share it with other projects.
+  const manages = userShares !== undefined;
   const eligibleProjects = projects.filter(
     (project) => project.id !== owningProjectId && !shares.some((share) => share.projectId === project.id)
   );
@@ -242,48 +245,53 @@ export function WorkflowShareModal({
             </div>
           )}
 
-          <div className="settings-card">
-            <h4>Projects</h4>
-            {eligibleProjects.length === 0 ? (
-              <p className="settings-muted">No other projects available to share with.</p>
-            ) : (
-              <>
-                <label htmlFor="share-target">Target project</label>
-                <select
-                  id="share-target"
-                  value={targetProjectId}
-                  onChange={(event) => setTargetProjectId(event.target.value)}
-                >
-                  {eligibleProjects.map((project) => (
-                    <option key={project.id} value={project.id}>
-                      {project.name}
-                    </option>
-                  ))}
-                </select>
-                <label htmlFor="share-access">Access level</label>
-                <select
-                  id="share-access"
-                  value={accessLevel}
-                  onChange={(event) => setAccessLevel(event.target.value as "read" | "execute")}
-                >
-                  <option value="read">Read</option>
-                  <option value="execute">Execute</option>
-                </select>
-                <div className="settings-actions">
-                  <button
-                    className="pg-btn primary"
-                    onClick={handleShare}
-                    disabled={busy || !targetProjectId}
+          {manages && (
+            <div className="settings-card">
+              <h4>Projects</h4>
+              {eligibleProjects.length === 0 ? (
+                <p className="settings-muted">No other projects available to share with.</p>
+              ) : (
+                <>
+                  <label htmlFor="share-target">Target project</label>
+                  <select
+                    id="share-target"
+                    value={targetProjectId}
+                    onChange={(event) => setTargetProjectId(event.target.value)}
                   >
-                    Share
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
+                    {eligibleProjects.map((project) => (
+                      <option key={project.id} value={project.id}>
+                        {project.name}
+                      </option>
+                    ))}
+                  </select>
+                  <label htmlFor="share-access">Access level</label>
+                  <select
+                    id="share-access"
+                    value={accessLevel}
+                    onChange={(event) => setAccessLevel(event.target.value as "read" | "execute")}
+                  >
+                    <option value="read">Read</option>
+                    <option value="execute">Execute</option>
+                  </select>
+                  <div className="settings-actions">
+                    <button
+                      className="pg-btn primary"
+                      onClick={handleShare}
+                      disabled={busy || !targetProjectId}
+                    >
+                      Share
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
 
           <div className="settings-card">
             <h4>Current shares</h4>
+            {loaded && !manages && (
+              <p className="settings-muted">Only someone who may add members to this workflow's project can share it.</p>
+            )}
             {!loaded ? (
               <div className="settings-loading">Loading…</div>
             ) : shares.length === 0 ? (
@@ -295,7 +303,7 @@ export function WorkflowShareModal({
                     <th>Project</th>
                     <th>Access</th>
                     <th>Shared by</th>
-                    <th></th>
+                    {manages && <th></th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -306,15 +314,17 @@ export function WorkflowShareModal({
                       </td>
                       <td>{share.accessLevel}</td>
                       <td>{share.sharedBy ?? "—"}</td>
-                      <td>
-                        <button
-                          className="pg-btn small ghost danger"
-                          onClick={() => handleUnshare(share.projectId)}
-                          disabled={busy}
-                        >
-                          Unshare
-                        </button>
-                      </td>
+                      {manages && (
+                        <td>
+                          <button
+                            className="pg-btn small ghost danger"
+                            onClick={() => handleUnshare(share.projectId)}
+                            disabled={busy}
+                          >
+                            Unshare
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>

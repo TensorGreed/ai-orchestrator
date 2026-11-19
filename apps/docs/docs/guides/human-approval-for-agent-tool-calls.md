@@ -80,7 +80,7 @@ Exit code 0 means every file matches the signed index and the signature verifies
 
 - No escalation, reminders or one-click approve links inside Slack, Teams or email messages yet.
 - Approvers are roles or individual users, not groups.
-- Approvals cannot pause inside a Loop node body.
+- An agent's tool approval cannot pause inside a Loop node body (a Human Approval node there asks once per pass).
 
 ## Next steps
 

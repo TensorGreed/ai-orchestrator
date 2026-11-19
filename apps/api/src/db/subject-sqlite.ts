@@ -342,7 +342,8 @@ export function sqliteSubjectStore(db: BetterSqlite3Database): SubjectStore {
         scimGroups: byUser(STAFF_SECTION_SQL.scimGroups),
         projectRoles: byUser(STAFF_SECTION_SQL.projectRoles),
         apiKeys: byUser(STAFF_SECTION_SQL.apiKeys),
-        runsTriggered: all(STAFF_SECTION_SQL.runsTriggered, [...emails, cap]).map(plainRow),
+        // v80 — also by the starter's user id: a run started under an email the account had before a rename.
+        runsTriggered: all(STAFF_SECTION_SQL.runsTriggered, [...emails, userId ?? "", cap]).map(plainRow),
         workflowsCreated: all(STAFF_SECTION_SQL.workflowsCreated, [...emails, cap]).map(plainRow),
         approvals: all(STAFF_SECTION_SQL.approvals, [...emails, ...emails, cap]).map(plainRow),
         evalRuns: all(STAFF_SECTION_SQL.evalRuns, [...emails, cap]).map(plainRow),

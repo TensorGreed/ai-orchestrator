@@ -659,6 +659,104 @@ function rejectFailsWorkflow(id: string): Workflow {
   return { ...base, nodes: base.nodes.filter((entry) => ["hook", "draft", "gate", "sent"].includes(entry.id)), edges: base.edges.filter((edge) => ["e1", "e2", "e3"].includes(edge.id)) };
 }
 
+/** hook → src (xs) → loop (routes branches) → ask (Human Approval, rejection to its Error output) → pay / refused. */
+function loopApprovalWorkflow(id: string): Workflow {
+  return {
+    id,
+    name: `Loop ${id}`,
+    schemaVersion: "1.0.0",
+    workflowVersion: 1,
+    projectId: "default",
+    nodes: [
+      node("hook", "webhook_input", { path: `hook-${id}`, method: "POST" }),
+      node("src", "set_node", { assignments: [{ key: "xs", valueTemplate: "[1,2,3]", type: "json" }] }),
+      node("loop", "loop_node", { inputKey: "xs", itemVariable: "x", routeBranches: true, collectResults: true }),
+      node("ask", "human_approval", { approvalMessage: "Pay {{x}}?", timeoutMinutes: 30, onError: "branch" }),
+      node("pay", "set_node", { assignments: [{ key: "paid", valueTemplate: "{{x}}", type: "auto" }] }),
+      node("refused", "set_node", { assignments: [{ key: "refused", valueTemplate: "{{x}}", type: "auto" }] })
+    ],
+    edges: [
+      { id: "e1", source: "hook", target: "src" },
+      { id: "e2", source: "src", target: "loop" },
+      { id: "e3", source: "loop", target: "ask" },
+      { id: "e4", source: "ask", target: "pay" },
+      { id: "e5", source: "ask", sourceHandle: "error", target: "refused" }
+    ]
+  } as Workflow;
+}
+
+describe("a Human Approval inside a Loop body", () => {
+  const decideEachPass = async (context: TestContext, queued: boolean) => {
+    const builder = await login(context, "builder");
+    const run = await startRun(context, loopApprovalWorkflow(queued ? "wf-loop-queued" : "wf-loop-inline"), builder.cookie);
+    const executionId = run.executionId!;
+    const asked: Array<{ message: string | null; pass: unknown }> = [];
+    for (const decision of ["approve", "reject", "approve"] as const) {
+      // Each pass asks with its own request, for the same node, with the pass it is on.
+      const pending = await waitFor(async () => (await inbox(context, builder.cookie)).find((item) => item.executionId === executionId && item.status === "pending"));
+      expect(pending.nodeId).toBe("ask");
+      asked.push({ message: pending.message, pass: pending.details?.loopPass });
+      const response = await call(context, "POST", `/api/approvals/${executionId}/${decision}`, builder.cookie, decision === "reject" ? { reason: "Not this one" } : {});
+      expect(response.statusCode, response.body).toBe(queued ? 202 : 200);
+      // The next pass's request is in once the resume paused again (or the run ended).
+      await waitFor(async () => {
+        const history = await context.store.getExecutionHistory(executionId);
+        const requests = await context.store.listApprovalRequestsForExecution(executionId);
+        return history && (history.status !== "waiting_approval" || requests.at(-1)?.status === "pending") && requests.length >= asked.length ? true : null;
+      });
+    }
+    expect(asked).toEqual([1, 2, 3].map((pass) => ({ message: `Pay ${pass}?`, pass: { loopNodeId: "loop", pass, of: 3 } })));
+    const history = await waitFor(async () => {
+      const entry = await context.store.getExecutionHistory(executionId);
+      return entry && entry.status !== "waiting_approval" && entry.status !== "running" ? entry : null;
+    });
+    expect(history.status).toBe("partial");
+    const results = history.nodeResults as Array<{ nodeId: string; status: string; output?: Record<string, unknown>; loopPass?: { pass: number } }>;
+    const ran = (nodeId: string, key: string) => results.filter((entry) => entry.nodeId === nodeId && entry.status === "success").map((entry) => entry.output?.[key]);
+    expect(ran("pay", "paid")).toEqual([1, 3]);
+    expect(ran("refused", "refused")).toEqual([2]);
+    expect(results.filter((entry) => entry.nodeId === "ask").map((entry) => [entry.status, entry.loopPass?.pass])).toEqual([
+      ["success", 1],
+      ["error", 2],
+      ["success", 3]
+    ]);
+    const requests = await context.store.listApprovalRequestsForExecution(executionId);
+    expect(requests.map((request) => request.status)).toEqual(["approved", "rejected", "approved"]);
+    expect(await context.store.getWorkflowExecutionState(executionId)).toBeNull();
+  };
+
+  it("recovery never applies an earlier pass's decision to the pass the run is paused at now", async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-approvals-loop-pass-"));
+    const first = await createTestContext({ tempDir });
+    const builder = await login(first, "builder");
+    const run = await startRun(first, loopApprovalWorkflow("wf-loop-stale"), builder.cookie);
+    const approved = await call(first, "POST", `/api/approvals/${run.executionId}/approve`, builder.cookie, {});
+    expect(approved.json<RunResult>().status).toBe("waiting_approval");
+    await closeContext(first);
+    await whileStopped(tempDir, async (sql) => {
+      // Pass 2's request is gone, so pass 1's approval (same node) is the latest decided one; the run looks interrupted.
+      await sql.run("DELETE FROM approval_requests WHERE execution_id = ? AND status = 'pending'", run.executionId);
+      await sql.run("UPDATE workflow_executions SET status = 'resuming', updated_at = ? WHERE id = ?", new Date(Date.now() - 86_400_000).toISOString(), run.executionId);
+    });
+    const second = await createTestContext({ tempDir });
+    await waitFor(async () => (await second.store.getWorkflowExecutionState(run.executionId!))?.status === "waiting_approval");
+    // Pass 2 was not decided with pass 1's approval: the run still waits at pass 2.
+    const paused = (await second.store.getWorkflowExecutionState(run.executionId!))!.state as { nodeResults: Array<{ nodeId: string; status: string; loopPass?: { pass: number } }> };
+    expect(paused.nodeResults.filter((entry) => entry.nodeId === "ask").map((entry) => [entry.status, entry.loopPass?.pass])).toEqual([
+      ["success", 1],
+      ["waiting_approval", 2]
+    ]);
+  });
+
+  it("asks once per pass and resumes at that pass: approve, reject, approve", async () => {
+    await decideEachPass(await createTestContext(), false);
+  });
+
+  it("resumes each pass on the execution queue when it is in use", async () => {
+    await decideEachPass(await createTestContext({ queue: true }), true);
+  });
+});
+
 describe("nothing skips an Approval Gate over the API", () => {
   it("refuses a start node on a sibling branch that merges below the gate", async () => {
     const context = await createTestContext();

@@ -1,0 +1,120 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "starter-schedule-fetch-filter-notify",
+    "name": "Schedule: fetch, filter and notify",
+    "description": "On a weekday schedule (off until you turn it on), fetches orders from the built-in sample API, keeps the pending ones and posts a summary to the built-in sample notifier. Run it now to try it.",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "schedule",
+        "type": "schedule_trigger",
+        "name": "Every weekday at 9:00",
+        "position": {
+          "x": 80,
+          "y": 200
+        },
+        "config": {
+          "cronExpression": "0 9 * * 1-5",
+          "timezone": "UTC",
+          "active": false
+        }
+      },
+      {
+        "id": "fetch",
+        "type": "http_request",
+        "name": "Fetch orders",
+        "position": {
+          "x": 360,
+          "y": 200
+        },
+        "config": {
+          "method": "GET",
+          "urlTemplate": "$L2M_API_BASE/api/sample-data/orders",
+          "headersTemplate": "{\n  \"Accept\": \"application/json\"\n}",
+          "responseType": "json",
+          "timeoutMs": 15000,
+          "failOnHttpError": true
+        }
+      },
+      {
+        "id": "pending",
+        "type": "filter_node",
+        "name": "Pending orders",
+        "position": {
+          "x": 640,
+          "y": 200
+        },
+        "config": {
+          "mode": "items",
+          "itemsFrom": "body.orders",
+          "conditions": [
+            {
+              "field": "status",
+              "operator": "eq",
+              "value": "pending"
+            }
+          ],
+          "combineWith": "AND"
+        }
+      },
+      {
+        "id": "notify",
+        "type": "http_request",
+        "name": "Notify (sample)",
+        "position": {
+          "x": 920,
+          "y": 200
+        },
+        "config": {
+          "method": "POST",
+          "urlTemplate": "$L2M_API_BASE/api/sample-data/notify",
+          "headersTemplate": "{\n  \"Content-Type\": \"application/json\"\n}",
+          "bodyTemplate": "{\"channel\": \"#orders\", \"text\": \"{{ items.length }} pending order(s): {{ items.map(o => o.id).join(', ') }}\"}",
+          "responseType": "json",
+          "timeoutMs": 15000,
+          "failOnHttpError": true
+        }
+      },
+      {
+        "id": "out",
+        "type": "output",
+        "name": "Result",
+        "position": {
+          "x": 1200,
+          "y": 200
+        },
+        "config": {
+          "responseTemplate": "Sent to {{body.received.channel}}: {{body.received.text}}",
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e_schedule_out_fetch",
+        "source": "schedule",
+        "target": "fetch"
+      },
+      {
+        "id": "e_fetch_out_pending",
+        "source": "fetch",
+        "target": "pending"
+      },
+      {
+        "id": "e_pending_pass_notify",
+        "source": "pending",
+        "target": "notify",
+        "sourceHandle": "pass"
+      },
+      {
+        "id": "e_notify_out_out",
+        "source": "notify",
+        "target": "out"
+      }
+    ]
+  },
+  "exportedAt": "2026-11-19T00:00:00.000Z"
+}

@@ -1,3 +1,6 @@
+import { describeHttpSecretAuth, readHttpSecretAuth } from "@ai-orchestrator/shared";
+import { McpToolArgsForm, McpUseFormButton, OpenApiOperationForm, usesMcpArgsForm, usesOpenApiOperation } from "./IntegrationForms";
+import { buildSchemaForm } from "../lib/mcp-schema-form";
 import { createContext, useCallback, useContext, useEffect, useId, useImperativeHandle, useMemo, useRef, useState, type Ref } from "react";
 import type {
   LLMProviderConfig,
@@ -42,7 +45,8 @@ import { LiveElapsed } from "./WorkflowCanvasNode";
 import { latestResolvedFields, NodeActivityList, ResolvedFieldsTable } from "./NodeActivityList";
 import { isInternalKey, NodeRunInput, NodeRunOutput, RunDataView, RunStatusLine, RunStepBar, type RunNodeResult } from "./NodeRunData";
 import { DataPane, PaneSeparator, type PaneMenuItem } from "./InspectorPane";
-import { AdvancedFields, HelpHint, countSet } from "./InspectorDisclosure";
+import { AdvancedFields, FormWithMore, HelpHint, countSet } from "./InspectorDisclosure";
+import { behavioursOffDefault, legacyBehaviours, legacySummary, restoreOldBehaviour, upgradeNotes, upgradeToNewBehaviour } from "../lib/legacy-behaviour";
 import { runAfterPointerRelease } from "../lib/pointer-release";
 import {
   applyTemplateSuggestion,
@@ -57,11 +61,14 @@ import type { EditorNode, EditorNodeData, NodeTelemetry } from "../lib/workflow"
 import { NodeTypeIcon } from "./node-icons";
 import { GuardNodeFields, GuardProtectionFields, GuardRevealFields } from "./GuardNodeConfigFields";
 import { OutputGuardrailFields } from "./OutputGuardrailFields";
+import { FormFieldsEditor, MappingEditor, SettingsFields, SwitchCasesEditor } from "./StructuredConfigFields";
+import { ragSettingFields } from "../lib/structured-settings";
 import { ApprovalGateNodeFields } from "./ApprovalGateNodeFields";
 import { McpAnnotationChips, McpOutputSchema } from "./McpToolMeta";
 import { SecretSaveWarnings } from "./SecretSaveWarnings";
 import { ModelAllowlistWarning, useModelAllowlistWarning } from "./ModelAllowlistWarning";
 import { directApiBaseUrl } from "../lib/direct-api-url";
+import { withMcpToolChoice } from "../lib/integration-catalog";
 import {
   TRIGGER_TRUST_OPTIONS,
   describeTriggerTrust,
@@ -194,7 +201,7 @@ export interface NodeInspectorProps {
 
 type NodeConfigModalProps = NodeInspectorProps;
 
-type InspectorTab = "parameters" | "input" | "output" | "settings" | "trace";
+type InspectorTab = "parameters" | "input" | "output" | "trace";
 type InspectorLayout = "split" | "tabs";
 
 /** Widths (px) and collapsed state of the Input and Output panes in the side-by-side layout, remembered per browser. */
@@ -702,17 +709,20 @@ function ToggleField({
 
 /**
  * HTTP Request: fail on a status outside 200–299 (so retries and the Error
- * output apply), and which statuses are retried. New nodes have it on; a node
- * saved before the option that asks for retries fails only on its retried statuses, and says so.
+ * output apply), and which statuses are retried. New nodes have it on, so the switch is offered only on a node saved
+ * without it (`showSwitch`); a node saved before the option that asks for retries fails only on its retried statuses,
+ * and says so. The retried statuses sit under More.
  */
 function HttpErrorStatusFields({
   config,
   errorConfig,
-  setConfig
+  setConfig,
+  showSwitch
 }: {
   config: Record<string, unknown>;
   errorConfig?: NodeErrorConfig;
   setConfig: React.Dispatch<React.SetStateAction<Record<string, unknown>>>;
+  showSwitch: boolean;
 }) {
   const mode = httpErrorStatusMode(config, errorConfig);
   const failOn = mode === "all";
@@ -720,36 +730,40 @@ function HttpErrorStatusFields({
   const invalid = parseStatusList(retryOn).invalid;
   return (
     <>
-      <ToggleField
-        label="Fail on HTTP error status"
-        checked={failOn}
-        onChange={(next) => setConfig((current) => ({ ...current, failOnHttpError: next }))}
-        help="On a status outside 200–299 the node fails, so Retries on Failure and the Error output apply. Off: the response is returned with ok: false and the run goes on."
-      />
-      {mode === "retry_list" && (
+      {showSwitch && (
+        <ToggleField
+          label="Fail on HTTP error status"
+          checked={failOn}
+          onChange={(next) => setConfig((current) => ({ ...current, failOnHttpError: next }))}
+          help="On a status outside 200–299 the node fails, so Retries on Failure and the Error output apply. Off: the response is returned with ok: false and the run goes on."
+        />
+      )}
+      {showSwitch && mode === "retry_list" && (
         <div className="cfg-tip" data-testid="http-retry-list-only-tip">
-          This node was saved before this option. Because it retries, it retries the statuses below and fails if they
-          persist; other error statuses are returned with <code>ok: false</code>. Turn the option on to fail on every error status.
+          This node was saved before this option. Because it retries, it retries the statuses under More (Retry on
+          status) and fails if they persist; other error statuses are returned with <code>ok: false</code>. Turn the option on to fail on every error status.
         </div>
       )}
       {mode !== "none" && (
-        <label className="cfg-field">
-          <FieldLabel
-            label="Retry on status"
-            help="Statuses that are retried (codes, classes such as 5xx, or ranges such as 500-504). Others fail at once. Empty: 429 and 5xx."
-          />
-          <input
-            value={retryOn}
-            placeholder={DEFAULT_HTTP_RETRY_ON_STATUS}
-            aria-invalid={invalid.length > 0}
-            onChange={(event) => setConfig((current) => ({ ...current, retryOnStatus: event.target.value }))}
-          />
-          {invalid.length > 0 && (
-            <span className="cfg-field-error" role="alert">
-              Not a status code: {invalid.join(", ")}
-            </span>
-          )}
-        </label>
+        <AdvancedFields setCount={countSet([[retryOn, ""]])} defaultOpen={invalid.length > 0}>
+          <label className="cfg-field">
+            <FieldLabel
+              label="Retry on status"
+              help="Statuses that are retried (codes, classes such as 5xx, or ranges such as 500-504). Others fail at once. Empty: 429 and 5xx."
+            />
+            <input
+              value={retryOn}
+              placeholder={DEFAULT_HTTP_RETRY_ON_STATUS}
+              aria-invalid={invalid.length > 0}
+              onChange={(event) => setConfig((current) => ({ ...current, retryOnStatus: event.target.value }))}
+            />
+            {invalid.length > 0 && (
+              <span className="cfg-field-error" role="alert">
+                Not a status code: {invalid.join(", ")}
+              </span>
+            )}
+          </label>
+        </AdvancedFields>
       )}
     </>
   );
@@ -1469,6 +1483,19 @@ export function NodeInspector({
   const nodeErrorConfig: NodeErrorConfig | undefined = errorConfigRepair.errorConfig;
   // Set when the user removes the invalid values; applied with the node's save.
   const [removeInvalidErrorConfig, setRemoveInvalidErrorConfig] = useState(false);
+  // Older behaviours the saved node keeps (new nodes have none): their switches are shown only then, with an upgrade.
+  const savedNodeConfig = useMemo(() => asRecord(node.data.config), [node.data.config]);
+  // Switches are shown for every older behaviour the saved node uses; the notice and upgrade only for the ones it keeps
+  // because it was stored before the option (not for one chosen on purpose, as an import may set it).
+  const switchesAtOpen = useMemo(
+    () => behavioursOffDefault(node.data.nodeType, savedNodeConfig, nodeErrorConfig),
+    [node.data.nodeType, nodeErrorConfig, savedNodeConfig]
+  );
+  const legacyAtOpen = useMemo(
+    () => legacyBehaviours(node.data.nodeType, savedNodeConfig, nodeErrorConfig),
+    [node.data.nodeType, nodeErrorConfig, savedNodeConfig]
+  );
+  const scheduleOffAtOpen = node.data.nodeType === "schedule_trigger" && savedNodeConfig.active === false;
   const [nodeColor, setNodeColor] = useState<EditorNodeData["color"]>(node.data.color);
   const [activeTab, setActiveTab] = useState<InspectorTab>("parameters");
   // A new node starts from its definition's sample config: those values count as defaults on the Advanced sections.
@@ -2089,7 +2116,7 @@ export function NodeInspector({
       return;
     }
     setActiveTab((current) =>
-      current === "settings" || current === "trace"
+      current === "trace"
         ? current
         : hasData
           ? current === "input" || current === "output"
@@ -2969,7 +2996,7 @@ export function NodeInspector({
 
   /**
    * The model a node calls. Provider, model, the base URL a provider needs, and the key show; an optional base URL,
-   * temperature, max tokens and the node's own rarely used fields (`advanced`) sit under Advanced.
+   * temperature, max tokens and the node's own rarely used fields (`advanced`) sit under More.
    */
   const renderProviderSection = (advanced?: { content: React.ReactNode; setCount: number }) => {
     const providerId = toStringValue(provider.providerId).trim();
@@ -4218,11 +4245,7 @@ export function NodeInspector({
                         name={`mcp-single-tool-${node.id}`}
                         checked={primarySelectedToolName === tool.name}
                         onChange={() =>
-                          setConfig((current) => ({
-                            ...current,
-                            toolName: tool.name,
-                            allowedTools: [tool.name]
-                          }))
+                          setConfig((current) => withMcpToolChoice(current, tool.name))
                         }
                       />
                       <span title={tool.name}>{tool.name}</span>
@@ -4236,13 +4259,7 @@ export function NodeInspector({
           <TextField
             label="Tool Name"
             value={toStringValue(config.toolName)}
-            onChange={(next) =>
-              setConfig((current) => ({
-                ...current,
-                toolName: next,
-                allowedTools: next ? [next] : undefined
-              }))
-            }
+            onChange={(next) => setConfig((current) => withMcpToolChoice(current, next))}
           />
         ) : discoveredTools.length > 0 ? (
           <>
@@ -4371,14 +4388,32 @@ export function NodeInspector({
           );
         })()}
 
-        <ExpressionField
-          label="Tool Args Template"
-          value={toStringValue(config.argsTemplate, "{}")}
-          onChange={(next) => setConfig((current) => ({ ...current, argsTemplate: next }))}
-          rows={3}
-          mode="template"
-          previewContext={expressionPreviewContext}
-        />
+        {toolSelectionMode === "single" && selectedTool && usesMcpArgsForm(config) ? (
+          <McpToolArgsForm toolName={selectedTool.name} inputSchema={selectedTool.inputSchema} config={config} setConfig={setConfig} />
+        ) : null}
+        {!(toolSelectionMode === "single" && selectedTool && usesMcpArgsForm(config) && buildSchemaForm(selectedTool.inputSchema).fields) && (
+          <>
+            <ExpressionField
+              label="Tool Args Template"
+              value={toStringValue(config.argsTemplate, "{}")}
+              onChange={(next) =>
+                setConfig((current) => {
+                  // Written by hand: the arguments form no longer owns the template.
+                  const { argValues: _form, ...rest } = current;
+                  return { ...rest, argsTemplate: next };
+                })
+              }
+              rows={3}
+              mode="template"
+              previewContext={expressionPreviewContext}
+            />
+            {toolSelectionMode === "single" && selectedTool && !usesMcpArgsForm(config) ? (
+              <div className="cfg-inline-actions">
+                <McpUseFormButton inputSchema={selectedTool.inputSchema} config={config} setConfig={setConfig} />
+              </div>
+            ) : null}
+          </>
+        )}
 
         {toolSelectionMode === "single" && selectedTool && (
           <details className="cfg-advanced cfg-fold" data-testid="mcp-tool-metadata">
@@ -6481,7 +6516,19 @@ export function NodeInspector({
 
   const renderParameters = () => {
     switch (node.data.nodeType) {
-      case "schedule_trigger":
+      case "schedule_trigger": {
+        const activeField = (
+          <SelectField
+            label="Active"
+            value={String(config.active !== false)}
+            onChange={(next) => setConfig((current) => ({ ...current, active: next === "true" }))}
+            options={[
+              { value: "true", label: "Enabled" },
+              { value: "false", label: "Disabled" }
+            ]}
+            help="The scheduler only runs this workflow when this node is an entry point and connected to downstream execution nodes."
+          />
+        );
         return (
           <>
             <TextField
@@ -6496,18 +6543,11 @@ export function NodeInspector({
               onChange={(next) => setConfig((current) => ({ ...current, timezone: next }))}
               placeholder="America/Toronto"
             />
-            <SelectField
-              label="Active"
-              value={String(config.active !== false)}
-              onChange={(next) => setConfig((current) => ({ ...current, active: next === "true" }))}
-              options={[
-                { value: "true", label: "Enabled" },
-                { value: "false", label: "Disabled" }
-              ]}
-              help="The scheduler only runs this workflow when this node is an entry point and connected to downstream execution nodes."
-            />
+            {/* A schedule that is off stays in sight; one that is on keeps the switch under More. */}
+            {scheduleOffAtOpen ? activeField : <AdvancedFields>{activeField}</AdvancedFields>}
           </>
         );
+      }
       case "webhook_input":
         return renderWebhookParameters();
       case "agent_orchestrator":
@@ -6590,31 +6630,45 @@ export function NodeInspector({
               onChange={(next) => setConfig((current) => ({ ...current, inputKey: next }))}
               placeholder="items"
             />
-            <TextField
-              label="Item Variable"
-              value={toStringValue(config.itemVariable, "item")}
-              onChange={(next) => setConfig((current) => ({ ...current, itemVariable: next }))}
-              placeholder="item"
-            />
-            <NumberField
-              label="Max Iterations"
-              value={toNumberValue(config.maxIterations, 100)}
-              min={1}
-              step={1}
-              onChange={(next) => setConfig((current) => ({ ...current, maxIterations: next }))}
-            />
-            <ToggleField
-              label="Collect results"
-              checked={config.collectResults === true}
-              onChange={(next) => setConfig((current) => ({ ...current, collectResults: next }))}
-              help="Adds collected to the Loop's output: one entry per pass, the body node's output (or each body node's output by id when the body has several). Read it after the loop as {{results.<loop id>.collected}}."
-            />
-            <ToggleField
-              label="Branches route in the loop"
-              checked={config.routeBranches === true}
-              onChange={(next) => setConfig((current) => ({ ...current, routeBranches: next }))}
-              help="On: an IF, Switch or Filter in the loop runs only the output it takes on each pass, and the nodes on its outputs run once per item too. A body node's own On Error setting applies. Off (Loops saved before this option): the nodes after every output run once, after the loop."
-            />
+            {/* New Loops collect and route; the switches are offered only on a Loop saved without them. */}
+            {switchesAtOpen.includes("loop_collect") && (
+              <ToggleField
+                label="Collect results"
+                checked={config.collectResults === true}
+                onChange={(next) => setConfig((current) => ({ ...current, collectResults: next }))}
+                help="Adds collected to the Loop's output: one entry per pass, the body node's output (or each body node's output by id when the body has several). Read it after the loop as {{results.<loop id>.collected}}."
+              />
+            )}
+            {switchesAtOpen.includes("loop_route") && (
+              <ToggleField
+                label="Branches route in the loop"
+                checked={config.routeBranches === true}
+                onChange={(next) => setConfig((current) => ({ ...current, routeBranches: next }))}
+                help="On: an IF, Switch or Filter in the loop runs only the output it takes on each pass, and the nodes on its outputs run once per item too. A body node's own On Error setting applies. Off (Loops saved before this option): the nodes after every output run once, after the loop."
+              />
+            )}
+            <AdvancedFields
+              setCount={countSet([
+                [config.itemVariable, "item", sampleConfig.itemVariable],
+                [config.maxIterations, 100, sampleConfig.maxIterations]
+              ])}
+              // A Loop stored without an item variable cannot run: show the field.
+              defaultOpen={toStringValue(config.itemVariable).trim() === ""}
+            >
+              <TextField
+                label="Item Variable"
+                value={toStringValue(config.itemVariable, "item")}
+                onChange={(next) => setConfig((current) => ({ ...current, itemVariable: next }))}
+                placeholder="item"
+              />
+              <NumberField
+                label="Max Iterations"
+                value={toNumberValue(config.maxIterations, 100)}
+                min={1}
+                step={1}
+                onChange={(next) => setConfig((current) => ({ ...current, maxIterations: next }))}
+              />
+            </AdvancedFields>
           </>
         );
       case "merge_node":
@@ -6742,35 +6796,28 @@ export function NodeInspector({
                 { value: "async", label: "Asynchronous (fire and forget)" }
               ]}
             />
-            <TextAreaField
-              label="Input Mapping (JSON object)"
-              value={JSON.stringify(asRecord(config.inputMapping), null, 2)}
-              onChange={(next) => {
-                try {
-                  const parsed = JSON.parse(next) as Record<string, unknown>;
-                  setConfig((current) => ({ ...current, inputMapping: parsed }));
-                } catch {
-                  // ignore typing errors
-                }
-              }}
-              rows={5}
+            <MappingEditor
+              key={`${node.id}:inputMapping`}
+              label="Input Mapping"
+              value={config.inputMapping}
+              fromLabel="From this workflow"
+              toLabel="Sub-workflow input"
+              fromPlaceholder="customer.name"
+              toPlaceholder="name"
+              help="Values this workflow sends: a path in this node's input, and the key the sub-workflow reads it as."
+              onChange={(next) => setConfig((current) => ({ ...current, inputMapping: next }))}
             />
-            <TextAreaField
-              label="Output Mapping (JSON object)"
-              value={JSON.stringify(asRecord(config.outputMapping), null, 2)}
-              onChange={(next) => {
-                try {
-                  const parsed = JSON.parse(next) as Record<string, unknown>;
-                  setConfig((current) => ({ ...current, outputMapping: parsed }));
-                } catch {
-                  // ignore typing errors
-                }
-              }}
-              rows={5}
+            <MappingEditor
+              key={`${node.id}:outputMapping`}
+              label="Output Mapping"
+              value={config.outputMapping}
+              fromLabel="Sub-workflow output"
+              toLabel="Key here"
+              fromPlaceholder="result"
+              toPlaceholder="greeting"
+              help="Leave empty to keep the sub-workflow's whole output. With rows, the node outputs only the mapped keys."
+              onChange={(next) => setConfig((current) => ({ ...current, outputMapping: next }))}
             />
-            <div className="cfg-tip">
-              Map sub-workflow output keys back to parent context. Example: <code>{`{ "child_result": "parent_key" }`}</code>.
-            </div>
           </>
         );
       case "wait_node": {
@@ -6830,7 +6877,7 @@ export function NodeInspector({
       }
       case "http_request": {
         const httpMethod = toStringValue(config.method, "GET").toUpperCase();
-        // A request with a body shows its headers and body up front; for GET and DELETE they stay under Advanced.
+        // A request with a body shows its headers and body up front; for GET and DELETE they stay under More.
         const sendsBody = httpMethod === "POST" || httpMethod === "PUT" || httpMethod === "PATCH";
         const defaultHeaders = "{\n  \"Accept\": \"application/json\"\n}";
         const headersField = (
@@ -6859,6 +6906,63 @@ export function NodeInspector({
             }
           />
         );
+        const secretAuth = readHttpSecretAuth(config.secretAuth);
+        const secretField = renderCredentialSecretField({
+          fieldKey: "http_request_secret",
+          label: secretAuth && typeof secretAuth !== "string" ? "Secret" : "Authorization Secret (Bearer)",
+          value: toStringValue(asRecord(config.secretRef).secretId),
+          noneLabel: "None",
+          preferredProvider: "custom",
+          ...(secretAuth && typeof secretAuth !== "string" ? { hint: `Sent ${describeHttpSecretAuth(secretAuth)}.` } : {}),
+          onSelect: (next) =>
+            setConfig((current) => ({
+              ...current,
+              secretRef: next ? { secretId: next } : undefined
+            }))
+        });
+        const timingFields = (
+          <div className="cfg-grid-2">
+            <SelectField
+              label="Response Type"
+              value={toStringValue(config.responseType, "json")}
+              onChange={(next) => setConfig((current) => ({ ...current, responseType: next }))}
+              options={[
+                { value: "json", label: "JSON" },
+                { value: "text", label: "Text" }
+              ]}
+            />
+            <NumberField
+              label="Timeout (ms)"
+              value={toNumberValue(config.timeoutMs, 15000)}
+              min={1}
+              step={100}
+              onChange={(next) => setConfig((current) => ({ ...current, timeoutMs: next }))}
+            />
+          </div>
+        );
+        // A node made from an API operation: the operation's form writes the request.
+        if (usesOpenApiOperation(config)) {
+          return (
+            <>
+              <OpenApiOperationForm config={config} setConfig={setConfig} />
+              {secretField}
+              <AdvancedFields
+                setCount={countSet([
+                  [config.responseType, "json", sampleConfig.responseType],
+                  [config.timeoutMs, 15000, sampleConfig.timeoutMs]
+                ])}
+              >
+                {timingFields}
+              </AdvancedFields>
+              <HttpErrorStatusFields
+                config={config}
+                errorConfig={nodeErrorConfig}
+                setConfig={setConfig}
+                showSwitch={switchesAtOpen.includes("http_fail")}
+              />
+            </>
+          );
+        }
         return (
           <>
             <SelectField
@@ -6888,18 +6992,7 @@ export function NodeInspector({
             />
             {sendsBody && bodyField}
             {sendsBody && headersField}
-            {renderCredentialSecretField({
-              fieldKey: "http_request_secret",
-              label: "Authorization Secret (Bearer)",
-              value: toStringValue(asRecord(config.secretRef).secretId),
-              noneLabel: "None",
-              preferredProvider: "custom",
-              onSelect: (next) =>
-                setConfig((current) => ({
-                  ...current,
-                  secretRef: next ? { secretId: next } : undefined
-                }))
-            })}
+            {secretField}
             <AdvancedFields
               setCount={countSet([
                 ...(sendsBody
@@ -6914,26 +7007,14 @@ export function NodeInspector({
             >
               {!sendsBody && headersField}
               {!sendsBody && bodyField}
-              <div className="cfg-grid-2">
-                <SelectField
-                  label="Response Type"
-                  value={toStringValue(config.responseType, "json")}
-                  onChange={(next) => setConfig((current) => ({ ...current, responseType: next }))}
-                  options={[
-                    { value: "json", label: "JSON" },
-                    { value: "text", label: "Text" }
-                  ]}
-                />
-                <NumberField
-                  label="Timeout (ms)"
-                  value={toNumberValue(config.timeoutMs, 15000)}
-                  min={1}
-                  step={100}
-                  onChange={(next) => setConfig((current) => ({ ...current, timeoutMs: next }))}
-                />
-              </div>
+              {timingFields}
             </AdvancedFields>
-            <HttpErrorStatusFields config={config} errorConfig={nodeErrorConfig} setConfig={setConfig} />
+            <HttpErrorStatusFields
+              config={config}
+              errorConfig={nodeErrorConfig}
+              setConfig={setConfig}
+              showSwitch={switchesAtOpen.includes("http_fail")}
+            />
           </>
         );
       }
@@ -6997,32 +7078,34 @@ export function NodeInspector({
                       rows={3}
                     />
                   </div>
-                  <SelectField
-                    label="Type"
-                    value={typeof assignment.type === "string" ? assignment.type : ""}
-                    onChange={(next) =>
-                      setConfig((current) => {
-                        const currentAssignments = Array.isArray(current.assignments)
-                          ? current.assignments.map((item) => asRecord(item))
-                          : [];
-                        currentAssignments[index] = {
-                          ...asRecord(currentAssignments[index]),
-                          type: next
-                        };
-                        return {
-                          ...current,
-                          assignments: currentAssignments
-                        };
-                      })
-                    }
-                    options={setValueTypeOptions(assignment.type)}
-                    help="Auto keeps the type of a value that is one {{ }} (a number, true or false, a list or an object); other values are text. String, Number, Boolean and JSON convert the value, and a value that cannot be converted fails the node. A field saved before types existed is Text (as before): its value becomes text, and text that is a JSON object or list is parsed."
-                  />
+                  {assignment.type !== "auto" ? (
+                    <SelectField
+                      label="Type"
+                      value={typeof assignment.type === "string" ? assignment.type : ""}
+                      onChange={(next) =>
+                        setConfig((current) => {
+                          const currentAssignments = Array.isArray(current.assignments)
+                            ? current.assignments.map((item) => asRecord(item))
+                            : [];
+                          currentAssignments[index] = {
+                            ...asRecord(currentAssignments[index]),
+                            type: next
+                          };
+                          return {
+                            ...current,
+                            assignments: currentAssignments
+                          };
+                        })
+                      }
+                      options={setValueTypeOptions(assignment.type)}
+                      help="Auto keeps the type of a value that is one {{ }} (a number, true or false, a list or an object); other values are text. String, Number, Boolean and JSON convert the value, and a value that cannot be converted fails the node. A field saved before types existed is Text (as before): its value becomes text, and text that is a JSON object or list is parsed."
+                    />
+                  ) : null}
                   <div className="cfg-inline-actions">
                     <button
                       type="button"
                       className="header-btn danger"
-                      onClick={() =>
+                      onClick={() => {
                         setConfig((current) => {
                           const currentAssignments = Array.isArray(current.assignments)
                             ? current.assignments.map((item) => asRecord(item))
@@ -7032,8 +7115,8 @@ export function NodeInspector({
                             ...current,
                             assignments: currentAssignments
                           };
-                        })
-                      }
+                        });
+                      }}
                     >
                       Remove
                     </button>
@@ -7065,6 +7148,31 @@ export function NodeInspector({
                 </button>
               </div>
             </div>
+            {assignments.some((assignment) => assignment.type === "auto") ? (
+              // Fields on Auto (the default) keep their type under More; a field with another type shows it in its row.
+              <AdvancedFields>
+                {assignments.map((assignment, index) =>
+                  assignment.type === "auto" ? (
+                    <SelectField
+                      key={`assignment-type-${index}`}
+                      label={`Type of ${toStringValue(assignment.key).trim() || `field ${index + 1}`}`}
+                      value="auto"
+                      onChange={(next) =>
+                        setConfig((current) => {
+                          const currentAssignments = Array.isArray(current.assignments)
+                            ? current.assignments.map((item) => asRecord(item))
+                            : [];
+                          currentAssignments[index] = { ...asRecord(currentAssignments[index]), type: next };
+                          return { ...current, assignments: currentAssignments };
+                        })
+                      }
+                      options={setValueTypeOptions("auto")}
+                      help="Auto keeps the type of a value that is one {{ }} (a number, true or false, a list or an object); other values are text. String, Number, Boolean and JSON convert the value, and a value that cannot be converted fails the node. A field with another type shows it in its row."
+                    />
+                  ) : null
+                )}
+              </AdvancedFields>
+            ) : null}
           </>
         );
       }
@@ -7305,20 +7413,13 @@ export function NodeInspector({
                   />
                 </div>
               ) : null}
-              <JsonDraftField<Record<string, unknown> | undefined>
-                key={`${node.id}:vectorStoreConfig`}
-                label="Vector Store Extra Config (JSON)"
-                value={asRecord(config.vectorStoreConfig)}
-                accept={(parsed) =>
-                  parsed && typeof parsed === "object" && !Array.isArray(parsed)
-                    ? Object.keys(parsed).length > 0
-                      ? (parsed as Record<string, unknown>)
-                      : {}
-                    : undefined
-                }
-                invalidMessage="Use a JSON object."
-                onCommit={(next) =>
-                  setConfig((current) => ({ ...current, vectorStoreConfig: next && Object.keys(next).length > 0 ? next : undefined }))
+              <SettingsFields
+                key={`${node.id}:vectorStoreConfig:${embedderId}:${vectorStoreId}`}
+                fields={ragSettingFields(embedderId, vectorStoreId)}
+                settings={asRecord(config.vectorStoreConfig)}
+                otherLabel="Other vector store settings"
+                onChange={(next) =>
+                  setConfig((current) => ({ ...current, vectorStoreConfig: Object.keys(next).length > 0 ? next : undefined }))
                 }
               />
               <JsonDraftField<unknown[]>
@@ -7564,22 +7665,10 @@ export function NodeInspector({
               mode="template"
               previewContext={expressionPreviewContext}
             />
-            <div className="cfg-tip">
-              Cases as a JSON array, for example{" "}
-              <code>[{`{\"value\":\"complete\",\"label\":\"complete\"}`}]</code>. Branch handles use each case <code>label</code>.
-            </div>
-            <TextAreaField
-              label="Cases array (JSON)"
-              value={JSON.stringify(Array.isArray(config.cases) ? config.cases : [], null, 2)}
-              onChange={(next) => {
-                try {
-                  const arr = JSON.parse(next);
-                  if (Array.isArray(arr)) {
-                     setConfig(current => ({ ...current, cases: arr }));
-                  }
-                } catch { /* typing error ignore */ }
-              }}
-              rows={5}
+            <SwitchCasesEditor
+              cases={config.cases}
+              defaultLabel={toStringValue(config.defaultLabel, "default")}
+              onChange={(next) => setConfig((current) => ({ ...current, cases: next }))}
             />
             <AdvancedFields setCount={countSet([[config.defaultLabel, "default", sampleConfig.defaultLabel]])}>
               <TextField
@@ -7890,20 +7979,49 @@ export function NodeInspector({
           { value: "regex", label: "Matches Regex" }
         ];
         const filterMode = filterModeOf(config);
+        const combineWith = toStringValue(config.combineWith, "AND").toUpperCase();
+        const combineField = (
+          <SelectField
+            label="Combine With"
+            value={combineWith}
+            onChange={(next) => setConfig((current) => ({ ...current, combineWith: next }))}
+            options={[
+              { value: "AND", label: "AND (all match)" },
+              { value: "OR", label: "OR (any match)" }
+            ]}
+          />
+        );
         return (
           <>
-            <SelectField
-              label="Mode"
-              value={filterMode}
-              onChange={(next) => setConfig((current) => ({ ...current, mode: next }))}
-              options={[
-                { value: "items", label: "Keep matching items of a list" },
-                { value: "gate", label: "Pass or stop (judge the whole input)" }
-              ]}
-              help="Keep matching items: each item of a list is checked; the Kept output runs with the matches and the Rejected output with the others. Pass or stop: the whole input is checked once and goes to the Pass or the Stopped output; a Filter saved before modes existed works this way."
-            />
+            {/* New Filters keep the matching items of a list; the mode is offered only on a Filter saved as pass or stop. */}
+            {switchesAtOpen.includes("filter_gate") && (
+              <SelectField
+                label="Mode"
+                value={filterMode}
+                onChange={(next) => setConfig((current) => ({ ...current, mode: next }))}
+                options={[
+                  { value: "items", label: "Keep matching items of a list" },
+                  { value: "gate", label: "Pass or stop (judge the whole input)" }
+                ]}
+                help="Keep matching items: each item of a list is checked; the Kept output runs with the matches and the Rejected output with the others. Pass or stop: the whole input is checked once and goes to the Pass or the Stopped output; a Filter saved before modes existed works this way."
+              />
+            )}
             {filterMode === "items" && (
-              <>
+              <div className="cfg-tip" data-testid="filter-items-tip">
+                A condition's field is read from each item (<code>price</code>, or <code>item.price</code>), and a value can
+                use <code>{"{{item.field}}"}</code>. The Kept output runs with the matching items (<code>items</code>), and the
+                Rejected output, when connected, with the others as its <code>items</code>.
+              </div>
+            )}
+            {/* With one condition AND and OR are the same, so the choice shows from the second condition (or once set). */}
+            {(conditions.length > 1 || combineWith !== "AND") && combineField}
+            <AdvancedFields
+              setCount={countSet([
+                [config.itemsFrom, "", sampleConfig.itemsFrom],
+                [config.passMode, "pass", sampleConfig.passMode]
+              ])}
+            >
+              {filterMode === "items" && (
                 <TextField
                   label="Items from"
                   value={toStringValue(config.itemsFrom)}
@@ -7911,31 +8029,17 @@ export function NodeInspector({
                   placeholder="first list in the input"
                   help="The list to filter, as a path such as body.items or products. Empty: the first list in the input (an input without a list is filtered as one item)."
                 />
-                <div className="cfg-tip" data-testid="filter-items-tip">
-                  A condition's field is read from each item (<code>price</code>, or <code>item.price</code>), and a value can
-                  use <code>{"{{item.field}}"}</code>. The Kept output runs with the matching items (<code>items</code>), and the
-                  Rejected output, when connected, with the others as its <code>items</code>.
-                </div>
-              </>
-            )}
-            <SelectField
-              label="Combine With"
-              value={toStringValue(config.combineWith, "AND").toUpperCase()}
-              onChange={(next) => setConfig((current) => ({ ...current, combineWith: next }))}
-              options={[
-                { value: "AND", label: "AND (all match)" },
-                { value: "OR", label: "OR (any match)" }
-              ]}
-            />
-            <SelectField
-              label="Pass Mode"
-              value={toStringValue(config.passMode, "pass")}
-              onChange={(next) => setConfig((current) => ({ ...current, passMode: next }))}
-              options={[
-                { value: "pass", label: "Pass items that match" },
-                { value: "reject", label: "Reject items that match" }
-              ]}
-            />
+              )}
+              <SelectField
+                label="Pass Mode"
+                value={toStringValue(config.passMode, "pass")}
+                onChange={(next) => setConfig((current) => ({ ...current, passMode: next }))}
+                options={[
+                  { value: "pass", label: "Pass items that match" },
+                  { value: "reject", label: "Reject items that match" }
+                ]}
+              />
+            </AdvancedFields>
             <div className="cfg-group">
               <h4>Conditions</h4>
               {conditions.length === 0 && (
@@ -9610,24 +9714,7 @@ export function NodeInspector({
               onChange={(next) => setConfig((current) => ({ ...current, successMessage: next }))}
               rows={2}
             />
-            <TextAreaField
-              label="Fields (JSON array)"
-              value={toStringValue(
-                typeof config.fields === "string"
-                  ? config.fields
-                  : JSON.stringify(config.fields ?? [], null, 2)
-              )}
-              onChange={(next) => {
-                let parsed: unknown = next;
-                try {
-                  parsed = JSON.parse(next);
-                } catch {
-                  /* keep string */
-                }
-                setConfig((current) => ({ ...current, fields: parsed }));
-              }}
-              rows={8}
-            />
+            <FormFieldsEditor value={config.fields} onChange={(next) => setConfig((current) => ({ ...current, fields: next }))} />
             <div className="cfg-tip">
               Form is served at <code>/api/forms/&lt;path&gt;</code>. POST submissions trigger the workflow with fields as input.
             </div>
@@ -10058,34 +10145,6 @@ export function NodeInspector({
 
     return (
       <>
-        <section className="insp-settings-group" aria-label="Node">
-          <h4>Node</h4>
-          <ToggleField
-            label="Disabled"
-            checked={nodeDisabled}
-            onChange={setNodeDisabled}
-            help="A disabled node is skipped: the run passes its parents' output straight through."
-          />
-          <div className="cfg-field">
-            <span className="cfg-field-label">Accent color</span>
-            <div className="wf-color-swatch-row">
-              {COLOR_OPTIONS.map((option) => (
-                <button
-                  key={option.key ?? "none"}
-                  type="button"
-                  className={`wf-color-swatch${nodeColor === option.key ? " selected" : ""}`}
-                  style={{ background: option.swatch === "transparent" ? undefined : option.swatch }}
-                  title={option.label}
-                  aria-label={`Set color ${option.label}`}
-                  aria-pressed={nodeColor === option.key}
-                  onClick={() => setNodeColor(option.key)}
-                >
-                  {option.swatch === "transparent" ? "∅" : ""}
-                </button>
-              ))}
-            </div>
-          </div>
-        </section>
         <section className="insp-settings-group" aria-label="Error handling">
           <h4>Error handling</h4>
           {errorConfigRepair.invalidFields.length > 0 && (
@@ -10227,20 +10286,52 @@ export function NodeInspector({
             help="Mark this node's output sensitive on every run (HR records, payroll, customer data). Content rules can then keep it from leaving, without scanning the content."
           />
         </section>
+        <section className="insp-settings-group" aria-label="Node">
+          <h4>Node</h4>
+          <ToggleField
+            label="Disabled"
+            checked={nodeDisabled}
+            onChange={setNodeDisabled}
+            help="A disabled node is skipped: the run passes its parents' output straight through."
+          />
+          <div className="cfg-field">
+            <span className="cfg-field-label">Accent color</span>
+            <div className="wf-color-swatch-row">
+              {COLOR_OPTIONS.map((option) => (
+                <button
+                  key={option.key ?? "none"}
+                  type="button"
+                  className={`wf-color-swatch${nodeColor === option.key ? " selected" : ""}`}
+                  style={{ background: option.swatch === "transparent" ? undefined : option.swatch }}
+                  title={option.label}
+                  aria-label={`Set color ${option.label}`}
+                  aria-pressed={nodeColor === option.key}
+                  onClick={() => setNodeColor(option.key)}
+                >
+                  {option.swatch === "transparent" ? "∅" : ""}
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
       </>
     );
   };
 
-  /** Settings that differ from their defaults, for the dot on the Settings tab. */
-  const settingsChanged =
-    nodeDisabled ||
-    Boolean(nodeColor) ||
-    inputMappingRows.length > 0 ||
-    toNumberValue(config.retryCount, 0) > 0 ||
-    (typeof config.retryDelayMs === "number" && config.retryDelayMs !== 1000) ||
-    (typeof config.retryMaxDelayMs === "number" && config.retryMaxDelayMs !== DEFAULT_RETRY_MAX_DELAY_MS) ||
-    toStringValue(config.onError, "stop") !== "stop" ||
-    config.sensitiveOutput === true;
+  /** The settings every node has that differ from their defaults, counted on the More section. */
+  const settingsSetCount = [
+    nodeDisabled,
+    Boolean(nodeColor),
+    // A node type whose new nodes come with mappings (Execute Workflow) counts only a change to them.
+    countSet([[config.inputMapping, {}, sampleConfig.inputMapping]]) > 0,
+    toNumberValue(config.retryCount, 0) > 0,
+    typeof config.retryDelayMs === "number" && config.retryDelayMs !== 1000,
+    typeof config.retryMaxDelayMs === "number" && config.retryMaxDelayMs !== DEFAULT_RETRY_MAX_DELAY_MS,
+    toStringValue(config.onError, "stop") !== "stop",
+    config.sensitiveOutput === true
+  ].filter(Boolean).length;
+  // Invalid error settings need to be seen: More opens for them.
+  const settingsNeedAttention = errorConfigRepair.invalidFields.length > 0;
 
   const getConfigForSave = () => {
     const nextConfig: Record<string, unknown> = { ...config };
@@ -10282,6 +10373,44 @@ export function NodeInspector({
     if (!pending || choice === "keep") return;
     if (choice === "save") handleSave();
     (pending.next ?? (choice === "discard" ? closeWithTransition : undefined))?.();
+  };
+
+  /** The one-line notice on a node saved with an older behaviour, with its upgrade (and, before saving, its undo). */
+  const renderLegacyNotice = () => {
+    if (legacyAtOpen.length === 0) return null;
+    // Still on an older behaviour it had when opened: the notice and the upgrade.
+    const remaining = behavioursOffDefault(node.data.nodeType, config, nodeErrorConfig).filter((behaviour) => legacyAtOpen.includes(behaviour));
+    if (remaining.length > 0) {
+      return (
+        <div className="cfg-tip cfg-legacy" data-testid="legacy-behaviour">
+          {legacySummary(remaining)}{" "}
+          {readOnlyReason ? null : (
+            <button
+              type="button"
+              className="auth-link-btn"
+              title={upgradeNotes(remaining)}
+              onClick={() => setConfig((current) => upgradeToNewBehaviour(node.data.nodeType, current, remaining))}
+            >
+              Upgrade to the new behaviour
+            </button>
+          )}
+        </div>
+      );
+    }
+    return (
+      <div className="cfg-tip cfg-legacy" data-testid="legacy-behaviour">
+        Upgraded to the new behaviour when you save. {upgradeNotes(legacyAtOpen)}{" "}
+        {readOnlyReason ? null : (
+          <button
+            type="button"
+            className="auth-link-btn"
+            onClick={() => setConfig((current) => restoreOldBehaviour(node.data.nodeType, current, savedNodeConfig))}
+          >
+            Keep the earlier behaviour
+          </button>
+        )}
+      </div>
+    );
   };
 
   const renderSlots = () => {
@@ -10565,20 +10694,19 @@ export function NodeInspector({
   };
 
   const split = layout === "split";
+  // The settings every node has sit in the Parameters tab's More section, so there is no Settings tab.
   const tabs: Array<{ key: InspectorTab; label: string }> = split
     ? [
         { key: "parameters", label: "Parameters" },
-        { key: "settings", label: "Settings" },
         { key: "trace", label: "Trace" }
       ]
     : [
         { key: "input", label: "Input" },
         { key: "parameters", label: "Parameters" },
         { key: "output", label: "Output" },
-        { key: "settings", label: "Settings" },
         { key: "trace", label: "Trace" }
       ];
-  const middleTab: InspectorTab = activeTab === "trace" || activeTab === "settings" ? activeTab : "parameters";
+  const middleTab: InspectorTab = activeTab === "trace" ? activeTab : "parameters";
   const selectedTab: InspectorTab = split ? middleTab : activeTab;
   const changeLayout = (next: InspectorLayout) => {
     setLayout(next);
@@ -10607,27 +10735,31 @@ export function NodeInspector({
           onClick={() => setActiveTab(tab.key)}
         >
           {tab.label}
-          {tab.key === "settings" && settingsChanged ? (
-            <span className="insp-tab-dot" title="Some settings differ from the defaults">
-              <span className="sr-only"> (changed)</span>
-            </span>
-          ) : null}
         </button>
       ))}
     </div>
   );
 
   const renderMiddle = (tab: InspectorTab) => {
-    if (tab === "settings") {
-      return <section className="insp-section insp-settings">{renderSettings()}</section>;
-    }
     if (tab === "trace") {
       return <section className="insp-section">{renderTraceTab()}</section>;
     }
     return (
       <>
         {renderSlots()}
-        <section className="insp-section insp-params">{renderParameters()}</section>
+        <section className="insp-section insp-params">
+          <FormWithMore
+            form={
+              <>
+                {renderLegacyNotice()}
+                {renderParameters()}
+              </>
+            }
+            settings={<div className="insp-settings">{renderSettings()}</div>}
+            settingsCount={settingsSetCount}
+            settingsOpen={settingsNeedAttention}
+          />
+        </section>
       </>
     );
   };
@@ -10831,7 +10963,7 @@ export function NodeInspector({
           <div className="insp-body">
             {activeTab === "input" && inputPane(false)}
             {activeTab === "output" && outputPane(false)}
-            {(activeTab === "parameters" || activeTab === "settings" || activeTab === "trace") && renderMiddle(activeTab)}
+            {(activeTab === "parameters" || activeTab === "trace") && renderMiddle(activeTab)}
           </div>
         </>
       )}

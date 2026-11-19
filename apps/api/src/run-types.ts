@@ -204,13 +204,32 @@ export interface RunWorkflowExecutionInput {
   budgetSubject?: { userEmail: string | null; userId: string | null };
   /**
    * The person whose session memory, session tool cache and session artifacts the run uses (run-editor-options.ts
-   * personalSessionOwner): set by the run routes for operators and for people who run a workflow only through a share
-   * with them, kept across a pause in the paused state. Absent: the workflow's sessions, as before.
+   * personalSessionOwner): set by the run routes for people who may not edit the workflow (operators; builders who may
+   * only run it) and for anyone who runs it only through a share with them, kept across a pause in the paused state. Absent: the workflow's sessions, as before.
    */
   sessionOwner?: string;
+  /**
+   * v80 — the user id of the person who started the run, recorded on its history (`triggered_by_user_id`) and kept
+   * across a pause. Left out, it is `policyActor`'s id when `triggeredBy` is that user's email (every run route a
+   * signed-in person or a person's API key calls); null says that no person started it (a resumed run whose paused
+   * state recorded none). See `runStarterId`.
+   */
+  triggeredByUserId?: string | null;
   /**
    * The queue attempt that runs this (its job context): a stopped attempt then closes only its own sub-workflow spend
    * record, not one a retry of the same execution has started since.
    */
   spendAttempt?: object;
+}
+
+/**
+ * v80 — the user id a run records as its starter: `triggeredByUserId` when the route says so, else the signed-in
+ * user's (`policyActor`) when the run is recorded as started by their email. A trigger's name (a webhook, a schedule,
+ * "form-submitter") with no person says nobody.
+ */
+export function runStarterId(run: Pick<RunWorkflowExecutionInput, "triggeredByUserId" | "triggeredBy" | "policyActor">): string | null {
+  if (run.triggeredByUserId !== undefined) return run.triggeredByUserId || null;
+  const actor = run.policyActor;
+  if (!actor || typeof run.triggeredBy !== "string" || !actor.id) return null;
+  return run.triggeredBy.trim().toLowerCase() === actor.email.trim().toLowerCase() ? actor.id : null;
 }

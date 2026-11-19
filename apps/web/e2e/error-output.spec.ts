@@ -83,13 +83,12 @@ test.describe("error output", () => {
       await expect(page.locator(".react-flow__edge")).toHaveCount(4);
       await page.screenshot({ path: path.join(SHOT_DIR, "01-before-no-error-output.png") });
 
-      // Settings → On Error Behavior → Execute Fallback Branch.
+      // More → On Error Behavior → Execute Fallback Branch. A node that fails on an error status shows no switch for it.
       await call.dblclick();
       const inspector = page.getByRole("dialog", { name: /^Inspect / });
-      await expect(inspector.getByRole("button", { name: /Fail on HTTP error status/ })).toHaveAttribute("aria-pressed", "true");
-      await inspector.getByRole("button", { name: /Fail on HTTP error status/ }).scrollIntoViewIfNeeded();
-      await page.screenshot({ path: path.join(SHOT_DIR, "01b-http-fail-on-error-status.png") });
-      await inspector.getByRole("tab", { name: "Settings" }).click();
+      await expect(inspector.getByRole("button", { name: /Fail on HTTP error status/ })).toHaveCount(0);
+      await inspector.getByTestId("advanced-fields").getByText("More", { exact: true }).click();
+      await page.screenshot({ path: path.join(SHOT_DIR, "01b-http-more.png") });
       await inspector.getByRole("combobox", { name: "On Error Behavior" }).selectOption("branch");
       await expect(inspector.getByTestId("error-output-tip")).toBeVisible();
       await page.screenshot({ path: path.join(SHOT_DIR, "02-settings-fallback-branch.png") });

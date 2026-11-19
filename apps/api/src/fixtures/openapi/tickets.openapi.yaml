@@ -1,0 +1,50 @@
+# Fixture OpenAPI 3 spec for the integration catalog tests (API and E2E). The server URL is replaced by the tests.
+openapi: 3.0.3
+info:
+  title: Ticket Desk
+  version: 1.0.0
+  description: A small ticket API.
+servers:
+  - url: http://127.0.0.1:1/api
+components:
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+  schemas:
+    NewTicket:
+      type: object
+      required: [title]
+      properties:
+        title: { type: string, description: Short summary }
+        priority: { type: integer, minimum: 1, maximum: 5 }
+        urgent: { type: boolean }
+        tags: { type: array, items: { type: string } }
+security:
+  - apiKey: []
+paths:
+  /tickets:
+    get:
+      operationId: listTickets
+      summary: List tickets
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [open, closed] } }
+        - { name: limit, in: query, schema: { type: integer } }
+      responses: { "200": { description: OK } }
+    post:
+      operationId: createTicket
+      summary: Create a ticket
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NewTicket" }
+      responses: { "201": { description: Created } }
+  /tickets/{ticketId}:
+    parameters:
+      - { name: ticketId, in: path, required: true, schema: { type: string } }
+    get:
+      operationId: getTicket
+      summary: Get a ticket
+      responses: { "200": { description: OK } }

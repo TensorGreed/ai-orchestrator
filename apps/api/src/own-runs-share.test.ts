@@ -212,11 +212,13 @@ describe("a person who has a workflow only through a share with them sees only t
     expect(replayed.statusCode, replayed.body).toBe(404);
     const canceled = await call(context, "POST", `/api/executions/${ownerRun}/cancel`, olivia.cookie, {});
     expect(canceled.statusCode, canceled.body).toBe(404);
-    // The editor's "run with this run's data" (pinned outputs, the run's input) reads the source run.
-    const copied = await call(context, "POST", "/api/workflows/wf-team/execute", gus.cookie, { sourceExecutionId: ownerRun });
-    expect(copied.statusCode, copied.body).toBe(404);
-    const own = await call(context, "POST", "/api/workflows/wf-team/execute", gus.cookie, { sourceExecutionId: gusRun });
-    expect(own.statusCode, own.body).toBe(200);
+    // The editor's "run with this run's data" (pinned outputs, the run's input) is for those who may edit the
+    // workflow; a share never gives that, so a share-only builder is refused before any run is read, whoever's it is.
+    for (const source of [ownerRun, gusRun]) {
+      const copied = await call(context, "POST", "/api/workflows/wf-team/execute", gus.cookie, { sourceExecutionId: source });
+      expect(copied.statusCode, copied.body).toBe(403);
+      expect(copied.json<{ refusedOptions: string[] }>().refusedOptions).toEqual(["sourceExecutionId"]);
+    }
     // A finished run cannot be canceled, but the answer is about the run, not about access.
     expect((await call(context, "POST", `/api/executions/${gusRun}/cancel`, gus.cookie, {})).statusCode).not.toBe(404);
   });
@@ -427,7 +429,7 @@ describe("own runs only meets approvals around a Loop that routes branches", () 
       ...echoWorkflow(id),
       nodes: [
         { id: "start", type: "manual_trigger", name: "Start", position: { x: 0, y: 0 }, config: {} },
-        { id: "src", type: "set_node", name: "Src", position: { x: 100, y: 0 }, config: { assignments: [{ key: "xs", valueTemplate: "[1]", type: "json" }] } },
+        { id: "src", type: "set_node", name: "Src", position: { x: 100, y: 0 }, config: { assignments: [{ key: "xs", valueTemplate: "[1,2]", type: "json" }] } },
         { id: "loop", type: "loop_node", name: "Loop", position: { x: 200, y: 0 }, config: { inputKey: "xs", itemVariable: "x", routeBranches: true } },
         { id: "ask", type: "human_approval", name: "Ask", position: { x: 300, y: 0 }, config: { approvalMessage: "ok?", timeoutMinutes: 30 } }
       ],
@@ -481,20 +483,31 @@ describe("own runs only meets approvals around a Loop that routes branches", () 
     expect((await listRuns(context, olivia, "?workflowId=wf-gated-loop")).ids).toEqual([executionId]);
   });
 
-  it("a Human Approval in a Loop body fails the run and leaves nothing in anyone's inbox", async () => {
+  it("a Human Approval in a Loop body asks once per pass, listed and decided only by the run's owner (and the project)", async () => {
     const { context, owner, member, olivia, gus } = await seed({ queue: false });
     await context.store.upsertWorkflow(approvalInLoopWorkflow("wf-loop-ask"));
     await share(context, owner, "wf-loop-ask", [olivia, gus]);
     const response = await call(context, "POST", "/api/workflows/wf-loop-ask/execute", olivia.cookie, { input: {} });
     const body = response.json<{ status: string; executionId: string; error?: string }>();
-    expect(body.status, response.body).toBe("error");
-    expect(response.body).toContain("Approvals cannot pause inside a Loop body");
-    for (const person of [olivia, gus, member, owner]) {
-      expect(await inboxIds(context, person, "?status=all&workflowId=wf-loop-ask")).toEqual([]);
+    expect(body.status, response.body).toBe("waiting_approval");
+    const executionId = body.executionId;
+    for (let pass = 1; pass <= 2; pass += 1) {
+      expect(await inboxIds(context, olivia)).toEqual([executionId]);
+      expect(await inboxIds(context, member)).toEqual([executionId]);
+      expect(await inboxIds(context, gus, "?status=all&workflowId=wf-loop-ask")).toEqual([]);
+      for (const decision of ["approve", "reject"]) {
+        expect((await call(context, "POST", `/api/approvals/${executionId}/${decision}`, gus.cookie, {})).statusCode).toBe(404);
+      }
+      const approved = await call(context, "POST", `/api/approvals/${executionId}/approve`, olivia.cookie, {});
+      expect(approved.statusCode, approved.body).toBe(200);
+      expect(approved.json<{ status: string }>().status).toBe(pass === 1 ? "waiting_approval" : "success");
     }
-    // The failed run is Olivia's: Gus cannot open it.
-    expect((await call(context, "GET", `/api/executions/${body.executionId}`, gus.cookie)).statusCode).toBe(404);
-    expect((await call(context, "GET", `/api/executions/${body.executionId}`, olivia.cookie)).statusCode).toBe(200);
+    // The run is Olivia's: Gus cannot open it.
+    expect((await call(context, "GET", `/api/executions/${executionId}`, gus.cookie)).statusCode).toBe(404);
+    const detail = await call(context, "GET", `/api/executions/${executionId}`, olivia.cookie);
+    expect(detail.statusCode).toBe(200);
+    const asked = detail.json<{ nodeResults: Array<{ nodeId: string; status: string }> }>().nodeResults.filter((entry) => entry.nodeId === "ask");
+    expect(asked.map((entry) => entry.status)).toEqual(["success", "success"]);
   });
 });
 

@@ -114,19 +114,22 @@ test.describe("lists of items", () => {
       await expect(canvasNode(page, "Pricey only")).toContainText("Rejected");
       await expect(page.locator(".react-flow__edge")).toHaveCount(6);
 
-      // The Filter's form: items mode with Items from.
+      // The Filter's form: an items-mode Filter has no Mode to choose, and Items from sits under More.
       await canvasNode(page, "Pricey only").dblclick();
       let inspector = page.getByRole("dialog", { name: /^Inspect / });
-      await expect(inspector.getByLabel(/^Mode/)).toHaveValue("items");
+      await expect(inspector.getByLabel(/^Mode/)).toHaveCount(0);
+      await inspector.getByTestId("advanced-fields").getByText("More", { exact: true }).click();
       await expect(inspector.getByLabel(/^Items from/)).toBeVisible();
       await page.screenshot({ path: path.join(SHOT_DIR, "after-01-filter-items-mode.png") });
       await page.keyboard.press("Escape");
       await expect(inspector).toHaveCount(0);
 
-      // The Set form: each field has a Type.
+      // The Set form: each field has a Type; while it is Auto it sits under More, not in the field's row.
       await canvasNode(page, "Shape row").dblclick();
       inspector = page.getByRole("dialog", { name: /^Inspect / });
-      await expect(inspector.getByLabel(/^Type/).nth(1)).toHaveValue("auto");
+      await expect(inspector.getByLabel(/^Type of expensive/)).toBeHidden();
+      await inspector.getByTestId("advanced-fields").getByText("More", { exact: true }).click();
+      await expect(inspector.getByLabel(/^Type of expensive/)).toHaveValue("auto");
       await page.screenshot({ path: path.join(SHOT_DIR, "after-02-set-field-types.png") });
       await page.keyboard.press("Escape");
       await expect(inspector).toHaveCount(0);

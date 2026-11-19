@@ -47,6 +47,9 @@ const NO_API_KEY_ROUTES = new Set<string>([
   "GET /api/mcp/oauth/callback",
   "GET /api/mcp/oauth/client-metadata.json",
   "GET /api/openapi.json",
+  // The starter templates' sample data: no sign-in, no stored data (sample-data-routes.ts).
+  "GET /api/sample-data/orders",
+  "GET /api/sample-data/status/:code",
   "GET /api/workflows/import-shared",
   "POST /api/auth/break-glass",
   "POST /api/auth/invite/accept",
@@ -59,6 +62,8 @@ const NO_API_KEY_ROUTES = new Set<string>([
   "POST /api/chat/:workflowId",
   "POST /api/forms/:path",
   "POST /api/mcp-server/:path/invoke",
+  "POST /api/sample-data/notify",
+  "POST /api/sample-data/status/:code",
   "POST /api/webhooks/discord/:workflowId",
   "POST /api/webhooks/github/:workflowId",
   "POST /api/webhooks/slack/:workflowId",

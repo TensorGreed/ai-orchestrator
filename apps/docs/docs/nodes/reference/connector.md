@@ -612,6 +612,9 @@ Performs a configurable HTTP request with templated URL, headers, and body.
 | `timeoutMs` | `number` | no | — |
 | `failOnHttpError` | `boolean` | no | — |
 | `retryOnStatus` | `string` | no | — |
+| `secretAuth` | `object` | no | — |
+| `openapiOperation` | `object` | no | — |
+| `operationValues` | `object` | no | — |
 
 **Example config**
 

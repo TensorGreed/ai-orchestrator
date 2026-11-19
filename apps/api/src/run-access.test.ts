@@ -246,12 +246,15 @@ describe("run-access helper", () => {
 
   describe("a person who reads a workflow only through a share with them sees only their own runs", () => {
     // pa is the viewer's project; b (in pb) is shared with the viewer only; c (in pb) is shared with the viewer and to pa.
+    const owner = (triggeredByUserId: string | null, sessionOwner: string | null = null): RunOwner => ({ triggeredByUserId, sessionOwner });
     const owners: Record<string, RunOwner> = {
-      "run-mine": { triggeredBy: "Viewer@Example.com", sessionOwner: null },
-      "run-session": { triggeredBy: "someone@example.com", sessionOwner: "u-viewer" },
-      "run-by-id": { triggeredBy: "u-viewer", sessionOwner: null },
-      "run-other": { triggeredBy: "someone@example.com", sessionOwner: null },
-      "run-anon": { triggeredBy: null, sessionOwner: null }
+      "run-mine": owner("u-viewer"),
+      "run-session": owner(null, "u-viewer"),
+      "run-other": owner("u-someone"),
+      // Their email once, but another account's run (v80).
+      "run-old-account": owner("u-viewer-before"),
+      // Nobody could be told (migration 80 left it empty): nobody's own run.
+      "run-anon": owner(null)
     };
     const withC = { ...workflows, c: { ...workflows.b!, id: "c" } } as Record<string, Workflow>;
     const shareOnly = createRunAccess({
@@ -268,10 +271,10 @@ describe("run-access helper", () => {
     const viewer = { ...user("viewer"), email: "viewer@example.com" };
 
     it("answers 404 for someone else's run and passes their own (started by them, by id, or in their sessions)", async () => {
-      for (const id of ["run-mine", "run-session", "run-by-id"]) {
+      for (const id of ["run-mine", "run-session"]) {
         expect(await shareOnly.run(viewer, { id, workflowId: "b" }, "workflow:read")).toMatchObject({ ok: true });
       }
-      for (const id of ["run-other", "run-anon", "no-such-run"]) {
+      for (const id of ["run-other", "run-old-account", "run-anon", "no-such-run"]) {
         expect(await shareOnly.run(viewer, { id, workflowId: "b" }, "workflow:read")).toMatchObject({ ok: false, status: 404, error: "Execution not found" });
       }
       // A record that belongs to a run is judged by that run.
@@ -312,13 +315,15 @@ describe("run-access helper", () => {
       expect(await elicitationVisibleTo(shareOnly, user("admin"), question("run-other", "gone"))).toBe(false);
     });
 
-    it("judges ownership by email (any case), user id or session owner", () => {
-      const person = { id: "u-1", email: "pat@example.com" };
-      expect(runOwnedBy({ triggeredBy: "PAT@example.com", sessionOwner: null }, person)).toBe(true);
-      expect(runOwnedBy({ triggeredBy: "u-1", sessionOwner: null }, person)).toBe(true);
-      expect(runOwnedBy({ triggeredBy: "scheduler", sessionOwner: "u-1" }, person)).toBe(true);
-      expect(runOwnedBy({ triggeredBy: "scheduler", sessionOwner: "u-2" }, person)).toBe(false);
-      expect(runOwnedBy({ triggeredBy: null, sessionOwner: null }, person)).toBe(false);
+    it("judges ownership by the starter's user id or the session owner, never by an email", () => {
+      const run = (triggeredByUserId: string | null, sessionOwner: string | null = null): RunOwner => ({ triggeredByUserId, sessionOwner });
+      expect(runOwnedBy(run("u-1"), "u-1")).toBe(true);
+      expect(runOwnedBy(run(null, "u-1"), "u-1")).toBe(true);
+      // Sessions still count with another starter.
+      expect(runOwnedBy(run("u-lee", "u-1"), "u-1")).toBe(true);
+      expect(runOwnedBy(run("u-old"), "u-1")).toBe(false);
+      expect(runOwnedBy(run(null, "u-2"), "u-1")).toBe(false);
+      expect(runOwnedBy(run(null), "u-1")).toBe(false);
     });
   });
 

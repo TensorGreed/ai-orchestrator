@@ -109,7 +109,7 @@ describe("node inspector: calm by default", () => {
     expect(dialog).toHaveClass("insp-split");
     expect(screen.getByRole("region", { name: "Input" })).toHaveTextContent("From Start");
     expect(screen.getByRole("region", { name: "Output" })).toHaveTextContent("200");
-    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Parameters", "Settings", "Trace"]);
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Parameters", "Trace"]);
     expect(screen.getByRole("tab", { name: "Parameters" })).toHaveAttribute("aria-selected", "true");
     // The run status is in the header only.
     const status = screen.getAllByTestId("run-data-status");
@@ -148,32 +148,46 @@ describe("node inspector: calm by default", () => {
     expect(screen.getByRole("button", { name: "Show input" })).toHaveFocus();
   });
 
-  it("puts node settings on a Settings tab, out of the parameter form", async () => {
+  it("puts node settings in the closed More section, after the node's own rarely used fields", async () => {
     const user = userEvent.setup();
     render(<NodeInspector {...props()} />);
-    expect(screen.queryByLabelText("On Error Behavior")).toBeNull();
-    expect(screen.queryByText("Accent color")).toBeNull();
-    expect(screen.queryByTestId("sensitive-output-field")).toBeNull();
-    expect(screen.queryByText("Add Mapping")).toBeNull();
-    await user.click(screen.getByRole("tab", { name: "Settings" }));
+    const more = screen.getByTestId("advanced-fields");
+    expect(more).not.toHaveAttribute("open");
+    expect(screen.getByLabelText("On Error Behavior")).not.toBeVisible();
+    expect(screen.getByText("Accent color")).not.toBeVisible();
+    expect(screen.getByTestId("sensitive-output-field")).not.toBeVisible();
+    expect(screen.queryByRole("tab", { name: "Settings" })).toBeNull();
+    await user.click(within(more).getByText("More"));
     expect(screen.getByLabelText("On Error Behavior")).toBeVisible();
     expect(screen.getByText("Accent color")).toBeVisible();
     expect(screen.getByTestId("sensitive-output-field")).toBeVisible();
     expect(screen.getByRole("button", { name: "Add Mapping" })).toBeVisible();
+    // The node's own fields come first, then the settings every node has.
+    const timeout = screen.getByLabelText("Timeout (ms)");
+    const onError = screen.getByLabelText("On Error Behavior");
+    expect(timeout.compareDocumentPosition(onError) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // The keys of the last run are listed on demand.
     expect(screen.getByText(/Keys available from the last run/).closest("details")).not.toHaveAttribute("open");
-    expect(screen.queryByLabelText("URL Template")).toBeNull();
+    expect(screen.getByLabelText("URL Template")).toBeVisible();
   });
 
-  it("marks the Settings tab when a setting differs from the default", () => {
+  it("counts a changed node setting on More", () => {
     const { unmount } = render(<NodeInspector {...props()} />);
-    expect(screen.getByRole("tab", { name: "Settings" })).toHaveTextContent(/^Settings$/);
+    expect(within(screen.getByTestId("advanced-fields")).queryByText(/set$/)).toBeNull();
     unmount();
-    render(<NodeInspector {...props({ node: node("fetch", "http_request", { urlTemplate: "https://x.test", retryCount: 2 }, "Fetch orders") })} />);
-    expect(screen.getByRole("tab", { name: /Settings/ }).querySelector(".insp-tab-dot")).not.toBeNull();
+    render(<NodeInspector {...props({ node: node("fetch", "http_request", { urlTemplate: "https://x.test", retryCount: 2, timeoutMs: 30000 }, "Fetch orders") })} />);
+    expect(within(screen.getByTestId("advanced-fields")).getByText("2 set")).toBeInTheDocument();
   });
 
-  it("shows only the HTTP node's essential fields; the rest sit under a closed Advanced section that counts changes", async () => {
+  it("opens More when the node's error settings need fixing", () => {
+    const fetch = node("fetch", "http_request", { urlTemplate: "https://x.test" }, "Fetch orders");
+    fetch.data.nodeExtras = { errorConfig: { maxRetries: -1 } };
+    render(<NodeInspector {...props({ node: fetch })} />);
+    expect(screen.getByTestId("advanced-fields")).toHaveAttribute("open");
+    expect(screen.getByTestId("node-error-config-invalid")).toBeVisible();
+  });
+
+  it("shows only the HTTP node's essential fields; the rest sit under a closed More section that counts changes", async () => {
     const user = userEvent.setup();
     const { unmount } = render(<NodeInspector {...props()} />);
     expect(screen.getByLabelText("Method")).toBeVisible();
@@ -183,7 +197,7 @@ describe("node inspector: calm by default", () => {
     expect(screen.getByLabelText("Headers Template (JSON)")).not.toBeVisible();
     expect(screen.getByLabelText("Timeout (ms)")).not.toBeVisible();
     expect(within(advanced).queryByText(/set$/)).toBeNull();
-    await user.click(within(advanced).getByText("Advanced"));
+    await user.click(within(advanced).getByText("More"));
     expect(screen.getByLabelText("Timeout (ms)")).toBeVisible();
     unmount();
     render(<NodeInspector {...props({ node: node("fetch", "http_request", { urlTemplate: "https://x.test", timeoutMs: 30000 }, "Fetch orders") })} />);
@@ -304,17 +318,17 @@ describe("node inspector: calm by default", () => {
     expect(Number(output.getAttribute("aria-valuenow"))).toBe(outputBefore + 16);
   });
 
-  it("uses tabs on a narrow window: Input, Parameters, Output, Settings, Trace, opening on the output", () => {
+  it("uses tabs on a narrow window: Input, Parameters, Output, Trace, opening on the output", () => {
     setWindowWidth(900);
     render(<NodeInspector {...props()} />);
     expect(screen.getByRole("dialog", { name: "Inspect Fetch orders" })).not.toHaveClass("insp-split");
-    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Input", "Parameters", "Output", "Settings", "Trace"]);
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Input", "Parameters", "Output", "Trace"]);
     expect(screen.getByRole("tab", { name: "Output" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("region", { name: "Output" })).toHaveTextContent("200");
     expect(screen.queryByRole("button", { name: "Hide output" })).toBeNull();
   });
 
-  it("a new node of any type shows no count on its Advanced sections", () => {
+  it("a new node of any type shows no count on its More section", () => {
     setWindowWidth(1600);
     vi.mocked(api.fetchProviderModels).mockResolvedValue({ models: [] } as unknown as Awaited<ReturnType<typeof api.fetchProviderModels>>);
     const counted: string[] = [];
@@ -490,7 +504,7 @@ describe("node inspector: focus after a mouse close", () => {
     document.body.appendChild(nodeElement);
     try {
       const { unmount } = render(<NodeInspector {...props()} />);
-      await user.click(screen.getByRole("tab", { name: "Settings" }));
+      await user.click(screen.getByRole("tab", { name: "Trace" }));
       unmount();
       expect(nodeElement).not.toHaveFocus();
     } finally {

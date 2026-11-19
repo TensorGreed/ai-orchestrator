@@ -72,4 +72,13 @@ describe("RunTape", () => {
     const running = buildTapeLanes(runResult({ liveStartedAtMs: 42 } as never), meta);
     expect(running.lanes[0]!.liveStartedAtMs).toBe(42);
   });
+
+  it("shows the pass a Human Approval in a Loop body asked on", () => {
+    const result = runResult({ status: "waiting_approval", durationMs: 5, loopPass: { loopNodeId: "loop", pass: 2, of: 3 } });
+    render(<RunTape executionResult={result} nodeMetaById={meta} />);
+    const row = within(screen.getByRole("table", { name: "Run tape" })).getAllByRole("row")[0]!;
+    expect(row).toHaveTextContent("pass 2 of 3");
+    expect(row.getAttribute("title")).toContain("pass 2 of 3");
+    expect(buildTapeLanes(runResult({ status: "success" }), meta).lanes[0]!.pass).toBeUndefined();
+  });
 });

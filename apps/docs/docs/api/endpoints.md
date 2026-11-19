@@ -63,7 +63,7 @@ the envelope `GET /api/executions` uses:
 - `DELETE /api/workflows/:id` (while the workflow's release gate is on and enforced, only an admin: others get `403`, audited as `release.workflow_delete.refused`)
 - `POST /api/workflows/:id/duplicate`
 - `POST /api/workflows/import` (`{ json }` or `{ workflow }`, plus `mode` and `dryRun`). `mode: "new"` (the default) makes a new workflow: the file's id is kept when no workflow has it, otherwise the import gets a new id, " (imported)" after its name and its own trigger paths, and the stored workflow is not touched. `mode: "replace"` overwrites the stored workflow with the file's id (`404` when there is none you can read, `403` when you cannot write it); what it replaced is kept in the history first (`before replace by import`). `dryRun: true` stores nothing and returns `{ dryRun, mode, workflow, existing, canReplace, diff }`: the workflow the import would save, the stored workflow with that id when you can read it (`{ id, name, updatedAt, projectId }`, else null), whether you may replace it, and what a replace changes (`nodes.added`, `nodes.removed`, `nodes.changed` with the fields, `nodes.moved`, `edges.added`, `edges.removed`, `edges.changed`, `fields`, `identical`). Audited as `workflow.import` with `mode` and `sourceId`
-- `GET /api/workflows/:id/access` (any role that can read it) → `{ workflowId, role, canRead, canEdit, canRun, canShare, canShareWithProjects, ownRunsOnly }`: what the editor lets you do with it (`ownRunsOnly`: a share with you is all you have, so you see only your own runs of it)
+- `GET /api/workflows/:id/access` (any role that can read it) → `{ workflowId, role, canRead, canEdit, canRun, canShare, ownRunsOnly }` (`canShare`: may share it with people or other projects): what the editor lets you do with it (`ownRunsOnly`: a share with you is all you have, so you see only your own runs of it)
 - `GET /api/workflows/shared-with-me` → `{ workflows: [{ id, name, projectId, updatedAt, accessLevel, effectiveAccess }] }`: the workflows shared with you, in any project
 - `GET /api/workflows/:id/user-shares`, `POST /api/workflows/:id/user-shares` (`{ email }` or `{ userId }`, `accessLevel: "read" | "execute"`), `DELETE /api/workflows/:id/user-shares/:userId`: share a workflow with a person; see [Sharing a workflow with people](../security/auth-rbac.md#sharing-a-workflow-with-people). `GET /api/workflows/:id/shares` also lists them as `userShares` to whoever manages its shares
 - `GET /api/workflows/:id/share-link` (admin, builder) returns `{ shareUrl, data }`; `POST /api/workflows/import-shared` with `{ data }` (or POST the `shareUrl` as it is) imports the copy. Opening a share link (a GET) imports nothing: it answers 405 with a hint
@@ -86,6 +86,15 @@ the envelope `GET /api/executions` uses:
 - `GET /api/definitions`
 - `POST /api/connectors/test`
 - `POST /api/mcp/discover-tools` (optional `projectId`; each tool carries `classification` and an `access` mark for the caller's role)
+- `GET /api/catalog?projectId=` (builders with read access to the project): the palette's **Your integrations**
+  entries, `{ entries: [{ key, kind, label, description, sourceName, sourceId, itemId, nodeType, nodeConfig }], sources }`.
+  MCP entries come from each registered server's last probe, with tool policy applied; API entries from the
+  project's stored OpenAPI specs. See [Your integrations](../nodes/integrations.md).
+- `GET|POST /api/catalog/openapi-specs` (`projectId`; POST `{ url | specText, name?, baseUrl? }`, builders with write
+  access to the project; a URL goes through the outbound checks, at most 2 MB, 15 s), `GET|PATCH|DELETE
+  /api/catalog/openapi-specs/:id` (PATCH `{ name?, baseUrl? }`), `POST /api/catalog/openapi-specs/:id/refresh`
+  (optional `{ specText }` for an uploaded spec; answers `added` and `removed` operation ids). A spec in a project you
+  cannot read answers 404.
 
 ## MCP server registry
 
@@ -338,10 +347,10 @@ See [Release gate and publish](../product/release-gate.md). Every route answers 
 - `GET /api/workflows/:id/release-gate` (viewer; `{ gate }`)
 - `PUT /api/workflows/:id/release-gate` (`workflow:write`; only admins enforce a gate, lift enforcement or loosen an enforced one; `400` for a golden set of another workflow; audited as `release.gate.updated`)
 - `POST /api/workflows/:id/publish` (`workflow:publish`; `{ version, workflowHash?, replayRunId?, override?: { reason } (admins), requestApproval?: { reason } }`; `200 { release }`, `202 { verdict: "needs_approval", approvalRequestId }`, `409 { verdict: "blocked", reasons, replayRunId?, canRequestApproval }`; `409` for a hash mismatch; audited as `release.published`, `release.overridden` or `release.blocked`)
-- `GET /api/workflows/:id/releases` (viewer; `{ releases, publishedVersion }`)
+- `GET /api/workflows/:id/releases` (viewer; `{ releases, publishedVersion }`; for someone who sees only their own runs each release's `gateReasons` and `replayRunId` are empty and `detailsHidden: true`)
 - `POST /api/workflows/:id/rollback` (`workflow:publish`, and, while the gate is on and enforced, only an admin (others get `403`, audited as `release.rollback.refused`); `{ version, reason }`; only to a version published before; `409` when it is already live; audited as `release.rolled_back`)
 - `POST /api/workflows/:id/unpublish` (`workflow:publish`, and an admin while the gate is on and enforced (`403` otherwise, audited as `release.unpublish.refused`); `{ reason?, expectedVersion? }`; production runs the draft until a version is published again; never blocked by the release gate, and with a gate on `notice` says production runs the ungated draft; answers `{ release, productionRuns: "draft", gateEnabled, gateEnforced, notice }` where `release` is the `unpublished` history entry; `409` when nothing is published or, given `expectedVersion`, when another version is live (nothing changes); audited as `release.unpublished`)
-- `GET /api/workflows/:id/release-state`, `GET /api/workflows/:id/publish-preview?version=` (viewer)
+- `GET /api/workflows/:id/release-state`, `GET /api/workflows/:id/publish-preview?version=` (viewer; for someone who sees only their own runs the preview has the verdict only: `reasons: []`, `stats: null`, `replayRunId: null`, `detailsHidden: true`)
 - `GET /api/workflows/:id/release-gate/cases` (viewer; an enforced gate's cases: admitted or pending admission, required; `enforced: false` and no cases otherwise; `enabled` says whether the gate is switched on, since admission and required cases apply only then)
 - `POST /api/workflows/:id/release-gate/cases/admit`, `POST /api/workflows/:id/release-gate/cases/reject` (admins; `{ fixtureIds, reason? }`; `409` on an unenforced gate, or when rejecting an admitted case; audited as `release.gate.cases_admitted` / `release.gate.cases_rejected`)
 - `PUT /api/workflows/:id/release-gate/cases/:fixtureId/required` (admins; `{ required }`; golden-run cases only; marking a pending case admits it; audited as `release.gate.case_required`)

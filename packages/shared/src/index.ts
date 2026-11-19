@@ -56,3 +56,7 @@ export * from "./run-prompts";
 export * from "./model-defaults";
 export * from "./item-nodes";
 export * from "./workflow-diff";
+export * from "./integration-catalog";
+export * from "./legacy-behaviour";
+export * from "./node-ids";
+export * from "./workflow-builder";

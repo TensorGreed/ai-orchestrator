@@ -82,6 +82,7 @@ test("turns on a workflow's untrusted-write switch from the editor", async ({ pa
     await page.getByLabel("Workflow", { exact: true }).selectOption(workflowId);
     await sidebarItem(page, "Editor").click();
     await page.getByRole("button", { name: "More actions" }).click();
+    await page.getByRole("menuitem", { name: /^More settings/ }).click();
     await page.getByRole("menuitemcheckbox", { name: /Ask before write tools/ }).click();
     const dialog = page.getByRole("dialog", { name: "Ask before write tools" });
     const box = dialog.getByLabel("Approve writes only after untrusted content");

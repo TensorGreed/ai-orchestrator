@@ -10,6 +10,7 @@ import * as approvals from "./postgres/approvals.js";
 import * as audit from "./postgres/audit.js";
 import * as auth from "./postgres/auth.js";
 import * as capture from "./postgres/capture.js";
+import * as openapiSpecs from "./postgres/openapi-specs.js";
 import * as cluster from "./postgres/cluster.js";
 import * as data_destinations from "./postgres/data-destinations.js";
 import * as data_labels from "./postgres/data-labels.js";
@@ -719,6 +720,9 @@ export class PostgresStore implements Store {
   }
   async getExecutionSessionOwner(...args: Parameters<Store["getExecutionSessionOwner"]>): ReturnType<Store["getExecutionSessionOwner"]> {
     return release.getExecutionSessionOwner(this.ctx, ...args);
+  }
+  async getExecutionStarter(...args: Parameters<Store["getExecutionStarter"]>): ReturnType<Store["getExecutionStarter"]> {
+    return release.getExecutionStarter(this.ctx, ...args);
   }
   async getExecutionRelease(...args: Parameters<Store["getExecutionRelease"]>): ReturnType<Store["getExecutionRelease"]> {
     return release.getExecutionRelease(this.ctx, ...args);
@@ -1693,6 +1697,21 @@ export class PostgresStore implements Store {
   }
   async removeWorkflowUserShare(...args: Parameters<Store["removeWorkflowUserShare"]>): ReturnType<Store["removeWorkflowUserShare"]> {
     return workflows.removeWorkflowUserShare(this.ctx, ...args);
+  }
+  async listOpenApiSpecs(...args: Parameters<Store["listOpenApiSpecs"]>): ReturnType<Store["listOpenApiSpecs"]> {
+    return openapiSpecs.listOpenApiSpecs(this.ctx, ...args);
+  }
+  async getOpenApiSpec(...args: Parameters<Store["getOpenApiSpec"]>): ReturnType<Store["getOpenApiSpec"]> {
+    return openapiSpecs.getOpenApiSpec(this.ctx, ...args);
+  }
+  async getOpenApiSpecText(...args: Parameters<Store["getOpenApiSpecText"]>): ReturnType<Store["getOpenApiSpecText"]> {
+    return openapiSpecs.getOpenApiSpecText(this.ctx, ...args);
+  }
+  async saveOpenApiSpec(...args: Parameters<Store["saveOpenApiSpec"]>): ReturnType<Store["saveOpenApiSpec"]> {
+    return openapiSpecs.saveOpenApiSpec(this.ctx, ...args);
+  }
+  async deleteOpenApiSpec(...args: Parameters<Store["deleteOpenApiSpec"]>): ReturnType<Store["deleteOpenApiSpec"]> {
+    return openapiSpecs.deleteOpenApiSpec(this.ctx, ...args);
   }
   async listSecretShares(...args: Parameters<Store["listSecretShares"]>): ReturnType<Store["listSecretShares"]> {
     return secrets.listSecretShares(this.ctx, ...args);

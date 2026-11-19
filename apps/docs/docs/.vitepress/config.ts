@@ -215,6 +215,7 @@ export default defineConfig({
         text: "Getting Started",
         items: [
           { text: "Build your first MCP agent in 5 min", link: "/getting-started/build-your-first-mcp-agent" },
+          { text: "Starter templates", link: "/getting-started/starter-templates" },
           { text: "Quickstart", link: "/getting-started/quickstart" },
           { text: "Environment", link: "/getting-started/environment" },
           { text: "VS Code Extension", link: "/getting-started/vscode-extension" }
@@ -283,6 +284,7 @@ export default defineConfig({
         text: "Nodes",
         items: [
           { text: "Core Nodes", link: "/nodes/core-nodes" },
+          { text: "Your Integrations (MCP tools, APIs)", link: "/nodes/integrations" },
           { text: "Azure Nodes", link: "/nodes/azure-nodes" },
           { text: "Chart (Vega-Lite)", link: "/nodes/chart" },
           { text: "Web Browse (Playwright)", link: "/nodes/web-browse" },
@@ -309,6 +311,7 @@ export default defineConfig({
         text: "Security",
         items: [
           { text: "Auth + RBAC", link: "/security/auth-rbac" },
+          { text: "Who can see and run what", link: "/security/access-model" },
           { text: "Service Accounts + API Keys", link: "/security/service-accounts" },
           { text: "SCIM Provisioning", link: "/security/scim" },
           { text: "Secrets", link: "/security/secrets" },

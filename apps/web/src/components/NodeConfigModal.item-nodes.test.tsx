@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Node } from "reactflow";
@@ -52,14 +52,38 @@ describe("item node forms", () => {
     expect(legacy!.value).toBe("");
     expect(legacy!.selectedOptions[0]!.textContent).toBe("Text (as before)");
     await user.click(screen.getByRole("button", { name: "Add Assignment" }));
-    const types = screen.getAllByLabelText(/^Type/) as HTMLSelectElement[];
-    expect(types[1]!.value).toBe("auto");
-    await user.selectOptions(types[0]!, "boolean");
+    // The new field is on Auto: its type is under More, not in its row.
+    expect(screen.getAllByLabelText(/^Type(?! of)/)).toHaveLength(1);
+    expect((screen.getByLabelText(/^Type of field 2/) as HTMLSelectElement).value).toBe("auto");
+    await user.selectOptions(screen.getAllByLabelText(/^Type(?! of)/)[0]!, "boolean");
     const config = await save(user, onSave);
     expect(config.assignments).toEqual([
       { key: "old", valueTemplate: "{{ a > 1 }}", type: "boolean" },
       { key: "", valueTemplate: "", type: "auto" }
     ]);
+  });
+
+  it("Set: a field on Auto has its type under More; a typed field shows it in its row; choosing a type moves it there", async () => {
+    const user = userEvent.setup();
+    render(
+      <NodeInspector
+        {...props("set_node", {
+          assignments: [
+            { key: "a", valueTemplate: "{{count}}", type: "auto" },
+            { key: "b", valueTemplate: "1", type: "number" }
+          ]
+        })}
+      />
+    );
+    const inline = screen.getAllByLabelText(/^Type(?! of)/) as HTMLSelectElement[];
+    expect(inline.map((select) => select.value)).toEqual(["number"]);
+    const more = screen.getByTestId("advanced-fields");
+    const autoType = within(more).getByLabelText(/^Type of a/) as HTMLSelectElement;
+    expect(autoType.value).toBe("auto");
+    expect([...autoType.options].map((option) => option.value)).toEqual(["auto", "string", "number", "boolean", "json"]);
+    await user.selectOptions(autoType, "json");
+    expect((screen.getAllByLabelText(/^Type(?! of)/) as HTMLSelectElement[]).map((select) => select.value)).toEqual(["json", "number"]);
+    expect(screen.queryByLabelText(/^Type of/)).toBeNull();
   });
 
   it("Set: the legacy option is not offered on a typed field", () => {

@@ -4,6 +4,7 @@
  */
 import type { PoolClient } from "pg";
 import { executionSensitiveValue, type CancelExecutionResult, type QueueClaimFence, type Store } from "../store.js";
+import { ownHistoryRunSql } from "../own-runs-sql.js";
 import { parseJsonSafe, toNum, toStr } from "./helpers.js";
 import type { PgContext } from "./context.js";
 import { deleteUnlockedInBatches } from "./prune.js";
@@ -56,6 +57,7 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
   durationMs?: number;
   triggerType?: string;
   triggeredBy?: string;
+  triggeredByUserId?: string | null;
   inputJson?: unknown;
   outputJson?: unknown;
   nodeResultsJson?: unknown;
@@ -70,7 +72,7 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
       : "";
   // Phase 13.1 — a run the dead-executor reconcile already failed keeps that record (see Store.saveExecutionHistory).
   const interrupted = options?.unlessInterruptedWith !== undefined;
-  const notInterrupted = `NOT (execution_history.status = 'error' AND (execution_history.error IS NULL OR execution_history.error = $17))`;
+  const notInterrupted = `NOT (execution_history.status = 'error' AND (execution_history.error IS NULL OR execution_history.error = $18))`;
   const guard = interrupted
     ? `
        WHERE ${condition ? `(${condition}) AND ` : ""}${notInterrupted}`
@@ -80,8 +82,8 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
       : "";
   const fence = options?.fence;
   const sql =
-    `INSERT INTO execution_history (id, workflow_id, workflow_name, status, started_at, completed_at, duration_ms, trigger_type, triggered_by, input_json, output_json, node_results_json, custom_data_json, error, sensitive)
-       SELECT $1::text, $2::text, $3::text, $4::text, $5::timestamptz, $6::timestamptz, $7::integer, $8::text, $9::text, $10::text, $11::text, $12::text, $13::text, $14::text, $15::integer
+    `INSERT INTO execution_history (id, workflow_id, workflow_name, status, started_at, completed_at, duration_ms, trigger_type, triggered_by, input_json, output_json, node_results_json, custom_data_json, error, sensitive, triggered_by_user_id)
+       SELECT $1::text, $2::text, $3::text, $4::text, $5::timestamptz, $6::timestamptz, $7::integer, $8::text, $9::text, $10::text, $11::text, $12::text, $13::text, $14::text, $15::integer, $17::text
        -- 13.3: a run a data-subject deletion erased (its tombstone) is never written back by its executor.
        WHERE NOT EXISTS (SELECT 1 FROM erasure_tombstones WHERE kind = 'run' AND row_id = $1)
        ON CONFLICT (id) DO UPDATE SET
@@ -93,6 +95,8 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
          duration_ms = EXCLUDED.duration_ms,
          trigger_type = EXCLUDED.trigger_type,
          triggered_by = EXCLUDED.triggered_by,
+         -- v80: set once; a resume an approver decided keeps who started the run.
+         triggered_by_user_id = COALESCE(execution_history.triggered_by_user_id, EXCLUDED.triggered_by_user_id),
          input_json = EXCLUDED.input_json,
          output_json = EXCLUDED.output_json,
          node_results_json = EXCLUDED.node_results_json,
@@ -118,6 +122,7 @@ export async function saveExecutionHistory(ctx: PgContext, input: {
       input.error ?? null,
       executionSensitiveValue(input.sensitive),
       input.sensitive === undefined ? 1 : 0,
+      input.triggeredByUserId || null,
       ...(interrupted ? [options.unlessInterruptedWith] : [])
   ];
   if (!fence) {
@@ -202,10 +207,12 @@ export async function listExecutionHistory(ctx: PgContext, input: {
     }
     if (own) {
       const ids = own.workflowIds.map(() => `$${paramIdx++}`).join(", ");
-      const email = `$${paramIdx++}`;
-      const userId = `$${paramIdx++}`;
-      anyOf.push(`(workflow_id IN (${ids}) AND (LOWER(triggered_by) = ${email} OR triggered_by = ${userId} OR session_owner = ${userId}))`);
-      whereParams.push(...own.workflowIds, own.email.toLowerCase(), own.userId);
+      whereParams.push(...own.workflowIds);
+      const bind = (value: string) => {
+        whereParams.push(value);
+        return `$${paramIdx++}`;
+      };
+      anyOf.push(`(workflow_id IN (${ids}) AND ${ownHistoryRunSql(own, bind)})`);
     }
     whereParts.push(anyOf.length > 0 ? `(${anyOf.join(" OR ")})` : "1 = 0");
   }

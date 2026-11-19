@@ -477,7 +477,7 @@ describe("replay candidates and fair comparison", () => {
     expect(await context.store.getWorkflow("wf-write")).toEqual(before);
     expect(counter.count("/slack")).toBe(2);
 
-    // A user who may run the workflow but not edit it: plain jobs only.
+    // A user who may run the workflow but not edit it: no replay jobs (they run the draft or a candidate).
     await context.store.upsertProject({ id: "team", name: "Team" });
     const shared = { ...writeWorkflow(counter.base), id: "wf-team", projectId: "team" };
     await context.store.upsertWorkflow(shared);
@@ -486,13 +486,19 @@ describe("replay candidates and fair comparison", () => {
     // In the team project the builder may read and run workflows, not edit them.
     await context.store.upsertCustomRole({ id: "run-only", projectId: "team", name: "Run only", permissions: ["workflow:read", "workflow:execute"] });
     await context.store.upsertProjectRole({ userId: builder.id, projectId: "team", role: "custom", customRoleId: "run-only" });
-    for (const body of [{ datasetIds: [teamSet], workflow: { ...shared, name: "Changed" } }, { datasetIds: [teamSet], overrides: { guardProfile: { profileId: "default" } } }]) {
+    for (const body of [
+      { datasetIds: [teamSet], workflow: { ...shared, name: "Changed" } },
+      { datasetIds: [teamSet], overrides: { guardProfile: { profileId: "default" } } },
+      { datasetIds: [teamSet] }
+    ]) {
       for (const url of ["/api/replay/runs", "/api/replay/estimate"]) {
         const response = await call(context, "POST", url, builder.cookie, body);
         expect(response.statusCode, response.body).toBe(403);
         expect(response.json<{ error: string }>().error).toContain("workflow:write");
       }
     }
+    // With workflow:write on the team project, plain jobs run again.
+    await context.store.upsertCustomRole({ id: "run-only", projectId: "team", name: "Run only", permissions: ["workflow:read", "workflow:execute", "workflow:write"] });
     expect((await call(context, "POST", "/api/replay/estimate", builder.cookie, { datasetIds: [teamSet] })).statusCode).toBe(200);
     const plain = await runJob(context, builder.cookie, { datasetIds: [teamSet] });
     expect(plain.status, plain.error ?? "").toBe("completed");

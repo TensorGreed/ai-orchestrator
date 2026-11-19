@@ -26,7 +26,7 @@ export L2M_API_KEY=…      # a builder API key; keep it in the CI secret store
 
 Pass the key through `L2M_API_KEY` only. `--api-key` still works, but a key on the command line shows in the process list and in CI logs, so the CLI prints a warning on stderr when it is used. The CLI never prints the key.
 
-The key needs run access (`workflow:execute`) to the workflow whose golden sets you replay, and read access to the sets.
+The key needs a builder role (or higher) and edit access (`workflow:write`) to the workflow whose golden sets you replay, since a replay runs its draft, and read access to the sets.
 
 Each command accepts only its own flags: a typo such as `--override-reson`, or a flag of another command, is a usage error (exit 2) and nothing is sent. Switches never take a value: `--sign=false` is refused rather than read as `--sign`.
 

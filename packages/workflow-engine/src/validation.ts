@@ -11,6 +11,7 @@ import {
   OUTPUT_GUARDRAIL_CHECK_VALUES,
   parseIpAllowlist,
   parseStatusList,
+  readHttpSecretAuth,
   repairWorkflowErrorConfigs,
   workflowSchema,
   type Workflow,
@@ -157,6 +158,17 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
           message: "Something is connected to this node's Error output, but On Error is not set to use it, so it never runs. Set On Error to \"Execute Fallback Branch\".",
           nodeId: node.id,
           severity: "warning"
+        });
+      }
+    }
+
+    if (node.type === "http_request" && config.secretAuth !== undefined) {
+      const auth = readHttpSecretAuth(config.secretAuth);
+      if (typeof auth === "string") {
+        issues.push({
+          code: "invalid_http_secret_auth",
+          message: `HTTP Request secret sending is invalid: ${auth}.`,
+          nodeId: node.id
         });
       }
     }
@@ -780,16 +792,6 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
           nodeId: node.id
         });
       }
-    }
-
-    // A Loop body cannot pause for a person: a Human Approval there fails the Loop when it is reached.
-    if (node.type === "human_approval" && owningLoopsOf(workflow, node.id).length > 0) {
-      issues.push({
-        code: "human_approval_in_loop",
-        message: "A Human Approval node cannot run inside a Loop body: a pass cannot pause, so the Loop fails when it is reached. Ask before or after the Loop instead.",
-        nodeId: node.id,
-        severity: "warning"
-      });
     }
 
     if (node.type === "approval_gate") {

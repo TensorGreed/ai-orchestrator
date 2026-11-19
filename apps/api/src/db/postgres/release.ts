@@ -528,6 +528,12 @@ export async function setExecutionSessionOwner(ctx: PgContext, executionId: stri
   await ctx.execute(`UPDATE execution_history SET session_owner = $1 WHERE id = $2`, [userId, executionId]);
 }
 
+/** v80 — see Store.getExecutionStarter. */
+export async function getExecutionStarter(ctx: PgContext, executionId: string): Promise<string | null> {
+  const row = await ctx.queryOne<{ triggered_by_user_id: string | null }>(`SELECT triggered_by_user_id FROM execution_history WHERE id = $1`, [executionId]);
+  return row?.triggered_by_user_id ? String(row.triggered_by_user_id) : null;
+}
+
 /** v79 — see Store.getExecutionSessionOwner. */
 export async function getExecutionSessionOwner(ctx: PgContext, executionId: string): Promise<string | null> {
   const row = await ctx.queryOne<{ session_owner: string | null }>(`SELECT session_owner FROM execution_history WHERE id = $1`, [executionId]);

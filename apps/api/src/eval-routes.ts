@@ -499,6 +499,11 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     const datasetResult = await datasetAccess(user, await evals.getDataset(datasetId), "workflow:read");
     if (!datasetResult.ok) return denyRunAccess(reply, datasetResult);
     const dataset = datasetResult.dataset;
+    // After the dataset check (someone else's set reads as missing). An eval run runs the workflow's draft (and may record its MCP calls): builder tooling, so the one edit rule.
+    if (!(await runAccess.mayEdit(user, workflowAccess.workflow))) {
+      reply.code(403);
+      return { error: "Eval runs run this workflow's draft, so they need permission to edit the workflow (workflow:write)." };
+    }
     if (dataset.workflowId && dataset.workflowId !== workflowId) {
       reply.code(400);
       return { error: "This golden set belongs to another workflow.", code: "invalid" };
@@ -733,16 +738,10 @@ export function registerEvalRoutes(deps: EvalRoutesDeps): void {
     const workflowId = first.workflowId;
     const workflowAccess = await runAccess.workflow(user, workflowId, "workflow:execute", "Golden set");
     if (!workflowAccess.ok) return { ok: false, response: denyRunAccess(reply, workflowAccess) };
-    // An unsaved candidate is a change to the workflow, so it needs the right to make one.
-    if (parsed.data.workflow !== undefined || parsed.data.overrides !== undefined) {
-      const writeAccess = await runAccess.workflow(user, workflowId, "workflow:write", "Golden set");
-      if (!writeAccess.ok) {
-        if (writeAccess.status === 403) {
-          reply.code(403);
-          return { ok: false, response: { error: "Replaying an uploaded workflow or a candidate with overrides needs permission to edit this workflow (workflow:write)." } };
-        }
-        return { ok: false, response: denyRunAccess(reply, writeAccess) };
-      }
+    // A replay job runs the workflow's draft or a candidate (builder tooling), so it follows the one edit rule.
+    if (!(await runAccess.mayEdit(user, workflowAccess.workflow))) {
+      reply.code(403);
+      return { ok: false, response: { error: "Replay jobs run this workflow's draft, so they need permission to edit the workflow (workflow:write)." } };
     }
     // Every set must be this workflow's before anything about its cases (names, secret ids) is read.
     for (const datasetId of parsed.data.datasetIds) {

@@ -1162,15 +1162,6 @@
 .insp-tabbar .insp-tabs {
   border-bottom: 0;
 }
-.insp-tab-dot {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  margin-left: 6px;
-  vertical-align: middle;
-  border-radius: var(--r-pill);
-  background: var(--accent);
-}
 
 .run-steps {
   display: flex;
@@ -1441,7 +1432,7 @@
   }
 }
 
-/* ---- Settings tab and the per-node Advanced section ----------------------- */
+/* ---- The inspector's More section ------------------------------------------ */
 .insp-settings {
   gap: 20px;
 }
@@ -1509,6 +1500,24 @@
   display: grid;
   gap: 12px;
   padding-top: 12px;
+}
+/* The inspector's one More section: the node's rarely used fields, then the settings every node has. */
+.cfg-more-fields {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+.cfg-more-fields:empty {
+  display: none;
+}
+.cfg-more .insp-settings {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.cfg-more-fields:not(:empty) + .insp-settings {
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
 }
 
 .run-data-internal {
@@ -1873,4 +1882,64 @@
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   color: var(--fg-muted);
+}
+
+/* ---- Row editors (Switch cases, mappings, form fields) ------------------- */
+.cfg-rows {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  gap: 6px;
+}
+.cfg-rows > legend {
+  padding: 0;
+  margin-bottom: 5px;
+}
+.cfg-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+}
+.cfg-row-head {
+  font: 600 var(--fs-xs) / 1.3 var(--font-body);
+  color: var(--fg-faint);
+}
+.cfg-row-form {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 110px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-elev-2);
+}
+.cfg-row .cfg-row-wide,
+.cfg-row-foot {
+  grid-column: 1 / -1;
+}
+.cfg-row-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: var(--fs-xs);
+  color: var(--fg-muted);
+}
+.cfg-row-foot .cfg-row-remove {
+  margin-left: auto;
+}
+.cfg-row input,
+.cfg-row select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.cfg-other-settings > summary {
+  cursor: pointer;
+  font: 600 var(--fs-xs) / 1.3 var(--font-body);
+  color: var(--fg-muted);
+  margin-bottom: 5px;
+}
+@media (max-width: 520px) {
+  .cfg-row-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }

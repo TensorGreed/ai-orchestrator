@@ -343,7 +343,8 @@ export async function staffSubjectRows(ctx: PgContext, email: string): Promise<S
     scimGroups: await byUser(STAFF_SECTION_SQL.scimGroups),
     projectRoles: await byUser(STAFF_SECTION_SQL.projectRoles),
     apiKeys: await byUser(STAFF_SECTION_SQL.apiKeys),
-    runsTriggered: await all(STAFF_SECTION_SQL.runsTriggered, [...emails, cap]),
+    // v80 — also by the starter's user id: a run started under an email the account had before a rename.
+    runsTriggered: await all(STAFF_SECTION_SQL.runsTriggered, [...emails, userId ?? "", cap]),
     workflowsCreated: await all(STAFF_SECTION_SQL.workflowsCreated, [...emails, cap]),
     approvals: await all(STAFF_SECTION_SQL.approvals, [...emails, ...emails, cap]),
     evalRuns: await all(STAFF_SECTION_SQL.evalRuns, [...emails, cap]),

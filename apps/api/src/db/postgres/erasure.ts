@@ -9,6 +9,7 @@ import {
   RESTORE_SKIPPED_KIND,
   RUN_ACTIVE_CHECKS,
   STAFF_AUTHORSHIP_COLUMNS,
+  staffRunStarterWhere,
   STAFF_BATCH,
   staffWhere,
   type ErasureTombstoneWrite,
@@ -77,7 +78,7 @@ export async function countErasureTombstones(ctx: PgContext): Promise<number> {
 
 export async function pseudonymiseStaff(
   ctx: PgContext,
-  input: { emails: string[]; pseudonym: string; batch?: number }
+  input: { emails: string[]; userIds?: string[]; pseudonym: string; batch?: number }
 ): Promise<{ changed: number; held: number; remaining: number }> {
   const emails = [...new Set(input.emails.map((email) => email.trim().toLowerCase()))].filter(Boolean);
   if (emails.length === 0) return { changed: 0, held: 0, remaining: 0 };
@@ -104,6 +105,31 @@ export async function pseudonymiseStaff(
     // A column no hold can keep has no held rows (and its "held" predicate takes no parameter).
     if (!column.held) continue;
     const kept = await ctx.queryOne<{ n: string | number }>(toPgPlaceholders(`SELECT COUNT(*) AS n FROM ${column.table} t WHERE ${staffWhere(column, emails.length, "held")}`), emails);
+    held += Number(kept?.n ?? 0);
+  }
+  // v80 — their runs by the starter's user id too (one started under an email the account had before a rename).
+  const userIds = [...new Set((input.userIds ?? []).filter(Boolean))];
+  if (userIds.length > 0) {
+    const params = [...userIds, input.pseudonym, ...emails];
+    const unheld = staffRunStarterWhere(userIds.length, emails.length, "unheld");
+    const update = toPgPlaceholders(
+      `UPDATE execution_history SET triggered_by = ? WHERE ctid IN (SELECT t.ctid FROM execution_history t WHERE ${unheld} LIMIT ? FOR UPDATE SKIP LOCKED)`
+    );
+    for (;;) {
+      const step = await ctx.withTransaction(async (client) => {
+        await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
+        return (await client.query(update, [input.pseudonym, ...params, batch])).rowCount ?? 0;
+      });
+      changed += step;
+      if (step < batch) break;
+      await yieldToEventLoop();
+    }
+    const left = await ctx.queryOne<{ n: string | number }>(toPgPlaceholders(`SELECT COUNT(*) AS n FROM execution_history t WHERE ${unheld}`), params);
+    remaining += Number(left?.n ?? 0);
+    const kept = await ctx.queryOne<{ n: string | number }>(
+      toPgPlaceholders(`SELECT COUNT(*) AS n FROM execution_history t WHERE ${staffRunStarterWhere(userIds.length, emails.length, "held")}`),
+      params
+    );
     held += Number(kept?.n ?? 0);
   }
   return { changed, held, remaining };

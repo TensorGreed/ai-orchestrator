@@ -32,6 +32,7 @@ import {
   type WorkflowListItem,
   type WorkflowValidationIssue
 } from "@ai-orchestrator/shared";
+import type { CatalogPaletteEntry, CatalogSourceSummary } from "@ai-orchestrator/shared";
 import {
   ApiError,
   inBackground,
@@ -67,6 +68,7 @@ import {
   fetchExecutionById,
   fetchExecutions,
   fetchDefinitions,
+  fetchIntegrationCatalog,
   fetchFolders,
   fetchProjects,
   fetchSecrets,
@@ -93,6 +95,8 @@ import {
   retryExecution,
   runWebhookStream,
   saveWorkflow,
+  useTemplate as instantiateTemplate,
+  fetchWorkflowBuilderStatus,
   saveWorkflowPin,
   updateWorkflowVariables,
   type AuthUser,
@@ -186,10 +190,12 @@ import { WorkflowCardMenu } from "./components/WorkflowCardMenu";
 import { WorkflowCanvasArea, type ImportPanelBinding } from "./components/WorkflowCanvasArea";
 import { ExternalImportDialog, type ExternalImportSource } from "./components/ExternalImportDialog";
 import { ImportConflictDialog, type ImportConflictChoice } from "./components/ImportConflictDialog";
-import { editorAccess, roleMayUseEditorRunOptions, type WorkflowAccessView } from "./lib/editor-access";
+import { editorAccess, mayUseEditorRunOptions, type WorkflowAccessView } from "./lib/editor-access";
+import { useEditableWorkflows } from "./lib/editable-workflows";
 import { SecretSaveWarnings } from "./components/SecretSaveWarnings";
 import { DraftWarnings } from "./components/DraftWarnings";
 import { WebhookTestPayloadDialog } from "./components/WebhookTestPayloadDialog";
+import { WorkflowBuilderDialog } from "./components/WorkflowBuilderDialog";
 import { apiErrorText, draftIssueShown } from "./lib/draft-validation";
 import { canvasLabelBadge, type CanvasLabelBadge } from "./lib/taint-sources";
 import {
@@ -203,6 +209,8 @@ import { StudioProvider, useStudioContext } from "./contexts/StudioContext";
 import { MfaGateCard } from "./components/MfaGateCard";
 import { StepUpPrompt } from "./components/StepUpPrompt";
 import { isPaletteDefinition, withAgentToolPresets } from "./lib/agent-tool-presets";
+import { canUseIntegrationCatalog, catalogPresets } from "./lib/integration-catalog";
+import { ApiCatalogDialog } from "./components/ApiCatalogDialog";
 import { paletteKey } from "./components/NodePalette";
 import { GraphHistory, movedNodeIds } from "./lib/graph-history";
 import { AUXILIARY_HANDLES, CHAT_MODEL_NODE_TYPES, validateConnection } from "./lib/connection-rules";
@@ -1189,6 +1197,9 @@ function StudioApp() {
   const [mcpServerDefinitions, setMcpServerDefinitions] = useState<MCPServerDefinition[]>([]);
   // Hosted model providers whose key the API server's environment sets (from /api/definitions, builders only).
   const [envModelProviders, setEnvModelProviders] = useState<string[]>([]);
+  // "Describe it" (from /api/definitions; off until the server says it is on, and on older servers).
+  const [workflowBuilderEnabled, setWorkflowBuilderEnabled] = useState(false);
+  const [workflowBuilderOpen, setWorkflowBuilderOpen] = useState(false);
   const [secrets, setSecrets] = useState<SecretListItem[]>([]);
 
   const [loading, setLoading] = useState(false);
@@ -1256,6 +1267,9 @@ function StudioApp() {
 
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [showNodeDrawer, setShowNodeDrawer] = useState(false);
+  // The integration catalog (registered MCP servers' tools, the project's APIs) as palette presets; builders only.
+  const [integrationCatalog, setIntegrationCatalog] = useState<{ entries: CatalogPaletteEntry[]; sources: CatalogSourceSummary[] }>({ entries: [], sources: [] });
+  const [showApiCatalog, setShowApiCatalog] = useState(false);
   const [nodeDrawerContext, setNodeDrawerContext] = useState<NodeDrawerContext | null>(null);
   // The output a node picked in the palette is connected after (its `+`, or a connection dropped on the canvas).
   const [paletteInsertSource, setPaletteInsertSource] = useState<PaletteInsertSource | null>(null);
@@ -1365,17 +1379,22 @@ function StudioApp() {
     return editorRunPrompts(nodes.map((node) => ({ type: node.data.nodeType, config: node.data.config })));
   }, [nodes]);
 
+  // Every palette entry: the node definitions, the built-in tool presets and the integration catalog's presets.
+  const paletteDefinitions = useMemo(
+    () => [...withAgentToolPresets(definitions), ...(catalogPresets(integrationCatalog.entries) as DefinitionNode[])],
+    [definitions, integrationCatalog.entries]
+  );
   const groupedDefinitions = useMemo(() => {
     const grouped = new Map<string, DefinitionNode[]>();
     // Phase 6.4 — the built-in tools are MCP Tool presets in the palette.
-    for (const definition of withAgentToolPresets(definitions)) {
+    for (const definition of paletteDefinitions) {
       if (!isPaletteDefinition(definition)) continue;
       const list = grouped.get(definition.category) ?? [];
       list.push(definition);
       grouped.set(definition.category, list);
     }
     return grouped;
-  }, [definitions]);
+  }, [paletteDefinitions]);
   const currentChatMessages = chatMessagesByWorkflow[currentWorkflow.id] ?? [];
   const currentChatSessionId = chatSessionsByWorkflow[currentWorkflow.id] ?? "";
 
@@ -1589,12 +1608,34 @@ function StudioApp() {
       cancelled = true;
     };
   }, [authUser, currentWorkflow.id, currentWorkflowExists]);
-  const { editDisabledReason, runDisabledReason } = editorAccess(
-    authUser?.role,
-    workflowAccess && workflowAccess.workflowId === currentWorkflow.id ? workflowAccess : null
-  );
+  const openWorkflowAccess = workflowAccess && workflowAccess.workflowId === currentWorkflow.id ? workflowAccess : null;
+  // The run list's replay controls run the draft: shown only for the workflows you may edit.
+  const runListWorkflowIds = useMemo(() => executionHistoryItems.map((item) => item.workflowId), [executionHistoryItems]);
+  const mayEditRunWorkflow = useEditableWorkflows(authUser?.role, authUser?.id, activeMode === "executions" ? runListWorkflowIds : []);
+  const { editDisabledReason, runDisabledReason } = editorAccess(authUser?.role, openWorkflowAccess);
+  // The editor's run options (pinned data, recording, one node or from a node): for someone who may edit this workflow.
+  const editorRunOptions = mayUseEditorRunOptions(authUser?.role, openWorkflowAccess);
   // Workflow settings in the More actions menu are edits too: only for someone who may save this workflow.
   const canEditOpenWorkflow = canManageWorkflows && !editDisabledReason;
+
+  // Whether "Describe it" is on: asked once per sign-in by someone who may build (older servers: off).
+  useEffect(() => {
+    if (!canManageWorkflows) {
+      setWorkflowBuilderEnabled(false);
+      return;
+    }
+    let cancelled = false;
+    fetchWorkflowBuilderStatus()
+      .then((status) => {
+        if (!cancelled) setWorkflowBuilderEnabled(status.enabled === true);
+      })
+      .catch(() => {
+        if (!cancelled) setWorkflowBuilderEnabled(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [canManageWorkflows, authUser?.id]);
   // Phase 11.2 — pending approvals the user can decide, for the sidebar badge.
   const [pendingApprovalCount, setPendingApprovalCount] = useState(0);
   const [approvalFocusExecutionId, setApprovalFocusExecutionId] = useState<string | null>(null);
@@ -1896,7 +1937,13 @@ function StudioApp() {
   }, [currentWorkflow.id]);
 
   // What the saved workflow still lacks (a draft saves with unfinished node settings), for the editor's notice.
-  const [draftIssues, setDraftIssues] = useState<{ workflowId: string; issues: WorkflowValidationIssue[]; liveTriggersPaused: boolean } | null>(null);
+  // Dismissing hides the notice; the version pill still says when live triggers are paused.
+  const [draftIssues, setDraftIssues] = useState<{
+    workflowId: string;
+    issues: WorkflowValidationIssue[];
+    liveTriggersPaused: boolean;
+    dismissed?: boolean;
+  } | null>(null);
   // A workflow stored before error settings were checked can hold invalid values: runs ignore them, but a save (and so
   // the editor's Run) refuses them. One click strips them from every node, keeping each node's valid values.
   const removeInvalidErrorConfigs = useCallback(() => {
@@ -1918,6 +1965,19 @@ function StudioApp() {
       current ? { ...current, issues: current.issues.filter((issue) => issue.code !== "invalid_error_config") } : current
     );
   }, [pushHistorySnapshot, setNodes]);
+  // A publish or unpublish changes which version production runs, and so whether its live triggers are paused.
+  const refreshLiveTriggersPaused = useCallback(() => {
+    const workflowId = currentWorkflow.id;
+    inBackground(() => validateStoredWorkflow(workflowId))
+      .then((validation) => {
+        setDraftIssues((current) =>
+          current && current.workflowId === workflowId ? { ...current, liveTriggersPaused: validation.liveTriggersPaused === true } : current
+        );
+      })
+      .catch(() => {
+        // The pill keeps its last answer; the next save or open checks again.
+      });
+  }, [currentWorkflow.id]);
   const draftIssuesWorkflowIdRef = useRef<string | null>(null);
   useEffect(() => {
     setDraftIssues((current) => (current && current.workflowId !== currentWorkflow.id ? null : current));
@@ -2623,6 +2683,35 @@ function StudioApp() {
     };
   }, [activeMode, authUser]);
 
+  const catalogProjectId = activeProjectId || null;
+  const canUseCatalog = canUseIntegrationCatalog(authUser?.role);
+  // Only the latest load applies, so a slow answer for the previous project never fills this project's palette.
+  const catalogRequestRef = useRef(0);
+  const reloadIntegrationCatalog = useCallback(async () => {
+    const request = ++catalogRequestRef.current;
+    if (!canUseCatalog) {
+      setIntegrationCatalog({ entries: [], sources: [] });
+      return;
+    }
+    try {
+      const response = await fetchIntegrationCatalog(catalogProjectId);
+      if (request === catalogRequestRef.current) setIntegrationCatalog({ entries: response.entries, sources: response.sources });
+    } catch {
+      // The palette works without the catalog; the dialog shows its own errors.
+      if (request === catalogRequestRef.current) setIntegrationCatalog({ entries: [], sources: [] });
+    }
+  }, [canUseCatalog, catalogProjectId]);
+
+  // Loaded with the editor (and for each project), and again each time the palette opens, so a probe or a new API
+  // shows up there.
+  const catalogLoadedForRef = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (!authUser || activeMode !== "editor") return;
+    if (!showNodeDrawer && catalogLoadedForRef.current === catalogProjectId) return;
+    catalogLoadedForRef.current = catalogProjectId;
+    void reloadIntegrationCatalog();
+  }, [authUser, activeMode, showNodeDrawer, catalogProjectId, reloadIntegrationCatalog]);
+
   useEffect(() => {
     if (!authUser || !canManageSecrets) {
       setSecrets([]);
@@ -3197,6 +3286,35 @@ function StudioApp() {
     [activeProjectId, handleApiError, hydrateWorkflow, setWorkflowList]
   );
 
+  /** "Describe it": the draft is saved as a new workflow (a new id, never an existing one) and opened. */
+  const handleCreateBuiltWorkflow = useCallback(
+    async (workflow: Workflow) => {
+      const saved = await saveWorkflow({ ...workflow, projectId: workflow.projectId ?? activeProjectId });
+      // A slower load of another workflow must not replace the new one.
+      workflowLoadSeqRef.current += 1;
+      pendingWorkflowLoadIdRef.current = null;
+      const workflows = await fetchWorkflows({ projectId: activeProjectId });
+      applyProjectWorkflowList(activeProjectId, workflows);
+      hydrateWorkflow(saved);
+      storeLocalWipWorkflow(saved);
+      rememberTabWorkflowId(saved.id);
+      setWorkflowBuilderOpen(false);
+      setError(null);
+      setActiveMode("editor");
+    },
+    [activeProjectId, applyProjectWorkflowList, hydrateWorkflow, setActiveMode]
+  );
+
+  /** "Describe it" without a real model offers templates: one makes a new workflow, as in the gallery. */
+  const handleBuilderTemplate = useCallback(
+    async (templateId: string) => {
+      const created = await instantiateTemplate(templateId);
+      await handleTemplateWorkflowCreated(created.workflowId);
+      setWorkflowBuilderOpen(false);
+    },
+    [handleTemplateWorkflowCreated]
+  );
+
   const docsUrl = useMemo(() => {
     const fromEnv = (import.meta.env.VITE_DOCS_URL as string | undefined)?.trim();
     if (fromEnv) return fromEnv;
@@ -3643,7 +3761,7 @@ function StudioApp() {
     };
 
     // Operators run the saved workflow with their input: pinned data, recording and partial runs are the editor's.
-    const editorOptions = roleMayUseEditorRunOptions(authUser?.role);
+    const editorOptions = editorRunOptions;
     if (editorOptions) {
       payload.usePinnedData = true;
     }
@@ -3672,7 +3790,7 @@ function StudioApp() {
     }
 
     return payload;
-  }, [authUser?.role, executionResult, editorPrompts.sendSystemPrompt, editorPrompts.sendUserPrompt, recordMcp, sessionId, systemPrompt, userPrompt]);
+  }, [editorRunOptions, executionResult, editorPrompts.sendSystemPrompt, editorPrompts.sendUserPrompt, recordMcp, sessionId, systemPrompt, userPrompt]);
 
   const buildWebhookExecutionPayload = useCallback(() => {
     const payload: {
@@ -3723,8 +3841,8 @@ function StudioApp() {
       return;
     }
     // Running one node or from a node is the editor's; operators run the whole saved workflow.
-    if ((options?.startNodeId || options?.runMode === "single_node") && !roleMayUseEditorRunOptions(authUser?.role)) {
-      setError("Running one node, or from a node, needs the builder role. Run the whole workflow instead.");
+    if ((options?.startNodeId || options?.runMode === "single_node") && !editorRunOptions) {
+      setError("Running one node, or from a node, needs a builder role and edit access to this workflow. Run the whole workflow instead.");
       return;
     }
     try {
@@ -3775,7 +3893,7 @@ function StudioApp() {
     persistForRun,
     refreshExecutionHistory,
     runDisabledReason,
-    authUser?.role,
+    editorRunOptions,
   ]);
 
   const handleWebhookExecute = useCallback(async (testPayload: Record<string, unknown>) => {
@@ -4993,7 +5111,7 @@ function StudioApp() {
         return;
       }
 
-      const definition = withAgentToolPresets(definitions).find((item) => paletteKey(item) === nodeType);
+      const definition = paletteDefinitions.find((item) => paletteKey(item) === nodeType);
       if (!definition) {
         return;
       }
@@ -5006,7 +5124,7 @@ function StudioApp() {
 
       createNodeFromDefinition(definition, position);
     },
-    [createNodeFromDefinition, definitions, importFromFile, reactFlowInstance]
+    [createNodeFromDefinition, paletteDefinitions, importFromFile, reactFlowInstance]
   );
 
   const handleToggleSecretSensitive = useCallback(
@@ -5410,6 +5528,8 @@ function StudioApp() {
                 refreshKey={releaseRefreshKey}
                 canPublish={canManageWorkflows}
                 isAdmin={authUser.role === "admin"}
+                livePaused={draftIssues?.workflowId === currentWorkflow.id && draftIssues.liveTriggersPaused}
+                onReleaseChanged={refreshLiveTriggersPaused}
                 onOpenGates={() => {
                   setEvaluationsTab("gates");
                   setActiveMode("evaluations");
@@ -5475,14 +5595,14 @@ function StudioApp() {
             </div>
           )}
           {error && <div className="error-banner global-banner">{error}</div>}
-          {activeMode === "editor" && draftIssues && draftIssues.workflowId === currentWorkflow.id ? (
+          {activeMode === "editor" && draftIssues && !draftIssues.dismissed && draftIssues.workflowId === currentWorkflow.id ? (
             <DraftWarnings
               issues={draftIssues.issues}
               liveTriggersPaused={draftIssues.liveTriggersPaused}
               nodeLabel={(nodeId) => (nodes as EditorNode[]).find((node) => node.id === nodeId)?.data.label}
               onSelectNode={openNodeConfig}
               onRemoveInvalidErrorConfig={removeInvalidErrorConfigs}
-              onDismiss={() => setDraftIssues(null)}
+              onDismiss={() => setDraftIssues((current) => (current ? { ...current, dismissed: true } : current))}
             />
           ) : null}
           {secretMessage && <div className="info-banner global-banner">{secretMessage}</div>}
@@ -5522,6 +5642,16 @@ function StudioApp() {
                   {canManageWorkflows && !inNoProject && (
                     <button className="pg-btn" onClick={() => openExternalImport()} disabled={busy} title="Bring a workflow exported from another builder">
                       Import…
+                    </button>
+                  )}
+                  {canManageWorkflows && !inNoProject && workflowBuilderEnabled && (
+                    <button
+                      className="pg-btn"
+                      onClick={() => setWorkflowBuilderOpen(true)}
+                      disabled={busy}
+                      title="Say what it should do and review a draft before it is saved"
+                    >
+                      Describe it…
                     </button>
                   )}
                   {!inNoProject && (
@@ -5815,8 +5945,35 @@ function StudioApp() {
             </section>
           )}
 
+          {activeMode === "editor" && showApiCatalog && (
+            <ApiCatalogDialog
+              projectId={catalogProjectId}
+              sources={integrationCatalog.sources}
+              canRefreshMcp={authUser?.role === "admin"}
+              onChanged={reloadIntegrationCatalog}
+              onClose={() => setShowApiCatalog(false)}
+            />
+          )}
           {activeMode === "editor" && (
             <WorkflowCanvasArea
+              paletteFooter={
+                canUseCatalog ? (
+                  <>
+                    <button
+                      type="button"
+                      className="pg-btn ghost small"
+                      onClick={() => {
+                        setShowNodeDrawer(false);
+                        setNodeDrawerContext(null);
+                        setPaletteInsertSource(null);
+                        setShowApiCatalog(true);
+                      }}
+                    >
+                      Add an API…
+                    </button>
+                  </>
+                ) : undefined
+              }
               isLogsPanelCollapsed={isLogsPanelCollapsed}
               canvasAndLogsStyle={canvasAndLogsStyle}
               flowWrapperRef={flowWrapperRef}
@@ -5866,6 +6023,7 @@ function StudioApp() {
               reactFlowInstance={reactFlowInstance}
               editDisabledReason={editDisabledReason}
               runDisabledReason={runDisabledReason}
+              onDescribeWorkflow={canEditOpenWorkflow && workflowBuilderEnabled ? () => setWorkflowBuilderOpen(true) : undefined}
               onClearCanvas={() => {
                 if (editDisabledReason) return;
                 if (nodes.length === 0 && edges.length === 0) return;
@@ -6029,6 +6187,7 @@ function StudioApp() {
               onReplayCassette={canManageWorkflows ? (executionId, mode) => handleReplayCassette(executionId, mode) : undefined}
               canDeleteCassettes={authUser?.role === "admin"}
               canManageGoldenRuns={canManageWorkflows}
+              mayEditWorkflow={mayEditRunWorkflow}
               onReviewApproval={(executionId) => {
                 setApprovalFocusExecutionId(executionId);
                 setActiveMode("approvals");
@@ -6555,6 +6714,18 @@ function StudioApp() {
             })
           }
           onClose={() => setSubjectRefsDialogOpen(false)}
+        />
+      )}
+
+      {workflowBuilderOpen && canManageWorkflows && (
+        <WorkflowBuilderDialog
+          defaultModel={pickDefaultModelProvider({ envProviders: envModelProviders, secrets })}
+          secrets={secrets}
+          projectId={activeProjectId}
+          userId={authUser?.id}
+          onCreate={handleCreateBuiltWorkflow}
+          onUseTemplate={handleBuilderTemplate}
+          onClose={() => setWorkflowBuilderOpen(false)}
         />
       )}
 

@@ -18,7 +18,6 @@ export type Permission =
   | "secret:use"
   | "project:manage"
   | "project:invite"
-  | "role:manage"
   /**
    * 13.3 — place and release legal holds. Deployment-wide: admins have it, and so does a member through a
    * deployment-wide custom role (one with no project) that grants it. A project role never grants it.
@@ -44,7 +43,6 @@ export const ALL_PERMISSIONS: Permission[] = [
   "secret:use",
   "project:manage",
   "project:invite",
-  "role:manage",
   "legal_hold:manage",
   "data_subject:manage"
 ];
@@ -60,8 +58,7 @@ const PROJECT_ROLE_PERMISSIONS: Record<ProjectRole, Permission[]> = {
     "secret:write",
     "secret:use",
     "project:manage",
-    "project:invite",
-    "role:manage"
+    "project:invite"
   ],
   editor: [
     "workflow:read",
@@ -91,8 +88,7 @@ const GLOBAL_ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     "secret:read",
     "secret:write",
     "secret:use",
-    "project:invite",
-    "role:manage"
+    "project:invite"
   ],
   operator: ["workflow:read", "workflow:execute", "secret:use"],
   viewer: ["workflow:read", "secret:read"]
@@ -361,27 +357,32 @@ export class RbacService {
   }
 
   /**
-   * True when the person may run this workflow only through a share with them: no execute in its project and no execute
-   * share to a project where they may run workflows. Such runs keep session memory to the person (run-scope.ts).
+   * Who may share a workflow with people or with other projects, list its person shares and remove them: whoever may
+   * invite members to its owning project (`project:invite`). Admins have it; an API key limited to other projects
+   * does not, whatever its role.
    */
-  async runsOnlyThroughUserShare(user: SafeUser, workflow: { id: string; projectId?: string | null }): Promise<boolean> {
-    if (await this.userShareAccess(user, workflow) !== "execute") return false;
-    if (await this.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "workflow:execute")) return false;
-    for (const share of await this.store.listWorkflowShares(workflow.id)) {
-      if (share.accessLevel === "execute" && await this.can(user, share.projectId, "workflow:execute")) return false;
-    }
-    return true;
+  async mayManageWorkflowShares(user: SafeUser, workflow: { projectId?: string | null }): Promise<boolean> {
+    return this.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite");
   }
 
   /**
-   * True when the person may read this workflow only through a share with them: no read in its project and no share
-   * to a project they can read. Such a person sees only their own runs of it (run-access.ts).
+   * True when the person has `permission` on this workflow only through a share with them: none in its project and none
+   * through a share to a project. For `workflow:execute` the person's share must be an execute share (and only execute
+   * shares to projects count); such runs keep session memory to the person (run-scope.ts). For `workflow:read` any
+   * share counts; such a person sees only their own runs of it (run-access.ts).
    */
-  async readsOnlyThroughUserShare(user: SafeUser, workflow: { id: string; projectId?: string | null }): Promise<boolean> {
-    if (!await this.userShareAccess(user, workflow)) return false;
-    if (await this.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "workflow:read")) return false;
+  async onlyThroughUserShare(
+    user: SafeUser,
+    workflow: { id: string; projectId?: string | null },
+    permission: "workflow:read" | "workflow:execute"
+  ): Promise<boolean> {
+    const execute = permission === "workflow:execute";
+    const own = await this.userShareAccess(user, workflow);
+    if (!own || (execute && own !== "execute")) return false;
+    if (await this.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, permission)) return false;
     for (const share of await this.store.listWorkflowShares(workflow.id)) {
-      if (await this.can(user, share.projectId, "workflow:read")) return false;
+      if (execute && share.accessLevel !== "execute") continue;
+      if (await this.can(user, share.projectId, permission)) return false;
     }
     return true;
   }

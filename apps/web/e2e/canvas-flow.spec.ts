@@ -311,7 +311,7 @@ test.describe("palette and canvas flow", () => {
 
     await inspector.getByLabel("URL Template").fill("https://api.example.com/items");
     const advanced = inspector.getByTestId("advanced-fields");
-    await advanced.getByText("Advanced", { exact: true }).click();
+    await advanced.getByText("More", { exact: true }).click();
     await expect(advanced).toHaveAttribute("open", "");
     await expect(inspector.getByLabel("Timeout (ms)")).toBeVisible();
 

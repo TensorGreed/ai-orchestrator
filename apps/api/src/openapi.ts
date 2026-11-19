@@ -32,6 +32,7 @@ export const openApiSpec = {
     { name: "Audit", description: "Audit log and export" },
     { name: "Observability", description: "Health, metrics, traces, SLOs" },
     { name: "RBAC", description: "Custom roles, project members, sharing" },
+    { name: "Catalog", description: "MCP server tools and OpenAPI operations offered in the node palette" },
     { name: "Triggers", description: "Webhook and trigger endpoints" },
     { name: "Queue", description: "Execution queue management" },
     { name: "LogStreaming", description: "Log streaming destinations" },
@@ -986,6 +987,53 @@ export const openApiSpec = {
         responses: { "200": { description: "Duplicated workflow" } }
       }
     },
+    "/api/workflow-builder": {
+      get: {
+        tags: ["Workflows"],
+        summary: "Whether the describe-it builder is on, and the model a build in ?projectId= uses (builder role)",
+        responses: { "200": { description: "{ enabled, defaultModel?: { providerId, model } }" }, "403": { description: "Not a builder" } }
+      }
+    },
+    "/api/workflow-builder/build": {
+      post: {
+        tags: ["Workflows"],
+        summary:
+          "Describe a workflow in words and get a draft preview (builder role). Nothing is saved: save the returned workflow with POST /api/workflows. The model is the request's, else the default model; on Echo no model is called and the three closest templates come back. The model's answer is checked against the workflow schema (up to 3 submissions) and never run. Off when WORKFLOW_BUILDER_ENABLED=false.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["prompt"],
+                properties: {
+                  prompt: { type: "string", maxLength: 2000 },
+                  projectId: { type: "string" },
+                  model: {
+                    type: "object",
+                    required: ["providerId", "model"],
+                    properties: {
+                      providerId: { type: "string" },
+                      model: { type: "string" },
+                      baseUrl: { type: "string" },
+                      secretRef: { type: "object", properties: { secretId: { type: "string" } } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "{ status: ready, workflow, preview, attempts, model } | { status: needs_model, message, templates } | { status: question, question } | { status: failed, message, issues, attempts }" },
+          "400": { description: "Invalid request or unknown provider" },
+          "403": { description: "Not a builder, no write access to the project, a secret you may not use, a model the allowlist refuses, or the builder is turned off (code workflow_builder_disabled)" },
+          "409": { description: "A build of yours is already running" },
+          "502": { description: "The model call failed" },
+          "504": { description: "The model took too long" }
+        }
+      }
+    },
     "/api/workflows/import": {
       post: {
         tags: ["Workflows"],
@@ -1147,6 +1195,77 @@ export const openApiSpec = {
         summary: "What you may do with a workflow: canEdit (save it), canRun (run the saved workflow: operator and up with workflow:execute), canShare (manage its shares)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "{ workflowId, role, canRead, canEdit, canRun, canShare }" }, "404": { description: "Not found or not readable" } }
+      }
+    },
+    "/api/catalog": {
+      get: {
+        tags: ["Catalog"],
+        summary: "Palette entries for a project: registered MCP servers' tools (from their last probe, tool policy applied) and the project's API operations (builders)",
+        parameters: [{ name: "projectId", in: "query", required: false, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "{ projectId, entries: [{ key, kind, label, description, sourceName, sourceId, itemId, nodeType, nodeConfig }], sources: [{ kind, id, name, itemCount, refreshedAt }] }" },
+          "403": { description: "No read access to the project, or not a builder" }
+        }
+      }
+    },
+    "/api/catalog/openapi-specs": {
+      get: {
+        tags: ["Catalog"],
+        summary: "The project's stored OpenAPI specs, without their operations (builders with read access to the project)",
+        parameters: [{ name: "projectId", in: "query", required: false, schema: { type: "string" } }],
+        responses: { "200": { description: "{ specs: [...] }" }, "403": { description: "No read access to the project" } }
+      },
+      post: {
+        tags: ["Catalog"],
+        summary: "Add an OpenAPI 3.x spec (JSON or YAML) from a URL (outbound URL checks, 2 MB cap, 15 s) or from its text (builders with write access to the project)",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  projectId: { type: "string" },
+                  name: { type: "string" },
+                  url: { type: "string" },
+                  specText: { type: "string" },
+                  baseUrl: { type: "string" }
+                }
+              }
+            }
+          }
+        },
+        responses: { "201": { description: "{ spec }" }, "400": { description: "Not an OpenAPI 3.x spec, too large, unreachable or blocked" }, "403": { description: "No write access to the project" } }
+      }
+    },
+    "/api/catalog/openapi-specs/{id}": {
+      get: {
+        tags: ["Catalog"],
+        summary: "One stored spec with its operations",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ spec: { ..., operations } }" }, "404": { description: "Not found, or no access to its project" } }
+      },
+      patch: {
+        tags: ["Catalog"],
+        summary: "Rename a spec or set its base URL (empty: the spec's own server)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: { name: { type: "string" }, baseUrl: { type: "string" } } } } } },
+        responses: { "200": { description: "{ spec }" }, "403": { description: "No write access to the project" }, "404": { description: "Not found" } }
+      },
+      delete: {
+        tags: ["Catalog"],
+        summary: "Remove a spec from the palette (nodes made from it keep running)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Removed" }, "403": { description: "No write access to the project" }, "404": { description: "Not found" } }
+      }
+    },
+    "/api/catalog/openapi-specs/{id}/refresh": {
+      post: {
+        tags: ["Catalog"],
+        summary: "Read a spec again from its URL, or from new text (an uploaded spec)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: false, content: { "application/json": { schema: { type: "object", properties: { specText: { type: "string" } } } } } },
+        responses: { "200": { description: "{ spec, added: [operationId], removed: [operationId] }" }, "400": { description: "Unreadable, or an upload without new text" } }
       }
     },
     "/api/workflows/{id}/user-shares": {

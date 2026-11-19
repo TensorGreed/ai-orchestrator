@@ -155,8 +155,10 @@ import { redactSensitiveUrl } from "./services/url-redaction.js";
 import { SecretService } from "./services/secret-service";
 import { McpCatalogService } from "./services/mcp-catalog.js";
 import { computeTemplateDependencies } from "./services/template-dependencies";
+import { registerSampleDataRoutes } from "./sample-data-routes.js";
+import { templateCompanions, withRemappedWorkflowReferences } from "./services/template-companions.js";
 import { buildTemplateThumbnail } from "./services/template-thumbnail";
-import { FEATURED_TEMPLATE_IDS } from "./services/seed-service";
+import { FEATURED_TEMPLATE_IDS, STARTER_TEMPLATE_CATEGORY } from "./services/seed-service";
 import { CommunityPackageLoader } from "./services/community-package-loader";
 import { EVAL_RUN_STALE_MS, EvalService, REPLAY_JOB_MAX_EXECUTIONS_DEFAULT, type EvalLlmJudge, type EvalWorkflowExecutor } from "./services/eval-service";
 import { JUDGE_PROMPT_MAX_CHARS } from "./services/eval-scorers";
@@ -208,7 +210,7 @@ import {
   oidcUserErrorCode,
   type FetchLike as OidcFetch
 } from "./services/oidc-service.js";
-import { editorRunOptionsError, editorRunOptionsRefused, personalSessionOwner, savedRunLimits } from "./run-editor-options.js";
+import { editorRunOptionsError, editorRunOptionsRefused, personalSessionOwner, roleMayEdit, savedRunLimits } from "./run-editor-options.js";
 import {
   ALL_PERMISSIONS,
   RbacService,
@@ -289,6 +291,7 @@ import type { SensitiveValuesMarker } from "@ai-orchestrator/shared";
 import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { registerUserInviteRoutes } from "./user-invite-routes.js";
+import { registerWorkflowBuilderRoutes } from "./workflow-builder-routes.js";
 import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { envModelProviders } from "@ai-orchestrator/shared";
 import {
@@ -317,7 +320,7 @@ import { registerDataDestinationRoutes } from "./data-destination-routes.js";
 import { DataDestinationService } from "./services/data-destination-service.js";
 import { ModelAllowlistService, type ModelAllowlistScope } from "./services/model-allowlist-service.js";
 import { registerModelAllowlistRoutes } from "./model-allowlist-routes.js";
-import { DEACTIVATED_MESSAGE, ReleaseService, productionRefusalBody, withUniqueTriggerPaths } from "./services/release-service.js";
+import { DEACTIVATED_MESSAGE, ReleaseService, productionRefusalBody, productionRoutingKeys, withUniqueTriggerPaths } from "./services/release-service.js";
 import { GateAdmissionService } from "./services/gate-admission-service.js";
 import { STUCK_JOB_MARGIN_MS } from "./db/queue-timeouts.js";
 import { ApprovalResumeRunner, ApprovalService, approvalDecisionOf, approvalPersonCheck, type ApprovalResumeJob } from "./services/approval-service.js";
@@ -359,7 +362,7 @@ import {
 import { DeliveryDedupe } from "./services/delivery-dedupe.js";
 import { acceptSlackEvent } from "./services/slack-intake.js";
 import { LocalRunEvents, openRunRelay, resultFromPersistedRun, RunEventPublisher, type PersistedRun, type RunEventName } from "./services/run-event-relay.js";
-import type { RedactedNodeEvent, RunWorkflowExecutionInput, WorkflowExecutionEventHooks } from "./run-types.js";
+import { runStarterId, type RedactedNodeEvent, type RunWorkflowExecutionInput, type WorkflowExecutionEventHooks } from "./run-types.js";
 import type { WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import { createRunAccess, type RunAccessDenial } from "./run-access.js";
 import { ProjectNotEmptyError, ReleaseGateEnforcedError, StoreReferenceMissingError } from "./db/store-errors.js";
@@ -421,6 +424,7 @@ import { NetworkControls, hasApiKeyBearer, installNetworkHook, registerNetworkSe
 import { registerAiGatewayRoutes, type AiGatewayModelCheck } from "./ai-gateway-routes.js";
 import { registerAiGatewayAdminRoutes } from "./ai-gateway-admin-routes.js";
 import { registerMcpOnboardingRoutes } from "./mcp-onboarding-routes.js";
+import { registerIntegrationCatalogRoutes } from "./integration-catalog-routes.js";
 import {
   buildClientMetadataDocument,
   carryIssuerBinding,
@@ -2505,8 +2509,11 @@ export async function createApp(
       if (meta.phase === "final") runTraceIds.delete(meta.executionId);
     }
   };
-  const persistExecutionHistoryRecordUnsettled = async (record: ExecutionHistoryRecord, meta: PersistExecutionHistoryMeta): Promise<boolean> => {
+  const persistExecutionHistoryRecordUnsettled = async (given: ExecutionHistoryRecord, meta: PersistExecutionHistoryMeta): Promise<boolean> => {
     if (meta.phase === "final") await progressWrites.settle(meta.executionId);
+    // v80 — every write of a run that a person started says who (the store keeps the first one).
+    const starter = given.triggeredByUserId ?? runStarters.get(meta.executionId);
+    const record: ExecutionHistoryRecord = starter ? { ...given, triggeredByUserId: starter } : given;
     const active = activeExecutions.get(meta.executionId);
     // A stopped run keeps the canceled record the cancel route wrote. A
     // timed-out run is still saved: it ends as an error with its node results.
@@ -2601,6 +2608,14 @@ export async function createApp(
   const runReleases = new Map<string, { channel: ReleaseChannel; version: number | null }>();
   // v79 — the person a run's session memory was kept to, recorded on its history so a retry or a replay keeps it.
   const runSessionOwners = new Map<string, string>();
+  // v80 — the person who started a run (their user id), recorded with each of its history writes until the final one.
+  const runStarters = new Map<string, string>();
+  const noteRunStarter = (executionId: string | undefined, starter: string | null) => {
+    if (!executionId || !starter) return;
+    runStarters.delete(executionId);
+    if (runStarters.size >= 5_000) runStarters.delete(runStarters.keys().next().value!);
+    runStarters.set(executionId, starter);
+  };
 
   // The run's trace span (only while tracing is on): it covers the host's work around the engine as well, and the
   // engine's node, agent and tool spans are its children.
@@ -2642,7 +2657,9 @@ export async function createApp(
     const channel: ReleaseChannel = input.channel ?? "draft";
     const releaseVersion = channel === "production" ? (input.releaseVersion !== undefined ? input.releaseVersion : releaseService.versionOf(input.workflow)) : null;
     // Phase 15.4 — the run's history records which published version it ran, so a retry runs that version again.
+    const starter = runStarterId(input);
     if (input.executionId && !input.replay) {
+      noteRunStarter(input.executionId, starter);
       if (runReleases.size >= 5_000) runReleases.delete(runReleases.keys().next().value!);
       runReleases.set(input.executionId, { channel, version: releaseVersion });
       if (input.sessionOwner) {
@@ -2890,7 +2907,9 @@ export async function createApp(
                 // Who the run's budgets are matched against, kept for the resumed part (not the approver).
                 budgetSubject: input.budgetSubject ?? (({ userEmail, userId }) => ({ userEmail, userId }))(runBudgetContext(input)),
                 // Whose sessions the run uses, so the resumed part (decided by someone else) reads the same ones.
-                ...(input.sessionOwner ? { sessionOwner: input.sessionOwner } : {})
+                ...(input.sessionOwner ? { sessionOwner: input.sessionOwner } : {}),
+                // v80 — and who started it, so the run stays theirs after someone else decides.
+                ...(starter ? { triggeredByUserId: starter } : {})
               })
             }, queueFence ? { fence: queueFence } : {});
             if (!pausedHere) {
@@ -3312,6 +3331,14 @@ export async function createApp(
     /** 12.6 — a gateway call's run: its usage is the client's and counts toward the toolset's project. */
     gatewayUsage?: RunWorkflowExecutionInput["gatewayUsage"];
   }) => {
+    try {
+      await persistExecutionHistoryOnce(input);
+    } finally {
+      // The record has it now; a resume notes it again from the paused state.
+      runStarters.delete(input.executionId);
+    }
+  };
+  const persistExecutionHistoryOnce = async (input: Parameters<typeof persistExecutionHistory>[0]) => {
     if (input.result.status === "waiting_approval") {
       // The resumed run is recorded apart: what the children spent so far is recorded now.
       await subWorkflowSpend.take(input.executionId)?.closeDetached();
@@ -3995,6 +4022,7 @@ export async function createApp(
             completedAt: new Date().toISOString(),
             triggerType: run.triggerType,
             triggeredBy: run.triggeredBy,
+            triggeredByUserId: runStarterId(run),
             // A run that threw has no redaction of what it revealed: a workflow with a Reveal node keeps no input.
             ...(hasRevealNode(run.workflow) ? {} : { inputJson: redactSensitiveInput(spec.history.requestInput) }),
             customData: spec.history.customData,
@@ -4057,17 +4085,17 @@ export async function createApp(
    * toolset's project.
    */
   /** A run's budget user from its trigger's name (paused states written before the subject was kept). */
-  // Whose sessions a run by this person uses, when they are kept to the person: operators, and anyone who runs the
-  // workflow only through a share with them, also with a key of their own (run-editor-options.ts personalSessionOwner).
-  // Other API keys and service accounts keep the workflow's sessions.
+  // Whose sessions a run by this person uses, when they are kept to the person: anyone who runs or reads the workflow
+  // only through a share with them (any role, also with a key of their own), and a signed-in person who may not edit
+  // it (run-editor-options.ts personalSessionOwner). Other API keys and service accounts keep the workflow's sessions.
   const sessionOwnerFor = async (user: SafeUser, workflow: Workflow): Promise<string | undefined> => {
-    // A builder who reads the workflow only through a share with them (a read share too: a signed-in chat needs only
-    // read) is kept to their own sessions, as are those who may run it only through such a share.
+    if (user.serviceAccount) return undefined;
+    // A read share counts too: a signed-in chat needs only read.
     const shareOnly =
-      user.role === "builder" && !user.serviceAccount
-        ? (await rbacService.runsOnlyThroughUserShare(user, workflow)) || (await rbacService.readsOnlyThroughUserShare(user, workflow))
-        : false;
-    return personalSessionOwner(user, shareOnly);
+      (await rbacService.onlyThroughUserShare(user, workflow, "workflow:execute")) ||
+      (await rbacService.onlyThroughUserShare(user, workflow, "workflow:read"));
+    const mayEdit = shareOnly ? false : await runAccess.mayEdit(user, workflow);
+    return personalSessionOwner(user, { shareOnly, mayEdit });
   };
   const sessionOwnerOptionFor = async (user: SafeUser, workflow: Workflow): Promise<{ sessionOwner?: string }> => {
     const owner = await sessionOwnerFor(user, workflow);
@@ -4284,6 +4312,7 @@ export async function createApp(
           startedAt: new Date().toISOString(),
           triggerType: spec.run.triggerType,
           triggeredBy: spec.run.triggeredBy,
+          triggeredByUserId: runStarterId(spec.run),
           // Held back for a workflow with a Reveal node, as the run's progress does (see createProgressTrackingHooks).
           ...(hasRevealNode(spec.run.workflow) ? {} : { inputJson: redactSensitiveInput(tracked.requestInput) }),
           customData: tracked.customData,
@@ -4304,6 +4333,7 @@ export async function createApp(
             completedAt: new Date().toISOString(),
             triggerType: spec.run.triggerType,
             triggeredBy: spec.run.triggeredBy,
+            triggeredByUserId: runStarterId(spec.run),
             inputJson: redactSensitiveInput((spec.progress ?? spec.history).requestInput),
             customData: (spec.progress ?? spec.history).customData,
             error
@@ -4323,7 +4353,8 @@ export async function createApp(
       // The history input travels redacted, as the history stores it (the worker only writes it there).
       const dispatched: DispatchedRunSpec = {
         ...spec,
-        run: { ...run, policyActor: dispatchedPolicyActor(run.policyActor) },
+        // v80 — who started the run crosses as an id, whatever the worker makes of the policy actor.
+        run: { ...run, policyActor: dispatchedPolicyActor(run.policyActor), triggeredByUserId: runStarterId(run) },
         progress: spec.progress ? { ...spec.progress, requestInput: redactSensitiveInput(spec.progress.requestInput) } : spec.progress,
         history: { ...spec.history, requestInput: redactSensitiveInput(spec.history.requestInput) }
       };
@@ -4758,18 +4789,15 @@ export async function createApp(
     listWorkflowIdsSharedToProject: async (projectId) => (await store.listWorkflowsSharedToProject(projectId)).map((share) => share.workflowId),
     projectExists: async (projectId) => Boolean(await store.getProject(projectId)),
     listWorkflowIdsSharedToUser: async (userId) => (await store.listWorkflowsSharedToUser(userId)).map((share) => share.workflowId),
-    readsOnlyThroughUserShare: async (user, workflow) => await rbacService.readsOnlyThroughUserShare(user, workflow),
+    readsOnlyThroughUserShare: async (user, workflow) => await rbacService.onlyThroughUserShare(user, workflow, "workflow:read"),
     // Who started a run (its history, or the paused state of a run that has none yet) and whose sessions it used.
     getRunOwner: async (executionId) => {
       const history = await store.getExecutionHistory(executionId);
-      const paused = history ? null : await store.getWorkflowExecutionState(executionId);
-      const started = history ?? paused;
-      if (!started) return null;
-      // A paused run keeps whose sessions it uses in its state until its history records it.
-      const pausedOwner = paused ? asRecord(paused.state).sessionOwner : undefined;
-      const sessionOwner = (await store.getExecutionSessionOwner(executionId)) ?? (typeof pausedOwner === "string" ? pausedOwner : null);
-      return { triggeredBy: started.triggeredBy ?? null, sessionOwner };
-    }
+      // A paused run has its history row (written when it paused); one without it is nobody's own, as the stores'
+      // approvals lists judge it (db/own-runs-sql.ts).
+      if (!history) return (await store.getWorkflowExecutionState(executionId)) ? { triggeredByUserId: null, sessionOwner: null } : null;
+      return { triggeredByUserId: await store.getExecutionStarter(executionId), sessionOwner: await store.getExecutionSessionOwner(executionId) };
+    },
   });
   // Phase 9.1 — built-in persistent vector store. A run sees the knowledge
   // bases of its own project and the shared ones without a project; any other
@@ -5131,7 +5159,10 @@ export async function createApp(
     // Phase 15.6 — a guard policy simulation replays in projects its starter can read (models from the tape, no side effects).
     if (permission === "workflow:read") return actor && (await runAccess.workflow(actor, workflowId, "workflow:read")).ok ? actor : null;
     if (!actor || !(await runAccess.workflow(actor, workflowId, "workflow:execute")).ok) return null;
-    return permission === "workflow:execute" || (await runAccess.workflow(actor, workflowId, permission)).ok ? actor : null;
+    if (permission === "workflow:execute") return actor;
+    // Write means the one edit rule: a builder role and workflow:write (runAccess.mayEdit).
+    const forEditCheck = await store.getWorkflow(workflowId);
+    return forEditCheck && (await runAccess.mayEdit(actor, forEditCheck)) ? actor : null;
   };
 
   const evalService = new EvalService(store, async (input) => {
@@ -5768,6 +5799,30 @@ export async function createApp(
     clearInterval(credentialExpiryTimer);
   });
 
+  /**
+   * v80 — who started a paused run that recorded no starter's user id: its history's (migration 80 set it on the runs
+   * recorded before, or left it empty when it could tell nobody). A run paused with no history row follows migration
+   * 80's rule: its first approval request's requester (`firstRequester`, by user id, else by email) or, with no request,
+   * the paused row's `triggeredBy`; that names the account with that user id, or with that email when the account is
+   * older than the run.
+   */
+  const pausedRunStarter = async (
+    executionId: string,
+    hasHistory: boolean,
+    firstRequester: { userId: string | null; email: string | null } | null,
+    triggeredBy: string | null,
+    startedAt: string | null
+  ): Promise<string | null> => {
+    if (hasHistory) return await store.getExecutionStarter(executionId);
+    if (firstRequester?.userId) return (await store.getUserById(firstRequester.userId))?.id ?? null;
+    const ref = firstRequester ? firstRequester.email : triggeredBy;
+    if (!ref) return null;
+    const byId = await store.getUserById(ref);
+    if (byId) return byId.id;
+    if (!ref.includes("@") || !startedAt) return null;
+    const byEmail = await store.getUserByEmail(ref);
+    return byEmail && Date.parse(byEmail.createdAt) <= Date.parse(startedAt) ? byEmail.id : null;
+  };
   // Phase 11.2 — resuming a decided approval: inline, or on the execution queue when it is in use.
   const approvalResumes = new ApprovalResumeRunner();
   // A timed-out approval whose run cannot continue: the run ends as an error and its paused state is cleared.
@@ -5956,6 +6011,10 @@ export async function createApp(
         // 12.6 — a run an MCP gateway call started resumes under the same toolset/client Guard stack (pinned versions),
         // and its history keeps the record, so a retry or replay of it applies the stack again.
         const resumeHistory = await store.getExecutionHistory(job.executionId);
+        // Who started the run: its first approval request's requester (an older build wrote the approver into a
+        // resumed run's triggered_by, also of the paused row when it paused again), else as the paused row records it.
+        const [firstRequest] = await store.listApprovalRequestsForExecution(job.executionId);
+        const startedBy = firstRequest?.requestedBy ?? pending.triggeredBy ?? resumeHistory?.triggeredBy ?? undefined;
         const gatewayGuard =
           parseGatewayGuardStack(state.gatewayGuard) ?? parseGatewayGuardStack(asRecord(resumeHistory?.customData)[GATEWAY_GUARD_CUSTOM_DATA_KEY]);
         // 12.6 — and its usage stays the gateway client's and counts toward the toolset's project (not the approver's).
@@ -5977,11 +6036,23 @@ export async function createApp(
           budgetSubject: state.budgetSubject ?? budgetSubjectOf(pending.triggeredBy ?? undefined),
           // A run kept to one person's sessions stays so after the approval, whoever decided it.
           ...(typeof state.sessionOwner === "string" && state.sessionOwner ? { sessionOwner: state.sessionOwner } : {}),
+          // v80 — and stays the person's who started it, not the approver's (a run paused before v80: see pausedRunStarter).
+          triggeredByUserId:
+            typeof state.triggeredByUserId === "string" && state.triggeredByUserId
+              ? state.triggeredByUserId
+              : await pausedRunStarter(
+                  job.executionId,
+                  resumeHistory !== null,
+                  firstRequest ? { userId: firstRequest.requestedByUserId, email: firstRequest.requestedBy } : null,
+                  pending.triggeredBy ?? null,
+                  pending.startedAt ?? null
+                ),
           policyActor: actor,
           workflow: resumeWorkflow,
           executionId: job.executionId,
           triggerType: "approval_resume",
-          triggeredBy: actedBy,
+          // "Started by" stays who started the run; the approver is recorded on the decision (approval_requests).
+          triggeredBy: startedBy,
           // The resumed run is its own span, linked (not parented) to the node that paused, hours or days earlier.
           ...(readTraceCarrier(state.traceContext) ? { traceLinks: [readTraceCarrier(state.traceContext)!] } : {}),
           resumeState: { ...state, workflow: resumeWorkflow },
@@ -5999,7 +6070,7 @@ export async function createApp(
           workflow: state.workflow,
           result,
           triggerType: "approval_resume",
-          triggeredBy: actedBy,
+          triggeredBy: startedBy,
           ...(resumeCustomData ? { customData: { ...(result.customData ?? {}), ...resumeCustomData } } : {}),
           ...(gatewayUsage ? { gatewayUsage } : {}),
           requestInput: {
@@ -6049,7 +6120,8 @@ export async function createApp(
         // error); the attempts are for a lost worker, re-run only if nothing completed since the resume started.
         maxAttempts: 3,
         triggerType: "approval_resume",
-        triggeredBy: job.actedBy,
+        // The run's starter, as the run records them; the approver is on the decision.
+        triggeredBy: pending?.triggeredBy ?? job.actedBy,
         // The queue's stuck-job threshold follows the run's own timeout.
         executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS,
         resume: job
@@ -6120,6 +6192,11 @@ export async function createApp(
     access: async (user, workflowId, permission) => await runAccess.workflow(user, workflowId, permission),
     // Release requests carry replay results of other people's runs: not for someone who sees only their own runs.
     readableWorkflowIds: async (user) => await runAccess.runVisibleWorkflowIds(user),
+    // Nor do the publish preview's and the release history's gate details.
+    seesAllRuns: async (user, workflowId) => {
+      const releasedWorkflow = await store.getWorkflow(workflowId);
+      return !releasedWorkflow || await runAccess.seesAllRuns(user, releasedWorkflow);
+    },
     audit: async (event) => {
       await auditService.record(event);
     },
@@ -6189,17 +6266,23 @@ export async function createApp(
       return { ok: false, status: 400, error: "channel can only be draft" };
     }
     const viaKey = (await resolveRequestAuth(request))?.credential === "api_key";
-    if (!viaKey) {
-      // A signed-in person who may edit the workflow runs what they see (the draft). One who may only run it (an
-      // operator, a share-only runner) runs the released version, as an API key does: never a draft nobody released.
-      if ((await runAccess.workflow(user, workflowId, "workflow:write")).ok) return { channel: "draft" };
-      if (asked === "draft") return { ok: false, status: 403, error: "Running the draft needs workflow:write on the workflow." };
-      return { channel: "production" };
+    if (viaKey && asked === undefined) return { channel: "production" };
+    const read = await runAccess.workflow(user, workflowId, "workflow:read");
+    if (!read.ok) return { ok: false, status: read.status, error: read.error };
+    // Someone who may edit the workflow (a builder role and workflow:write: runAccess.mayEdit) runs what they see in
+    // the editor (the draft), and may ask for it with a key. One who may only run it (an operator, also with an editor
+    // membership; a share-only runner) runs the released version, as an API key does: never a draft nobody released.
+    if (await runAccess.mayEdit(user, read.workflow)) return { channel: "draft" };
+    if (asked === "draft") {
+      return {
+        ok: false,
+        status: 403,
+        error: viaKey
+          ? "Running the draft with an API key (channel=draft) needs a builder role and workflow:write on the workflow."
+          : "Running the draft needs a builder role and workflow:write on the workflow."
+      };
     }
-    if (asked === undefined) return { channel: "production" };
-    const write = await runAccess.workflow(user, workflowId, "workflow:write");
-    if (!write.ok) return { ok: false, status: write.status, error: "Running the draft with an API key (channel=draft) needs workflow:write on the workflow." };
-    return { channel: "draft" };
+    return { channel: "production" };
   };
 
   // 13.3 — the leader prunes (every instance did before); HA off, every instance is its own leader, as before.
@@ -10818,7 +10901,7 @@ export async function createApp(
     if (!access.ok) return denyRunAccess(reply, access);
     const workflow = access.workflow;
     // v78 — the people it is shared with are listed to whoever may manage its shares.
-    const manages = user.role === "admin" || (await rbacService.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite"));
+    const manages = await rbacService.mayManageWorkflowShares(user, workflow);
     return {
       shares: await rbacService.listWorkflowShares(workflow.id),
       ...(manages ? { userShares: await workflowUserShareViews(workflow.id) } : {})
@@ -10828,15 +10911,13 @@ export async function createApp(
   app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/shares", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    // Unreadable reads as missing; sharing needs write on the owning project.
-    const access = await runAccess.workflow(user, request.params.id, "workflow:read");
-    if (!access.ok) return denyRunAccess(reply, access);
-    const workflow = access.workflow;
-    const owningProject = workflow.projectId ?? "default";
-    if (!await rbacService.can(user, owningProject, "workflow:write") && user.role !== "admin") {
-      reply.code(403);
-      return { error: "Only users with workflow:write on the owning project can share the workflow" };
-    }
+    // Unreadable reads as missing; sharing with another project takes what sharing with people takes: project:invite on
+    // the owning project and the member-change step-up (workflowShareManager).
+    const managed = await workflowShareManager(user, request.params.id);
+    if (!managed.ok) return denyRunAccess(reply, managed);
+    if (!await requireStepUp(request, reply, "project_member.change")) return;
+    const workflow = managed.workflow;
+    const owningProject = workflow.projectId ?? DEFAULT_PROJECT_ID;
     const parsed = workflowShareSchema.safeParse(request.body);
     if (!parsed.success) {
       reply.code(400);
@@ -10873,14 +10954,10 @@ export async function createApp(
     async (request, reply) => {
       const user = await requireRole(request, reply, ["viewer"]);
       if (!user) return;
-      const access = await runAccess.workflow(user, request.params.id, "workflow:read");
-      if (!access.ok) return denyRunAccess(reply, access);
-      const workflow = access.workflow;
-      const owningProject = workflow.projectId ?? "default";
-      if (!await rbacService.can(user, owningProject, "workflow:write") && user.role !== "admin") {
-        reply.code(403);
-        return { error: "Insufficient permissions" };
-      }
+      const managed = await workflowShareManager(user, request.params.id);
+      if (!managed.ok) return denyRunAccess(reply, managed);
+      if (!await requireStepUp(request, reply, "project_member.change")) return;
+      const workflow = managed.workflow;
       const ok = await rbacService.unshareWorkflow(workflow.id, request.params.projectId);
       if (!ok) {
         reply.code(404);
@@ -10902,8 +10979,9 @@ export async function createApp(
   // ---------------------------------------------------------------------------
   // v78 — Workflow shares with people
   // ---------------------------------------------------------------------------
-  // Who may manage them: users with workflow:write on the workflow's own project (or admins), as for project shares.
-  // A share gives read or execute, never write, and never more than the person's role (`effectiveAccess`).
+  // Who may manage them: users with project:invite on the workflow's own project (or admins), as for adding a project
+  // member (workflowShareManager). A share gives read or execute, never write, and never more than the person's role
+  // (`effectiveAccess`).
 
   const workflowUserShareSchema = z
     .object({
@@ -10924,9 +11002,8 @@ export async function createApp(
     // project member takes: project:invite on the owning project (and the same step-up for changes).
     const access = await runAccess.workflow(user, workflowId, "workflow:read");
     if (!access.ok) return access;
-    const owningProject = access.workflow.projectId ?? DEFAULT_PROJECT_ID;
-    if (user.role !== "admin" && !(await rbacService.can(user, owningProject, "project:invite"))) {
-      return { ok: false, status: 403, error: "Only users who may invite members to the workflow's project can share it with people" };
+    if (!(await rbacService.mayManageWorkflowShares(user, access.workflow))) {
+      return { ok: false, status: 403, error: "Only users who may invite members to the workflow's project can share it with people or other projects" };
     }
     return { ok: true, workflow: access.workflow };
   };
@@ -11231,25 +11308,22 @@ export async function createApp(
   });
 
   // What the signed-in user may do with a workflow, so the editor shows only the controls that work: edit (save,
-  // add or remove nodes), run (operator and up, with workflow:execute: operators run the saved workflow), and manage
-  // its shares.
+  // add or remove nodes: runAccess.mayEdit, a builder role and workflow:write), run (operator and up, with
+  // workflow:execute: operators run the saved workflow), and manage its shares.
   app.get<{ Params: { id: string } }>("/api/workflows/:id/access", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
     const access = await runAccess.workflow(user, request.params.id, "workflow:read");
     if (!access.ok) return denyRunAccess(reply, access);
     const workflow = access.workflow;
-    const isBuilder = hasRequiredRole(user, ["builder"]);
-    const canWrite = isBuilder && (await runAccess.workflow(user, workflow.id, "workflow:write")).ok;
+    const canWrite = await runAccess.mayEdit(user, workflow);
     const canExecute = hasRequiredRole(user, ["operator"]) && (await runAccess.workflow(user, workflow.id, "workflow:execute")).ok;
-    const owningProject = workflow.projectId ?? DEFAULT_PROJECT_ID;
-    // The same checks as the share routes: sharing with people takes project:invite (workflowShareManager); sharing
-    // with another project takes workflow:write on the owning project.
-    const canShare = user.role === "admin" || (await rbacService.can(user, owningProject, "project:invite"));
-    const canShareWithProjects = user.role === "admin" || (await rbacService.can(user, owningProject, "workflow:write"));
+    // The same check as the share routes: sharing with people or with another project takes project:invite on the
+    // owning project (workflowShareManager).
+    const canShare = await rbacService.mayManageWorkflowShares(user, workflow);
     // A share with the person is all they have: they see only their own runs of it.
     const ownRunsOnly = !(await runAccess.seesAllRuns(user, workflow));
-    return { workflowId: workflow.id, role: user.role, canRead: true, canEdit: canWrite, canRun: canExecute, canShare, canShareWithProjects, ownRunsOnly };
+    return { workflowId: workflow.id, role: user.role, canRead: true, canEdit: canWrite, canRun: canExecute, canShare, ownRunsOnly };
   });
 
   app.get<{ Params: { id: string } }>("/api/workflows/:id/variables", async (request, reply) => {
@@ -12587,7 +12661,7 @@ export async function createApp(
     loadWorkflow: async (id) => await store.getWorkflow(id) ?? null,
     loadRun: async (executionId) => await store.getExecutionHistory(executionId) ?? await store.getWorkflowExecutionState(executionId) ?? null,
     runAccess,
-    canSeeProjectAccounts: async (user, workflow) => user.role === "admin" || await rbacService.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite"),
+    canSeeProjectAccounts: async (user, workflow) => rbacService.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite"),
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     dispatch: dispatchApprovalResume,
     releases: releaseService,
@@ -12642,10 +12716,12 @@ export async function createApp(
         details: parsed.error.issues
       };
     }
-    const refusedOptions = editorRunOptionsRefused(user.role, request.body);
-    if (refusedOptions.length > 0) {
+    // The editor's options: refused below builder at once, and below once the workflow is known unless the person may
+    // edit it.
+    const roleRefused = editorRunOptionsRefused(roleMayEdit(user.role), request.body);
+    if (roleRefused.length > 0) {
       reply.code(403);
-      return editorRunOptionsError(refusedOptions);
+      return editorRunOptionsError(roleRefused);
     }
 
     const workflow = await selectWebhookWorkflow(
@@ -12665,6 +12741,12 @@ export async function createApp(
     }
     const executeAccess = await runAccess.workflow(user, workflow.id, "workflow:execute");
     if (!executeAccess.ok) return denyRunAccess(reply, executeAccess);
+    const mayEdit = await runAccess.mayEdit(user, executeAccess.workflow);
+    const refusedOptions = editorRunOptionsRefused(mayEdit, request.body);
+    if (refusedOptions.length > 0) {
+      reply.code(403);
+      return editorRunOptionsError(refusedOptions);
+    }
 
     const executionId = crypto.randomUUID();
     const result = await runDispatcher.run(
@@ -12687,7 +12769,7 @@ export async function createApp(
           triggeredBy: user.email,
           // Operators run the selected workflow: no pinned data, and no longer than the deployment's timeout.
           ...savedRunLimits(
-            user.role,
+            mayEdit,
             normalizeExecutionTimeoutMs(parsed.data.executionTimeoutMs, parsed.data.execution_timeout_ms, config.WORKFLOW_EXECUTION_TIMEOUT_MS),
             config.WORKFLOW_EXECUTION_TIMEOUT_MS
           )
@@ -13119,7 +13201,14 @@ export async function createApp(
       if (!user) return;
       const access = await runAccess.workflow(user, request.params.workflowId, "workflow:execute");
       if (!access.ok) return denyRunAccess(reply, access);
-      const workflow = access.workflow;
+      // Someone who may edit the workflow runs the draft, as in the editor; anyone else (a builder who may only run
+      // it) runs the released version without pinned data, within the deployment's timeout, as on /execute.
+      const mayEdit = await runAccess.mayEdit(user, access.workflow);
+      const workflow = mayEdit ? access.workflow : await productionWorkflow(access.workflow.id);
+      if (!workflow) {
+        reply.code(409);
+        return productionRefusalBody(await releaseService.productionRefusal(access.workflow.id), "Workflow not found");
+      }
       const manualNode = workflow.nodes.find((n) => n.type === "manual_trigger");
       if (!manualNode) {
         reply.code(400);
@@ -13131,8 +13220,8 @@ export async function createApp(
         {
           v: DISPATCH_SPEC_VERSION,
           run: {
-            // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
-            channel: "draft",
+            // Phase 15.4: not production traffic, so an editor's run is the draft.
+            channel: mayEdit ? "draft" : "production",
             policyActor: user,
             workflow,
             directInput: { trigger_type: "manual", trigger_node_id: manualNode.id, ...body },
@@ -13140,7 +13229,8 @@ export async function createApp(
             ...await sessionOwnerOptionFor(user, workflow),
             executionId,
             triggerType: "manual",
-            triggeredBy: user.email
+            triggeredBy: user.email,
+            ...(mayEdit ? {} : savedRunLimits(false, config.WORKFLOW_EXECUTION_TIMEOUT_MS, config.WORKFLOW_EXECUTION_TIMEOUT_MS))
           },
           progress: { requestInput: body },
           history: { requestInput: body }
@@ -13257,12 +13347,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         return { error: deactivated ? DEACTIVATED_MESSAGE : "Form not found" };
       }
       const cfg = asRecord(found.node.config);
+      // A signed-in submission is the submitter's own run, kept to their sessions where theirs are kept apart.
+      let submitter: { triggeredByUserId?: string; sessionOwner?: string } = {};
       if (cfg.authMode === "session") {
         const user = await requireRole(request, reply, ["viewer"]);
         if (!user) return;
         // Session forms are for people who can see the workflow's project.
         const access = await runAccess.workflow(user, found.workflow.id, "workflow:read", "Form");
         if (!access.ok) return denyRunAccess(reply, access);
+        submitter = { triggeredByUserId: user.id, ...await sessionOwnerOptionFor(user, found.workflow) };
       }
       // Production's version has unfinished settings: the form still shows, a submission starts no run.
       const paused = await releaseService.pausedRefusal(found.workflow);
@@ -13286,6 +13379,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
               submitted_at: new Date().toISOString(),
               ...submission
             },
+            ...submitter,
             executionId,
             triggerType: "form",
             triggeredBy: "form-submitter"
@@ -13318,14 +13412,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const cfg = asRecord(chatNode.config);
       const authMode = typeof cfg.authMode === "string" ? cfg.authMode : "public";
       // A signed-in chat by a viewer, an operator or a share-only reader keeps its session memory to that person.
-      let chatSessionOwner: { sessionOwner?: string } = {};
+      let chatSessionOwner: { sessionOwner?: string; triggeredByUserId?: string } = {};
       if (authMode === "session") {
         const user = await requireRole(request, reply, ["viewer"]);
         if (!user) return;
         // Session chats are for people who can see the workflow's project.
         const access = await runAccess.workflow(user, workflow.id, "workflow:read");
         if (!access.ok) return denyRunAccess(reply, access);
-        chatSessionOwner = await sessionOwnerOptionFor(user, workflow);
+        // The signed-in person's run (v80): it counts among their own runs.
+        chatSessionOwner = { ...await sessionOwnerOptionFor(user, workflow), triggeredByUserId: user.id };
       } else if (authMode === "bearer") {
         const secretRef = toSecretReference(cfg.secretRef);
         const secret = await secretService.resolveSecret(secretRef);
@@ -13721,10 +13816,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         details: parsed.error.issues
       };
     }
-    const refusedOptions = editorRunOptionsRefused(user.role, request.body);
-    if (refusedOptions.length > 0) {
+    // The editor's options: refused below builder at once, and below once the workflow is known unless the person may
+    // edit it.
+    const roleRefused = editorRunOptionsRefused(roleMayEdit(user.role), request.body);
+    if (roleRefused.length > 0) {
       reply.code(403);
-      return editorRunOptionsError(refusedOptions);
+      return editorRunOptionsError(roleRefused);
     }
 
     const workflow = await selectWebhookWorkflow(
@@ -13744,6 +13841,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }
     const executeAccess = await runAccess.workflow(user, workflow.id, "workflow:execute");
     if (!executeAccess.ok) return denyRunAccess(reply, executeAccess);
+    const mayEdit = await runAccess.mayEdit(user, executeAccess.workflow);
+    const refusedOptions = editorRunOptionsRefused(mayEdit, request.body);
+    if (refusedOptions.length > 0) {
+      reply.code(403);
+      return editorRunOptionsError(refusedOptions);
+    }
     // 12.6 (D8) — a used-up block budget refuses the run with a 402 before the stream starts.
     await admitRunBudget({ workflow, triggerType: "webhook_api_stream", triggeredBy: user.email, policyActor: user });
 
@@ -13818,7 +13921,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             triggeredBy: user.email,
             // Operators run the selected workflow: no pinned data, and no longer than the deployment's timeout.
             ...savedRunLimits(
-              user.role,
+              mayEdit,
               normalizeExecutionTimeoutMs(parsed.data.executionTimeoutMs, parsed.data.execution_timeout_ms, config.WORKFLOW_EXECUTION_TIMEOUT_MS),
               config.WORKFLOW_EXECUTION_TIMEOUT_MS
             )
@@ -15800,6 +15903,33 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     return { presets: mcpCatalogService.presets(), catalog: mcpCatalogService.status() };
   });
 
+  // Integration catalog: registered MCP servers' tools and stored OpenAPI specs as palette entries.
+  registerIntegrationCatalogRoutes({
+    app,
+    store,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    can: async (user, projectId, permission) => await rbacService.can(user, projectId, permission),
+    auditUser: async (request, user, event) => await audit(request, user, event),
+    fetchSpec: (url, init) => guardedFetch(url, init, { config: outboundGuard, resolver: nodeDnsResolver, maxRedirects: 3 }),
+    hiddenAdapterIds: new Set([WORKFLOW_TOOL_ADAPTER_ID]),
+    listCallableMcpTools: async (server, user, projectId) => {
+      const snapshot = server.currentSnapshotId ? await store.getMcpToolSnapshot(server.currentSnapshotId) : null;
+      if (!snapshot) return [];
+      const marked = markMcpTools(snapshot.tools, {
+        rules: await store.listMcpToolPolicies(),
+        classifications: await store.listMcpToolClassifications(server.id),
+        role: user.role,
+        projectId,
+        adapterId: server.adapterId,
+        registryServerId: server.id,
+        serverLabel: server.name
+      });
+      return marked
+        .filter((tool) => tool.access.allowed)
+        .map((tool) => ({ name: tool.name, ...(typeof tool.description === "string" ? { description: tool.description } : {}) }));
+    }
+  });
+
   // Phase 10.6 — config import, catalog status and the playground.
   registerMcpOnboardingRoutes({
     app,
@@ -16400,6 +16530,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       ...(hooks ? { hooks } : {}),
       spendAttempt: context,
       policyActor: enqueuedBy,
+      // v80 — the person who queued it, by id (their email may have changed since).
+      triggeredByUserId: enqueuedBy?.id ?? null,
       elicitationsForWorkflow: true,
       workflow,
       executionId: payload.executionId,
@@ -16408,14 +16540,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       systemPrompt: payload.systemPrompt,
       userPrompt: payload.userPrompt,
       sessionId: payload.sessionId,
-      // Decided when the job runs, as the run routes decide it: an operator's (or share-only runner's) queued run keeps
-      // session memory to them, uses no pinned data and runs no longer than the deployment's timeout.
+      // Decided when the job runs, as the run routes decide it: the queued run of someone who may not edit the workflow
+      // (an operator, a share-only runner) keeps session memory to them, uses no pinned data and runs no longer than
+      // the deployment's timeout.
       ...(enqueuedBy ? await sessionOwnerOptionFor(enqueuedBy, workflow) : {}),
       triggerType: payload.triggerType ?? "queue",
       triggeredBy: payload.triggeredBy,
       ...(enqueuedBy
         ? savedRunLimits(
-            enqueuedBy.role,
+            await runAccess.mayEdit(enqueuedBy, workflow),
             normalizeExecutionTimeoutMs(payload.executionTimeoutMs, undefined, config.WORKFLOW_EXECUTION_TIMEOUT_MS),
             config.WORKFLOW_EXECUTION_TIMEOUT_MS
           )
@@ -16572,13 +16705,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   // keeps no queue routes, as before.
   if (queueService || store instanceof PostgresStore) {
     app.get("/api/queue/depth", async (request, reply) => {
-      const user = await requireRole(request, reply, ["operator", "builder", "admin"]);
+      const user = await requireRole(request, reply, ["operator"]);
       if (!user) return;
       return await queueProducer.getDepth();
     });
 
     app.get("/api/queue/dlq", async (request, reply) => {
-      const user = await requireRole(request, reply, ["operator", "builder", "admin"]);
+      const user = await requireRole(request, reply, ["operator"]);
       if (!user) return;
       const limit = typeof (request.query as Record<string, unknown>).limit === "string"
         ? Math.min(200, Math.max(1, Number((request.query as Record<string, unknown>).limit)))
@@ -16590,7 +16723,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     app.post<{ Params: { id: string }; Body: unknown }>(
       "/api/workflows/:id/enqueue",
       async (request, reply) => {
-        const user = await requireRole(request, reply, ["operator", "builder", "admin"]);
+        const user = await requireRole(request, reply, ["operator"]);
         if (!user) return;
 
         const access = await runAccess.workflow(user, request.params.id, "workflow:execute");
@@ -16816,6 +16949,45 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     sendEmail: async (message) => await notificationService.sendDirectEmail(message)
   });
 
+  // Describe-it builder: a description in, a workflow draft preview out. The studio saves it as a new workflow.
+  registerWorkflowBuilderRoutes({
+    app,
+    enabled: config.WORKFLOW_BUILDER_ENABLED !== false,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    audit: async (request, user, event) => await audit(request, user, event),
+    canCreateIn: async (user, projectId) => {
+      const access = await runAccess.project(user, projectId, "workflow:write");
+      return access.ok ? { ok: true } : { ok: false, status: access.status, error: access.error };
+    },
+    usableSecrets: async (user, projectId) =>
+      await filterAsync(await secretService.listSecrets({ projectId }), (secret) => userCanUseSecret(user, secret)),
+    canUseSecret: async (user, secretId) => {
+      const row = await store.getSecret(secretId);
+      return Boolean(row) && await userCanUseSecret(user, row!);
+    },
+    resolveSecretForUser,
+    providerRegistryFor: (projectId) => modelAllowlistService.registry(baseProviderRegistry, { projectId, source: "workflow_builder" }),
+    listTemplates: async () =>
+      await mapAsync(await store.listTemplates(), async (template) => {
+        // A template whose model node needs a provider is offered after the ones that run without a model.
+        let needsModel = false;
+        const full = await store.getTemplate(template.id);
+        try {
+          needsModel = full?.workflowJson ? computeTemplateDependencies(JSON.parse(full.workflowJson)).some((dep) => dep.kind === "provider") : false;
+        } catch {
+          needsModel = false;
+        }
+        return { ...template, featured: FEATURED_TEMPLATE_IDS.has(template.id), needsModel };
+      }),
+    prepareDraft: async (workflow) => {
+      // Like a duplicate or a template: trigger paths nobody uses, and no setting only an admin may make.
+      const withPaths = withUniqueTriggerPaths(workflow, await releaseService.usedRoutingKeys());
+      return { ...workflow, nodes: withoutTriggerTrust(withPaths).nodes };
+    },
+    isModelNotAllowed: (error) => isModelNotAllowedError(error),
+    redact: (text) => String(secretService.redact(text))
+  });
+
   app.get("/api/users", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin"]);
     if (!user) return;
@@ -16986,6 +17158,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
   // ── Phase 7.4: Workflow Templates & Sharing ───────────────────────────
 
+  // Sample data the starter templates call, so they run without setup.
+  registerSampleDataRoutes(app);
+
   // List templates (any authenticated user)
   app.get("/api/templates", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin", "builder", "operator", "viewer"]);
@@ -16993,25 +17168,18 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     const query = request.query as Record<string, string>;
     const category = query.category || undefined;
     const search = query.search || undefined;
+    // ?setup=none — only templates that run without setup (no model, key, server or service to configure).
+    const withoutSetupOnly = query.setup === "none";
     const pageRequest = pageRequestFromQuery(query);
-    const allTemplates = await store.listTemplates({ category, search });
-    // Paged: only the page is enriched below.
-    // In the gallery's order: featured first, then the store's category and name order.
-    const templatePage = pageRequest
-      ? pageOfById(
-          [...allTemplates].sort((a, b) => Number(FEATURED_TEMPLATE_IDS.has(b.id)) - Number(FEATURED_TEMPLATE_IDS.has(a.id))),
-          pageRequest,
-          (tpl) => `${FEATURED_TEMPLATE_IDS.has(tpl.id)}\u0000${tpl.category}\u0000${tpl.name}`
-        )
-      : null;
-    const templates = templatePage ? templatePage.items : allTemplates;
+    // The gallery's order: featured first, then the starters, then the store's category and name order.
+    const rank = (tpl: { id: string; category: string }) => (FEATURED_TEMPLATE_IDS.has(tpl.id) ? 0 : tpl.category === STARTER_TEMPLATE_CATEGORY ? 1 : 2);
+    const allTemplates = [...(await store.listTemplates({ category, search }))].sort((a, b) => rank(a) - rank(b));
     // Enrich each template with detected external dependencies (OpenAI key,
     // Pinecone, etc.) so the gallery can show "Requires: …" pills before the
     // user clicks Use Template. listTemplates returns metadata only, so we
     // fetch the full row per template to get the workflowJson. Template count
     // is small (~10s) and this read path is cold, so the extra cost is fine.
-    const enriched = [];
-    for (const tpl of templates) {
+    const enrich = async (tpl: (typeof allTemplates)[number]) => {
       const full = await store.getTemplate(tpl.id);
       let dependencies: ReturnType<typeof computeTemplateDependencies> = [];
       let thumbnailSvg = "";
@@ -17025,11 +17193,21 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         }
       }
       const featured = FEATURED_TEMPLATE_IDS.has(tpl.id);
-      enriched.push({ ...tpl, dependencies, thumbnailSvg, featured });
+      return { ...tpl, dependencies, thumbnailSvg, featured };
+    };
+    if (withoutSetupOnly) {
+      // The filter needs every template's dependencies, so all are enriched before the page is cut.
+      const enrichedAll = [];
+      for (const tpl of allTemplates) enrichedAll.push(await enrich(tpl));
+      const runnable = enrichedAll.filter((tpl) => tpl.dependencies.length === 0);
+      if (pageRequest) return pageOfById(runnable, pageRequest, (tpl) => `${rank(tpl)}\u0000${tpl.category}\u0000${tpl.name}`);
+      return { templates: runnable };
     }
-    // Featured templates float to the top of the gallery; everything else
-    // keeps the store's category+name order from listTemplates.
-    enriched.sort((a, b) => Number(b.featured) - Number(a.featured));
+    // Paged: only the page is enriched below.
+    const templatePage = pageRequest ? pageOfById(allTemplates, pageRequest, (tpl) => `${rank(tpl)}\u0000${tpl.category}\u0000${tpl.name}`) : null;
+    const templates = templatePage ? templatePage.items : allTemplates;
+    const enriched = [];
+    for (const tpl of templates) enriched.push(await enrich(tpl));
     if (templatePage) return { ...templatePage, items: enriched };
     return { templates: enriched };
   });
@@ -17119,21 +17297,49 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       .safeParse(request.body ?? {});
     if (!target.success) { reply.code(400); return { error: "Invalid payload", details: target.error.issues }; }
 
-    const imported = importWorkflowFromJson(template.workflowJson);
-    imported.id = crypto.randomUUID();
-    imported.name = `${template.name} (from template)`;
-    // The new workflow lands where the caller asks (default project), never
-    // in whatever project the template's JSON names.
-    imported.projectId = target.data.projectId ?? DEFAULT_PROJECT_ID;
-    imported.folderId = target.data.folderId;
-    delete imported.pinnedData;
-    // Phase 15.4 — like a duplicate, a workflow made from a template gets trigger paths nobody uses.
-    imported.nodes = withUniqueTriggerPaths(imported, await releaseService.usedRoutingKeys()).nodes;
-    // 12.2 — and, made by a builder, its triggers' default trust.
-    if (user.role !== "admin") imported.nodes = withoutTriggerTrust(imported).nodes;
-    const saveDenial = await workflowSaveDenial(user, imported);
-    if (saveDenial) return denyRunAccess(reply, saveDenial);
-    await store.upsertWorkflow(imported, { createdBy: user.id });
+    let companions: Workflow[];
+    try {
+      companions = templateCompanions(template.workflowJson);
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : "The template's companion workflows are invalid." };
+    }
+    // The new workflow, and each workflow it brings along (a sub-workflow it calls), gets a new id; its references follow.
+    const companionIds = new Map(companions.map((companion) => [companion.id, crypto.randomUUID()] as const));
+    const usedRoutingKeys = await releaseService.usedRoutingKeys();
+    const prepare = (workflow: Workflow, id: string, name: string): Workflow => {
+      const prepared = withRemappedWorkflowReferences({ ...workflow, id, name }, companionIds);
+      // The new workflow lands where the caller asks (default project), never
+      // in whatever project the template's JSON names.
+      prepared.projectId = target.data.projectId ?? DEFAULT_PROJECT_ID;
+      prepared.folderId = target.data.folderId;
+      delete prepared.pinnedData;
+      // Phase 15.4 — like a duplicate, a workflow made from a template gets trigger paths nobody uses.
+      prepared.nodes = withUniqueTriggerPaths(prepared, usedRoutingKeys).nodes;
+      // The paths it takes are not given to the next workflow of this template.
+      for (const entry of productionRoutingKeys(prepared)) usedRoutingKeys.add(entry.key);
+      // 12.2 — and, made by a builder, its triggers' default trust.
+      if (user.role !== "admin") prepared.nodes = withoutTriggerTrust(prepared).nodes;
+      return prepared;
+    };
+    const imported = prepare(importWorkflowFromJson(template.workflowJson), crypto.randomUUID(), `${template.name} (from template)`);
+    const preparedCompanions = companions.map((companion) => prepare(companion, companionIds.get(companion.id)!, companion.name));
+    // Nothing is saved unless every workflow may be.
+    for (const workflow of [...preparedCompanions, imported]) {
+      const saveDenial = await workflowSaveDenial(user, workflow);
+      if (saveDenial) return denyRunAccess(reply, saveDenial);
+    }
+    const saved: string[] = [];
+    try {
+      for (const workflow of [...preparedCompanions, imported]) {
+        await store.upsertWorkflow(workflow, { createdBy: user.id });
+        saved.push(workflow.id);
+      }
+    } catch (error) {
+      // No half-made template: the workflows already written (new ids, nothing else refers to them) are removed.
+      for (const id of saved) await store.deleteWorkflow(id).catch(() => false);
+      throw error;
+    }
 
     await audit(request, user, {
       category: "workflow",
@@ -17141,9 +17347,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       action: "use",
       resourceType: "template",
       resourceId: template.id,
-      metadata: { newWorkflowId: imported.id }
+      metadata: { newWorkflowId: imported.id, ...(preparedCompanions.length > 0 ? { companionWorkflowIds: preparedCompanions.map((companion) => companion.id) } : {}) }
     });
-    return { workflowId: imported.id, name: imported.name };
+    return {
+      workflowId: imported.id,
+      name: imported.name,
+      ...(preparedCompanions.length > 0 ? { companions: preparedCompanions.map((companion) => ({ workflowId: companion.id, name: companion.name })) } : {})
+    };
   });
 
   // Delete template (admin)

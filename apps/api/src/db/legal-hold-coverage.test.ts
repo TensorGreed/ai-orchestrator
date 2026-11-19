@@ -134,6 +134,7 @@ const NOT_HOLDABLE: Record<string, string> = {
   deleteLogStreamDestination: "configuration",
   deleteAuditExportDestination: "configuration",
   deleteVariable: "configuration",
+  deleteOpenApiSpec: "configuration",
   deleteNotificationConfig: "configuration",
   deleteBudget: "configuration",
   deleteGuardVaultTokens: "token vault entries (a deletion leaves out the tokens a held row holds)",

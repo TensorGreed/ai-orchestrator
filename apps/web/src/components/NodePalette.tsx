@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { NodeTypeIcon, PaletteIcon, type PaletteCategoryIconKey } from "./node-icons";
 import { rankPaletteItems, scorePaletteItem } from "../lib/palette-search";
 
@@ -35,6 +35,8 @@ export interface NodePaletteProps {
   onPick: (definition: PaletteDefinition) => void;
   onClose: () => void;
   onTidy?: () => void;
+  /** Shown under the list (the main palette's "Add an API…"). */
+  footer?: ReactNode;
 }
 
 interface FlatRow {
@@ -50,7 +52,7 @@ interface FlatRow {
  * names, then description) and the category holding the best match comes
  * first, so Enter adds the best match.
  */
-export function NodePalette({ title, subtitle, sections, flatItems, emptyMessage, onPick, onClose, onTidy }: NodePaletteProps) {
+export function NodePalette({ title, subtitle, sections, flatItems, emptyMessage, onPick, onClose, onTidy, footer }: NodePaletteProps) {
   const [query, setQuery] = useState("");
   // The highlighted row belongs to the search it was chosen in: a new search starts on its best match at once (not
   // after an effect), so an Enter right after typing never lands on a row of the previous list.
@@ -230,6 +232,7 @@ export function NodePalette({ title, subtitle, sections, flatItems, emptyMessage
           </section>
         ))}
       </div>
+      {footer ? <div className="node-palette-footer">{footer}</div> : null}
     </aside>
   );
 }
