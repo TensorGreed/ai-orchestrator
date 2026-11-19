@@ -529,6 +529,11 @@ export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentR
   /** v79 — that user, or null for a run that used the workflow's sessions (or an older record). */
   getExecutionSessionOwner(executionId: string): Promise<string | null>;
   /**
+   * v80 — the user id of the person who started the run (saveExecutionHistory's `triggeredByUserId`), or null: a run
+   * no signed-in person started, a run recorded before v80, or no such run.
+   */
+  getExecutionStarter(executionId: string): Promise<string | null>;
+  /**
    * v74 — whether content copied from this run is sensitive: its record is marked, or its run never wrote a final
    * answer (see saveExecutionHistory's `sensitive`). Null when there is no record.
    */
@@ -2088,6 +2093,11 @@ export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentR
     durationMs?: number;
     triggerType?: string;
     triggeredBy?: string;
+    /**
+     * v80 — the user id of the signed-in person who started the run. Set once: a later write without it, or with
+     * another id (a resume an approver decided), keeps the stored one. Read it with getExecutionStarter.
+     */
+    triggeredByUserId?: string | null;
     inputJson?: unknown;
     outputJson?: unknown;
     nodeResultsJson?: unknown;

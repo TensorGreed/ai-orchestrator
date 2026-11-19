@@ -3120,6 +3120,22 @@ export const MIGRATIONS: Migration[] = [
     down: `
       ALTER TABLE execution_history DROP COLUMN IF EXISTS session_owner;
     `
+  },
+  {
+    version: 80,
+    description: "The user id of the person who started a run",
+    // triggered_by_user_id: the id of the signed-in person who started the run (a run route, an API key, a signed-in
+    // form or chat), or NULL (a webhook, a schedule, a public trigger, and every run recorded before v80). Set once and
+    // kept: a resume by an approver does not change it. "Own runs" (run-access.ts) judge by it when it is set; a run
+    // without it falls back to triggered_by's email only for an account created before the run started, so an email
+    // given to a new account does not bring the old account's runs with it.
+    up: `
+      ALTER TABLE execution_history ADD COLUMN IF NOT EXISTS triggered_by_user_id TEXT;
+    `,
+    // An older build ignores the column; dropping it makes every run judged by its email again.
+    down: `
+      ALTER TABLE execution_history DROP COLUMN IF EXISTS triggered_by_user_id;
+    `
   }
 ];
 

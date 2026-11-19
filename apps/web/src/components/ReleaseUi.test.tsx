@@ -165,6 +165,19 @@ describe("version pill and Publish dialog", () => {
     expect(within(dialog).getByText(/needs the workflow:publish permission/)).toBeInTheDocument();
     expect(within(dialog).queryByRole("button", { name: /Publish v/ })).toBeNull();
   });
+
+  it("someone who sees only their own runs gets the verdict with a plain note instead of the gate's details", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchReleaseState).mockResolvedValue({ state: { draftVersion: 3, publishedVersion: 2, aheadBy: 1, gateEnabled: true, gateEnforced: false, productionRefused: false, canPublish: false, canEditGate: false } });
+    vi.mocked(api.fetchWorkflowVersions).mockResolvedValue(versions());
+    vi.mocked(api.fetchPublishPreview).mockResolvedValue({ preview: preview({ verdict: "blocked", reasons: [], stats: null, replayRunId: null, detailsHidden: true }) });
+    render(<ReleasePill workflowId="wf-1" canPublish={false} isAdmin={false} />);
+    await user.click(await screen.findByRole("button", { name: /Release: v2/ }));
+    const dialog = await screen.findByRole("dialog");
+    expect(await within(dialog).findByText("Blocked")).toBeInTheDocument();
+    expect(within(dialog).getByText(/come from other people's runs/)).toBeInTheDocument();
+    expect(within(dialog).queryByText(/job /)).toBeNull();
+  });
 });
 
 describe("Release gates tab", () => {

@@ -115,8 +115,16 @@ describeStoreContract("store contract: approvals", (ctx) => {
   it("own runs only: of a workflow shared only with the person, the requests of runs they started or that ran in their sessions", async () => {
     const store = ctx.store();
     const startedAt = new Date().toISOString();
+    const before = "2020-01-01T00:00:00.000Z";
     // run-mine: started by Pat (email in another case); run-session: started by someone else in Pat's sessions;
     // run-paused-only: no history yet, a paused state started by Pat's user id; run-other: someone else's.
+    // v80: run-starter: started by Pat's user id, recorded as such, approved by Lee; run-old-account and
+    // paused-old-account: Pat's email, but before Pat's account existed; run-new-id: Pat's email, another account's id.
+    await store.saveExecutionHistory({ id: "run-starter", workflowId: "wf", status: "waiting_approval", startedAt, triggeredBy: "lee@example.com", triggeredByUserId: "u-pat" });
+    await store.saveExecutionHistory({ id: "run-old-account", workflowId: "wf", status: "waiting_approval", startedAt: before, triggeredBy: "pat@example.com" });
+    await store.saveWorkflowExecutionState({ id: "paused-old-account", workflowId: "wf", status: "waiting_approval", waitingNodeId: "gate", startedAt: before, triggeredBy: "pat@example.com", state: {} });
+    await store.saveWorkflowExecutionState({ id: "paused-mine", workflowId: "wf", status: "waiting_approval", waitingNodeId: "gate", startedAt, triggeredBy: "Pat@example.com", state: {} });
+    await store.saveExecutionHistory({ id: "run-new-id", workflowId: "wf", status: "waiting_approval", startedAt, triggeredBy: "pat@example.com", triggeredByUserId: "u-other" });
     await store.saveExecutionHistory({ id: "run-mine", workflowId: "wf", status: "waiting_approval", startedAt, triggeredBy: "PAT@example.com" });
     await store.saveExecutionHistory({ id: "run-session", workflowId: "wf", status: "waiting_approval", startedAt, triggeredBy: "lee@example.com" });
     await store.setExecutionSessionOwner("run-session", "u-pat");
@@ -124,17 +132,21 @@ describeStoreContract("store contract: approvals", (ctx) => {
     await store.saveExecutionHistory({ id: "run-other", workflowId: "wf", status: "waiting_approval", startedAt, triggeredBy: "lee@example.com" });
     await store.saveExecutionHistory({ id: "run-team", workflowId: "wf-team", status: "waiting_approval", startedAt, triggeredBy: "lee@example.com" });
     for (const [id, executionId, workflowId] of [
-      ["r-mine", "run-mine", "wf"], ["r-session", "run-session", "wf"], ["r-paused", "run-paused-only", "wf"], ["r-other", "run-other", "wf"], ["r-team", "run-team", "wf-team"]
+      ["r-mine", "run-mine", "wf"], ["r-session", "run-session", "wf"], ["r-paused", "run-paused-only", "wf"], ["r-other", "run-other", "wf"], ["r-team", "run-team", "wf-team"],
+      ["r-starter", "run-starter", "wf"], ["r-old", "run-old-account", "wf"], ["r-paused-old", "paused-old-account", "wf"], ["r-paused-mine", "paused-mine", "wf"], ["r-new-id", "run-new-id", "wf"]
     ] as const) {
       await store.insertApprovalRequest(request(id, { executionId, workflowId }));
     }
-    const pat = { userId: "u-pat", email: "pat@example.com" };
-    const ids = async (scope: { workflowIds: string[]; ownRunsOnly?: { workflowIds: string[]; userId: string; email: string } }) =>
+    const pat = { userId: "u-pat", email: "pat@example.com", userCreatedAt: "2026-01-01T00:00:00.000Z" };
+    const ids = async (scope: { workflowIds: string[]; ownRunsOnly?: { workflowIds: string[]; userId: string; email: string; userCreatedAt: string | null } }) =>
       (await store.listApprovalRequests({ status: "all", scope })).map((r) => r.id).sort();
-    expect(await ids({ workflowIds: ["wf-team"], ownRunsOnly: { workflowIds: ["wf"], ...pat } })).toEqual(["r-mine", "r-paused", "r-session", "r-team"]);
-    expect(await ids({ workflowIds: [], ownRunsOnly: { workflowIds: ["wf"], ...pat } })).toEqual(["r-mine", "r-paused", "r-session"]);
-    expect(await ids({ workflowIds: [], ownRunsOnly: { workflowIds: ["wf"], userId: "u-nobody", email: "nobody@example.com" } })).toEqual([]);
-    expect(await ids({ workflowIds: ["wf", "wf-team"] })).toEqual(["r-mine", "r-other", "r-paused", "r-session", "r-team"]);
+    const pats = ["r-mine", "r-paused", "r-paused-mine", "r-session", "r-starter"];
+    expect(await ids({ workflowIds: ["wf-team"], ownRunsOnly: { workflowIds: ["wf"], ...pat } })).toEqual([...pats, "r-team"].sort());
+    expect(await ids({ workflowIds: [], ownRunsOnly: { workflowIds: ["wf"], ...pat } })).toEqual(pats);
+    // Without the account's creation time, an email alone never counts.
+    expect(await ids({ workflowIds: [], ownRunsOnly: { workflowIds: ["wf"], ...pat, userCreatedAt: null } })).toEqual(["r-paused", "r-session", "r-starter"]);
+    expect(await ids({ workflowIds: [], ownRunsOnly: { workflowIds: ["wf"], userId: "u-nobody", email: "nobody@example.com", userCreatedAt: "2020-01-01T00:00:00.000Z" } })).toEqual([]);
+    expect(await ids({ workflowIds: ["wf", "wf-team"] })).toHaveLength(10);
   });
 
   it("a deleted workflow's requests leave scoped lists", async () => {

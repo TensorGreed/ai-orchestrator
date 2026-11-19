@@ -258,6 +258,11 @@ export interface WorkflowRelease {
 export interface WorkflowReleasesView {
   releases: WorkflowRelease[];
   publishedVersion: number | null;
+  /**
+   * Set for someone who sees only their own runs of the workflow: each release's gate reasons and replay job are left
+   * out (empty, null), since the gate judges golden runs taken from other people's runs.
+   */
+  detailsHidden?: true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1102,6 +1107,11 @@ export interface ReleasePublishPreview {
   stats: ReleaseGateStats | null;
   /** The gate has approvers, so a blocked publish can be sent to them. */
   canRequestApproval: boolean;
+  /**
+   * Set for someone who sees only their own runs of the workflow: the verdict only. The reasons, figures and replay
+   * job are left out (empty, null), since the gate judges golden runs taken from other people's runs.
+   */
+  detailsHidden?: true;
 }
 
 export interface ReleaseStateView {

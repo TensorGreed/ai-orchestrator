@@ -119,6 +119,7 @@ import {
   type ReleaseVerdict,
   type Workflow,
   type WorkflowRelease,
+  type WorkflowReleasesView,
   type WorkflowValidationIssue,
   WORKFLOW_UNFINISHED_CODE
 } from "@ai-orchestrator/shared";
@@ -175,6 +176,12 @@ export interface ReleaseServiceOptions {
   /** The shared run-access check (run-access.ts): 404 unreadable, 403 without the permission; admins pass. */
   access: (user: SafeUser, workflowId: string, permission: ReleasePermission) => Promise<RunAccessResult<object>>;
   readableWorkflowIds: (user: SafeUser) => Promise<string[] | null>;
+  /**
+   * Does the user see every run of the workflow (run-access.ts seesAllRuns)? Someone who sees only their own runs gets
+   * the publish preview's verdict and the release history without what the gate took from other people's runs (gate
+   * reasons, figures, replay jobs). Left out: everyone sees everything, as before.
+   */
+  seesAllRuns?: (user: SafeUser, workflowId: string) => Promise<boolean>;
   audit: (event: AuditEventInput) => void | Promise<void>;
   notify: (event: NotificationEvent) => Promise<void>;
   redact: (value: string) => string;
@@ -1422,6 +1429,12 @@ export class ReleaseService {
     const gate = this.settingsOf(await this.store.getReleaseGate(workflowId), workflowId);
     const { workflowHash } = await this.versionCandidate(workflowId, version);
     if (!gate.enabled) return { version, workflowHash, gateEnabled: false, verdict: "passed", reasons: [], replayRunId: null, stats: null, canRequestApproval: false };
+    if (!await this.seesAllRuns(user, workflowId)) {
+      // The gate judges golden runs taken from other people's runs: the verdict only, judged on the gate's own choice
+      // of job (a job named in the request is not theirs to see).
+      const { judgement } = await this.judge(gate, workflowId, workflowHash);
+      return { version, workflowHash, gateEnabled: true, verdict: judgement.verdict, reasons: [], replayRunId: null, stats: null, canRequestApproval: Boolean(gate.approvers), detailsHidden: true };
+    }
     const { judgement, replayRunId: judgedRun } = await this.judge(gate, workflowId, workflowHash, replayRunId);
     return {
       version,
@@ -1464,12 +1477,17 @@ export class ReleaseService {
     };
   }
 
-  async releases(user: SafeUser, workflowId: string, limit?: number): Promise<{ releases: WorkflowRelease[]; publishedVersion: number | null }> {
+  async releases(user: SafeUser, workflowId: string, limit?: number): Promise<WorkflowReleasesView> {
     await this.check(user, workflowId, "workflow:read");
-    return {
-      releases: (await this.store.listWorkflowReleases(workflowId, limit)).map((record) => this.toRelease(record)),
-      publishedVersion: await this.store.getPublishedVersion(workflowId)
-    };
+    const releases = (await this.store.listWorkflowReleases(workflowId, limit)).map((record) => this.toRelease(record));
+    const publishedVersion = await this.store.getPublishedVersion(workflowId);
+    if (await this.seesAllRuns(user, workflowId)) return { releases, publishedVersion };
+    // Gate reasons name required cases and quote figures from golden runs taken from other people's runs.
+    return { releases: releases.map((release) => ({ ...release, gateReasons: [], replayRunId: null })), publishedVersion, detailsHidden: true };
+  }
+
+  private async seesAllRuns(user: SafeUser, workflowId: string): Promise<boolean> {
+    return this.options.seesAllRuns ? await this.options.seesAllRuns(user, workflowId) : true;
   }
 
   private async commitRelease(input: {

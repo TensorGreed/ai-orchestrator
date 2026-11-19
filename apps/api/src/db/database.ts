@@ -229,6 +229,7 @@ import {
   type LostJobOutcome,
   type LostJobReasons
 } from "./queue-leases.js";
+import { ownHistoryRunSql, ownPausedRunSql } from "./own-runs-sql.js";
 
 type BindParams = unknown[];
 
@@ -2242,6 +2243,11 @@ export interface OwnRunsFilter {
   workflowIds: string[];
   userId: string;
   email: string;
+  /**
+   * v80 — when the person's account was created: a run recorded without a starter's user id counts by email only when
+   * it started after that (null: never by email). See own-runs-sql.ts.
+   */
+  userCreatedAt: string | null;
 }
 
 /**
@@ -3956,6 +3962,8 @@ export class SqliteStore implements Store {
     this.ensureColumn("execution_history", "release_channel", "TEXT");
     // v79 — the person whose session memory the run used.
     this.ensureColumn("execution_history", "session_owner", "TEXT");
+    // v80 — the user id of the person who started the run.
+    this.ensureColumn("execution_history", "triggered_by_user_id", "TEXT");
     this.ensureColumn("execution_history", "release_version", "INTEGER");
     this.exec(`
       CREATE TABLE IF NOT EXISTS release_gates (
@@ -6104,6 +6112,7 @@ export class SqliteStore implements Store {
     durationMs?: number;
     triggerType?: string;
     triggeredBy?: string;
+    triggeredByUserId?: string | null;
     inputJson?: unknown;
     outputJson?: unknown;
     nodeResultsJson?: unknown;
@@ -6196,10 +6205,11 @@ export class SqliteStore implements Store {
           node_results_json,
           custom_data_json,
           error,
-          sensitive
+          sensitive,
+          triggered_by_user_id
         )
         -- 13.3: a run a data-subject deletion erased (its tombstone) is never written back by its executor.
-        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         WHERE NOT EXISTS (SELECT 1 FROM erasure_tombstones WHERE kind = 'run' AND row_id = ?)
         ON CONFLICT(id) DO UPDATE SET
           workflow_id = excluded.workflow_id,
@@ -6210,6 +6220,8 @@ export class SqliteStore implements Store {
           duration_ms = excluded.duration_ms,
           trigger_type = excluded.trigger_type,
           triggered_by = excluded.triggered_by,
+          -- v80: set once; a resume an approver decided keeps who started the run.
+          triggered_by_user_id = COALESCE(execution_history.triggered_by_user_id, excluded.triggered_by_user_id),
           input_json = excluded.input_json,
           output_json = excluded.output_json,
           node_results_json = excluded.node_results_json,
@@ -6232,6 +6244,7 @@ export class SqliteStore implements Store {
         input.customData === undefined ? null : JSON.stringify(input.customData),
         input.error ?? null,
         executionSensitiveValue(input.sensitive),
+        input.triggeredByUserId || null,
         input.id,
         input.sensitive === undefined ? 1 : 0,
         ...(interrupted ? [options.unlessInterruptedWith] : [])
@@ -6294,8 +6307,9 @@ export class SqliteStore implements Store {
         whereParams.push(...input.workflowIds);
       }
       if (own) {
-        anyOf.push(`(workflow_id IN (${own.workflowIds.map(() => "?").join(", ")}) AND (LOWER(triggered_by) = ? OR triggered_by = ? OR session_owner = ?))`);
-        whereParams.push(...own.workflowIds, own.email.toLowerCase(), own.userId, own.userId);
+        const ids = own.workflowIds.map(() => "?").join(", ");
+        whereParams.push(...own.workflowIds);
+        anyOf.push(`(workflow_id IN (${ids}) AND ${ownHistoryRunSql(own, (value) => (whereParams.push(value), "?"))})`);
       }
       whereParts.push(anyOf.length > 0 ? `(${anyOf.join(" OR ")})` : "1 = 0");
     }
@@ -7077,15 +7091,15 @@ export class SqliteStore implements Store {
       if (own) {
         // Of a workflow shared only with the person: the requests of runs they started or that ran in their sessions.
         const ids = own.workflowIds.map(() => "?").join(", ");
+        const bind = (value: string) => (params.push(value), "?");
+        params.push(...own.workflowIds, ...own.workflowIds);
+        const history = ownHistoryRunSql(own, bind);
+        params.push(...own.workflowIds);
+        const paused = ownPausedRunSql(own, bind);
         anyOf.push(
           `(workflow_id IN (${ids}) AND (` +
-            `execution_id IN (SELECT id FROM execution_history WHERE workflow_id IN (${ids}) AND (LOWER(triggered_by) = ? OR triggered_by = ? OR session_owner = ?)) OR ` +
-            `execution_id IN (SELECT id FROM workflow_executions WHERE workflow_id IN (${ids}) AND (LOWER(triggered_by) = ? OR triggered_by = ?))))`
-        );
-        params.push(
-          ...own.workflowIds,
-          ...own.workflowIds, own.email.toLowerCase(), own.userId, own.userId,
-          ...own.workflowIds, own.email.toLowerCase(), own.userId
+            `execution_id IN (SELECT id FROM execution_history WHERE workflow_id IN (${ids}) AND ${history}) OR ` +
+            `execution_id IN (SELECT id FROM workflow_executions WHERE workflow_id IN (${ids}) AND ${paused})))`
         );
       }
       clauses.push(`(${anyOf.join(" OR ")})`);
@@ -10213,6 +10227,12 @@ export class SqliteStore implements Store {
   async setExecutionSessionOwner(executionId: string, userId: string): Promise<void> {
     this.exec(`UPDATE execution_history SET session_owner = ? WHERE id = ?`, [userId, executionId]);
     this.persist();
+  }
+
+  /** v80 — see Store.getExecutionStarter. */
+  async getExecutionStarter(executionId: string): Promise<string | null> {
+    const row = this.queryOne<{ triggered_by_user_id: string | null }>(`SELECT triggered_by_user_id FROM execution_history WHERE id = ?`, [executionId]);
+    return row?.triggered_by_user_id ? String(row.triggered_by_user_id) : null;
   }
 
   /** v79 — see Store.getExecutionSessionOwner. */

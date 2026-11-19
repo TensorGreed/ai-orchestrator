@@ -516,7 +516,7 @@ describeStoreContract("store contract: run history lists with own runs only", (c
     await store.saveExecutionHistory({ id: "other", workflowId: "wf-shared", status: "success", startedAt: at(4), triggeredBy: "lee@example.com" });
     await store.saveExecutionHistory({ id: "anon", workflowId: "wf-shared", status: "success", startedAt: at(5) });
     await store.saveExecutionHistory({ id: "team", workflowId: "wf-team", status: "success", startedAt: at(6), triggeredBy: "lee@example.com" });
-    const own = { workflowIds: ["wf-shared"], userId: "u-pat", email: "pat@example.com" };
+    const own = { workflowIds: ["wf-shared"], userId: "u-pat", email: "pat@example.com", userCreatedAt: at(0) };
     const list = async (input: Parameters<Store["listExecutionHistory"]>[0]) => {
       const page = await store.listExecutionHistory(input);
       return { ids: page.items.map((item) => item.id), total: page.total };
@@ -526,5 +526,25 @@ describeStoreContract("store contract: run history lists with own runs only", (c
     expect(await list({ workflowIds: [], ownRunsOnly: own, status: "success" })).toEqual({ ids: ["by-id", "mine"], total: 2 });
     expect(await list({ workflowIds: [], ownRunsOnly: { ...own, workflowIds: [] } })).toEqual({ ids: [], total: 0 });
     expect(await list({ workflowIds: ["wf-shared", "wf-team"] })).toMatchObject({ total: 6 });
+  });
+
+  it("v80: the starter's user id decides; an email counts only for an account created before the run", async () => {
+    const store = ctx.store();
+    const at = (minute: number) => new Date(Date.UTC(2026, 0, 1, 0, minute)).toISOString();
+    // Pat's account was created at minute 10.
+    await store.saveExecutionHistory({ id: "email-before", workflowId: "wf-shared", status: "success", startedAt: at(5), triggeredBy: "pat@example.com" });
+    await store.saveExecutionHistory({ id: "email-after", workflowId: "wf-shared", status: "success", startedAt: at(15), triggeredBy: "PAT@example.com" });
+    await store.saveExecutionHistory({ id: "id-before", workflowId: "wf-shared", status: "success", startedAt: at(5), triggeredBy: "u-pat" });
+    await store.saveExecutionHistory({ id: "starter", workflowId: "wf-shared", status: "success", startedAt: at(6), triggeredBy: "lee@example.com", triggeredByUserId: "u-pat" });
+    await store.saveExecutionHistory({ id: "starter-other", workflowId: "wf-shared", status: "success", startedAt: at(16), triggeredBy: "pat@example.com", triggeredByUserId: "u-old-pat" });
+    // A later write (a resume an approver decided) keeps the first starter.
+    await store.saveExecutionHistory({ id: "starter", workflowId: "wf-shared", status: "success", startedAt: at(6), triggeredBy: "lee@example.com", triggeredByUserId: "u-lee" });
+    await store.saveExecutionHistory({ id: "starter", workflowId: "wf-shared", status: "success", startedAt: at(6), triggeredBy: "lee@example.com" });
+    expect(await store.getExecutionStarter("starter")).toBe("u-pat");
+    expect(await store.getExecutionStarter("email-after")).toBeNull();
+    expect(await store.getExecutionStarter("missing")).toBeNull();
+    const page = await store.listExecutionHistory({ workflowIds: [], ownRunsOnly: { workflowIds: ["wf-shared"], userId: "u-pat", email: "pat@example.com", userCreatedAt: at(10) } });
+    expect(page.items.map((item) => item.id)).toEqual(["email-after", "starter", "id-before"]);
+    expect(page.total).toBe(3);
   });
 });
