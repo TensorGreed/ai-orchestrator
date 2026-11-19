@@ -1,4 +1,4 @@
-import { LIVE_ENTRY_NODE_TYPES, describeHttpSecretAuth, readHttpSecretAuth } from "@ai-orchestrator/shared";
+import { LIVE_ENTRY_NODE_TYPES, describeHttpSecretAuth, readHttpSecretAuth, resolveRagSearchMode } from "@ai-orchestrator/shared";
 import { McpToolArgsForm, McpUseFormButton, OpenApiOperationForm, usesMcpArgsForm, usesOpenApiOperation } from "./IntegrationForms";
 import { buildSchemaForm } from "../lib/mcp-schema-form";
 import { createContext, useCallback, useContext, useEffect, useId, useImperativeHandle, useMemo, useRef, useState, type Ref } from "react";
@@ -7239,7 +7239,9 @@ export function NodeInspector({
           const embedderId = toStringValue(config.embedderId, RAG_DEFAULT_EMBEDDER);
           const vectorStoreId = toStringValue(config.vectorStoreId, RAG_DEFAULT_VECTOR_STORE);
           const usesKnowledgeBase = vectorStoreId === "knowledge-base";
-          const searchMode = toStringValue(config.searchMode, "vector");
+          // Unset: hybrid with the Token embedder, vector with every other one (the engine's default).
+          const searchMode = resolveRagSearchMode({ searchMode: config.searchMode, embedderId });
+          const searchModeIsDefault = typeof config.searchMode !== "string";
           const knowledgeBaseId = toStringValue(asRecord(config.vectorStoreConfig).knowledgeBaseId) || toStringValue(config.knowledgeBaseId);
           const selectedKnowledgeBase = knowledgeBaseOptions.find((kb) => kb.id === knowledgeBaseId);
           const preferredProvider =
@@ -7337,7 +7339,8 @@ export function NodeInspector({
                 <SelectField
                   label="Search Mode"
                   value={searchMode}
-                  onChange={(next) => setConfig((current) => ({ ...current, searchMode: next === "vector" ? undefined : next }))}
+                  // The default for the embedder stays unset, so it follows the embedder; any other choice is kept.
+                  onChange={(next) => setConfig((current) => ({ ...current, searchMode: next }))}
                   options={[
                     { value: "vector", label: "Vector (meaning)" },
                     { value: "bm25", label: "Keyword (BM25)" },
@@ -7345,6 +7348,11 @@ export function NodeInspector({
                   ]}
                   help="Keyword and hybrid search need a knowledge base. Hybrid returns the vector results unchanged when the keyword search finds nothing."
                 />
+                {searchModeIsDefault && searchMode === "hybrid" ? (
+                  <div className="cfg-help" data-testid="rag-search-mode-default">
+                    Hybrid by default: the built-in Token embedder needs no key, but its vectors alone rank poorly, so keyword search runs next to it.
+                  </div>
+                ) : null}
               </>
             ) : null}
             <SelectField

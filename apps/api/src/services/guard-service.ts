@@ -26,6 +26,7 @@ import {
   diffGuardProfiles,
   guardProfileSchema,
   hashGuardProfile,
+  createRedactPersonalDataProfile,
   profileHasDestinationRules,
   profileUsesLabels,
   serializeGuardProfile,
@@ -46,6 +47,8 @@ import {
   DESTINATION_PREVIEW_SIMULATION_PROFILE,
   DESTINATION_RULES_OBSERVING_DAYS,
   GUARD_BUILTIN_PROFILE_ID,
+  GUARD_BUILTIN_PROFILE_IDS,
+  GUARD_REDACT_PERSONAL_DATA_PROFILE_ID,
   GUARD_DESTINATION_RULES_PROFILE_ID,
   GUARD_DESTINATION_RULES_PROFILE_NAME,
   STARTER_DESTINATION_RULE,
@@ -307,36 +310,48 @@ export class GuardService {
   // Profiles
   // -------------------------------------------------------------------------
 
-  /** Seeds the built-in default profile; appends a version when the shipped default changed. */
+  /**
+   * Seeds the built-in rule sets (the default, and "Redact personal data"); appends a version when a shipped one
+   * changed. A stored rule set that already has a built-in's id (made before that built-in shipped) is left alone.
+   */
   async ensureBuiltIns(): Promise<void> {
-    const shipped = createDefaultGuardProfile();
-    const document = this.documentOf(shipped);
-    const hash = hashGuardProfile(shipped);
-    // Idempotent: several instances may boot on one database at once.
-    const existing = await this.store.getGuardProfile(GUARD_BUILTIN_PROFILE_ID);
-    if (!existing) {
-      await this.store.insertGuardProfile({
-        id: GUARD_BUILTIN_PROFILE_ID,
-        name: guardProfileDisplayName(GUARD_BUILTIN_PROFILE_ID, shipped.name),
-        description: shipped.description ?? null,
-        builtIn: true,
-        document,
-        hash,
-        note: "Built-in default rule set",
-        createdBy: null
-      }, { ifAbsent: true });
-      return;
-    }
-    if (existing.latestHash !== hash) {
-      await this.store.addGuardProfileVersion({
-        profileId: GUARD_BUILTIN_PROFILE_ID,
-        name: guardProfileDisplayName(GUARD_BUILTIN_PROFILE_ID, shipped.name),
-        description: shipped.description ?? null,
-        document,
-        hash,
-        note: "Built-in default rule set updated",
-        createdBy: null
-      }, { unlessLatestHash: true });
+    const shipped: Array<{ id: string; profile: GuardProfile; note: string }> = [
+      { id: GUARD_BUILTIN_PROFILE_ID, profile: createDefaultGuardProfile(), note: "Built-in default rule set" },
+      { id: GUARD_REDACT_PERSONAL_DATA_PROFILE_ID, profile: createRedactPersonalDataProfile(), note: "Built-in rule set: redact personal data" }
+    ];
+    for (const { id, profile, note } of shipped) {
+      const document = this.documentOf(profile);
+      const hash = hashGuardProfile(profile);
+      // Idempotent: several instances may boot on one database at once.
+      const existing = await this.store.getGuardProfile(id);
+      if (!existing) {
+        await this.store.insertGuardProfile({
+          id,
+          name: guardProfileDisplayName(id, profile.name),
+          description: profile.description ?? null,
+          builtIn: true,
+          document,
+          hash,
+          note,
+          createdBy: null
+        }, { ifAbsent: true });
+        continue;
+      }
+      if (!existing.builtIn) {
+        this.options.logger?.(`A stored rule set already has the built-in id '${id}'; the built-in is not seeded`, { profileId: id });
+        continue;
+      }
+      if (existing.latestHash !== hash) {
+        await this.store.addGuardProfileVersion({
+          profileId: id,
+          name: guardProfileDisplayName(id, profile.name),
+          description: profile.description ?? null,
+          document,
+          hash,
+          note: `${note} updated`,
+          createdBy: null
+        }, { unlessLatestHash: true });
+      }
     }
   }
 
@@ -443,7 +458,7 @@ export class GuardService {
         { path: "id", message: `'${id}' is reserved for the deployment's destination rules; set those up under Security → Data destinations` }
       ]);
     }
-    if (id === GUARD_BUILTIN_PROFILE_ID || await this.store.getGuardProfile(id)) {
+    if (GUARD_BUILTIN_PROFILE_IDS.includes(id) || await this.store.getGuardProfile(id)) {
       throw new GuardConflictError(`A rule set with id '${id}' already exists`);
     }
     const profile = await this.validateDocument(input.document, id, options.actor);
@@ -467,7 +482,7 @@ export class GuardService {
     actor?: GuardSaveActor
   ): Promise<{ version: GuardProfileVersionView; changed: boolean }> {
     const record = await this.requireProfile(id);
-    if (record.builtIn) throw new GuardConflictError("The built-in rule set is read-only; duplicate it to change it");
+    if (record.builtIn) throw new GuardConflictError("Built-in rule sets are read-only; duplicate this one to change it");
     const profile = await this.validateDocument(input.document, id, actor);
     await this.refuseModelChecksOnGateway(id, profile);
     const hash = hashGuardProfile(profile);
@@ -504,7 +519,7 @@ export class GuardService {
 
   async deleteProfile(id: string): Promise<void> {
     const record = await this.requireProfile(id);
-    if (record.builtIn) throw new GuardConflictError("The built-in rule set cannot be deleted");
+    if (record.builtIn) throw new GuardConflictError("Built-in rule sets cannot be deleted");
     const bindings = await filterAsync(
       (await this.store.listGuardBindingsForProfile(id)).filter((binding) => binding.mode !== "inherit"),
       async (binding) => await this.bindingInForce(binding)

@@ -2898,7 +2898,9 @@ export async function deleteKnowledgeBaseApi(id: string) {
 export async function uploadKnowledgeBaseDocument(id: string, payload: {
   filename?: string;
   kind?: DocumentKind;
-  content: string;
+  /** Text; or `contentBase64`, the file's bytes (a PDF), whose bytes decide what it is. */
+  content?: string;
+  contentBase64?: string;
   sourceId?: string;
   chunking?: ChunkOptions;
   csv?: { textColumn?: string; metadataColumns?: string[] };
@@ -2909,6 +2911,11 @@ export async function uploadKnowledgeBaseDocument(id: string, payload: {
     documentsLoaded: number;
     chunksInserted: number;
     dimensions: number;
+    kind?: DocumentKind | "pdf";
+    /** A PDF's page count. */
+    pageCount?: number;
+    /** What was left out (scanned pages, pages past the limits). */
+    notice?: string;
   }>(`/api/knowledge-bases/${encodeURIComponent(id)}/upload`, {
     method: "POST",
     body: JSON.stringify(payload)
@@ -2935,6 +2942,8 @@ export async function deleteKnowledgeBaseSource(id: string, sourceId: string) {
 export async function searchKnowledgeBase(id: string, query: string, topK = 5) {
   return apiRequest<{
     query: string;
+    /** How the search ranked: hybrid (keyword and vector) for the built-in Token embedder, vector otherwise. */
+    mode?: "vector" | "hybrid";
     results: Array<{
       id: string;
       text: string;
@@ -2944,6 +2953,9 @@ export async function searchKnowledgeBase(id: string, query: string, topK = 5) {
         chunkIndex?: number;
         sourceId?: string | null;
         similarityScore?: number;
+        /** A PDF chunk's page (1-based). */
+        page?: number;
+        retrieval?: { mode?: string; rrfScore?: number };
       };
     }>;
   }>(`/api/knowledge-bases/${encodeURIComponent(id)}/search`, {

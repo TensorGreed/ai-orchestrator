@@ -5,8 +5,8 @@
  * `keySecretRef.secretId`, never a key.
  */
 
-import { useEffect, useState, type ReactNode } from "react";
-import type { GuardProfileSummary, GuardResolutionView } from "@ai-orchestrator/shared";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { GUARD_REDACT_PERSONAL_DATA_PROFILE_ID, type GuardProfileSummary, type GuardResolutionView } from "@ai-orchestrator/shared";
 import { fetchGuardProfiles, fetchGuardWorkflowBinding, type SecretListItem } from "../lib/api";
 import { GUARD_EDITOR_CHANNELS } from "../lib/guard-profile-edit";
 import { channelLabel } from "../lib/guard-trace";
@@ -78,6 +78,11 @@ export function GuardNodeFields({ config, setConfig, workflowId, attachedAsPort 
   }, [workflowId]);
 
   const profileId = str(config.profileId, "effective");
+  // Unticking goes back to the rule set the node had before the tick (the effective one if it was the preset).
+  const beforeRedact = useRef(profileId === GUARD_REDACT_PERSONAL_DATA_PROFILE_ID ? "effective" : profileId);
+  // A stored rule set that took the preset's id before it shipped is not the preset: no tick box then.
+  const redactPreset = profiles.find((profile) => profile.id === GUARD_REDACT_PERSONAL_DATA_PROFILE_ID);
+  const showRedactToggle = !redactPreset || redactPreset.builtIn;
   const labels = Array.isArray(config.labels) ? config.labels.map(String) : [];
 
   return (
@@ -86,6 +91,29 @@ export function GuardNodeFields({ config, setConfig, workflowId, attachedAsPort 
         <div className="cfg-tip">
           Attached to an agent&apos;s content rules port: this rule set checks the agent&apos;s prompt, tool arguments, tool results, model output and final answer (and its workers&apos;). Channel and input field apply only when the node runs as a workflow step.
         </div>
+      )}
+      {showRedactToggle && (
+      <div className="cfg-field">
+        <span className="cfg-field-label">
+          <label className="guard-check" htmlFor="guard-redact-personal-data">
+            <input
+              id="guard-redact-personal-data"
+              type="checkbox"
+              checked={profileId === GUARD_REDACT_PERSONAL_DATA_PROFILE_ID}
+              onChange={(event) => {
+                if (event.target.checked) beforeRedact.current = profileId;
+                const next = event.target.checked ? GUARD_REDACT_PERSONAL_DATA_PROFILE_ID : beforeRedact.current;
+                setConfig((current) => ({ ...current, profileId: next }));
+              }}
+            />
+            <span>Redact personal data</span>
+          </label>
+          <HelpHint>
+            Uses the built-in &quot;Redact personal data&quot; rule set: names, email addresses, phone numbers, street addresses, and account and ID
+            numbers become [REDACTED:…] before the text goes on. Everything else works as in the default rule set. Unticked: the rule set picked before.
+          </HelpHint>
+        </span>
+      </div>
       )}
       <div className="cfg-field">
         <label className="cfg-label" htmlFor="guard-profile-select">

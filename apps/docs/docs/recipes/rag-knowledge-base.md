@@ -22,7 +22,7 @@ related: ["rag","indirect-prompt-injection","context-window"]
 
 **Needs:** No API key to start · **Time:** 10 minutes · **Nodes:** 5
 
-A **Question** node holds the question. **RAG Retrieve** searches a built-in knowledge base for the three nearest chunks, a **Prompt Template** puts them into a grounded prompt, and an **LLM** node answers. The sample uses `token-embedder`, a hash-based demo embedder that needs no key (its search quality is poor), and the echo model. Echo returns the prompt it was given, which is useful here: the answer shows exactly what a real model would read. Swap both for real ones to get real answers.
+A **Question** node holds the question. **RAG Retrieve** searches a built-in knowledge base for the three nearest chunks, a **Prompt Template** puts them into a grounded prompt, and an **LLM** node answers. The sample uses `token-embedder`, a built-in embedder that needs no key (searches with it run hybrid, keywords and vectors fused, because its vectors alone rank poorly), and the echo model. Echo returns the prompt it was given, which is useful here: the answer shows exactly what a real model would read. Swap both for real ones to get real answers.
 
 <div class="recipe-actions">
   <a class="hub-button" href="/docs/recipes/files/rag-knowledge-base-flow.json" download>Download the workflow JSON</a>
@@ -97,7 +97,7 @@ Two things to know:
 
 - Use a real embedder (for example `openai-embedder`, with its key as a [secret](/security/secrets)) for the knowledge base and the same `embedderId` on the node. A knowledge base keeps the vector size of its first chunks, so start a new one when you change embedders.
 - Replace the echo model with a real one on the **LLM** node.
-- Set `searchMode` to `hybrid` to add keyword (BM25) matches to vector search, and add a **Rerank** node for better ordering. See [hybrid search](/nodes/knowledge-bases#hybrid-search-phase-9-3).
+- With a model embedder, set `searchMode` to `hybrid` to add keyword (BM25) matches to vector search (the `token-embedder` searches hybrid already), and add a **Rerank** node for better ordering. See [hybrid search](/nodes/knowledge-bases#hybrid-search-phase-9-3).
 
 ## Make it safer
 

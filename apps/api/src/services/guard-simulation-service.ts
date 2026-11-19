@@ -127,7 +127,7 @@ export class GuardSimulationService {
     if (!profile) return { status: 404, error: "Rule set not found" };
     if (user.role === "admin") return null;
     if (user.role !== "builder") return { status: 403, error: "Only admins and builders can simulate rule set changes" };
-    if (profile.builtIn) return { status: 403, error: "The built-in rule set is read-only; only an admin can simulate changes to it. Duplicate it to simulate your own." };
+    if (profile.builtIn) return { status: 403, error: "Built-in rule sets are read-only; only an admin can simulate changes to this one. Duplicate it to simulate your own." };
     const enforced = (await store.listGuardBindingsForProfile(profileId)).some((binding) => binding.scope === "project" && binding.mode === "enforced");
     if (enforced) return { status: 403, error: "This rule set is enforced on a project; only an admin can change or simulate it" };
     return null;

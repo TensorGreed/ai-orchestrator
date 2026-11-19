@@ -44,7 +44,7 @@ export function registerGuardBenchmarkRoutes(deps: GuardBenchmarkRoutesDeps): vo
     if (!profile) return { status: 404, error: "Rule set not found" };
     if (user.role === "admin" || !draft) return null;
     if (profileId === GUARD_DESTINATION_RULES_PROFILE_ID) return { status: 403, error: "The deployment's destination rules apply to every workflow; only an admin can benchmark a draft of them" };
-    if (profile.builtIn) return { status: 403, error: "The default rule set is read-only; only an admin can benchmark a draft of it. Duplicate it to benchmark your own." };
+    if (profile.builtIn) return { status: 403, error: "Built-in rule sets are read-only; only an admin can benchmark a draft of this one. Duplicate it to benchmark your own." };
     const enforced = (await store.listGuardBindingsForProfile(profileId)).some((binding) => binding.scope === "project" && binding.mode === "enforced");
     if (enforced) return { status: 403, error: "This rule set is enforced on a project; only an admin can benchmark a draft of it" };
     return null;

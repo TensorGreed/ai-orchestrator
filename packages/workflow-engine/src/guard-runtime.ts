@@ -5,6 +5,7 @@ import {
   applyProtectionBindings,
   canaryInstruction,
   createDefaultGuardProfile,
+  createRedactPersonalDataProfile,
   guardProfileDisplayName,
   createDefaultGuardRegistry,
   createDefaultProtectionRegistry,
@@ -51,6 +52,7 @@ import {
 import {
   APPROVAL_DEFAULT_TIMEOUT_MINUTES,
   GUARD_BUILTIN_PROFILE_ID,
+  GUARD_REDACT_PERSONAL_DATA_PROFILE_ID,
   GUARD_EFFECTIVE_PROFILE_REF,
   defaultGuardLabels,
   orderedProvenance,
@@ -441,6 +443,12 @@ function dedupeByHash(profiles: ResolvedGuardProfile[]): ResolvedGuardProfile[] 
 async function loadProfileOrThrow(guard: GuardRuntimeDependencies, profileId: string): Promise<ResolvedGuardProfile> {
   if (profileId === GUARD_BUILTIN_PROFILE_ID) {
     return (await guard.loadProfile(profileId)) ?? builtInGuardProfile();
+  }
+  if (profileId === GUARD_REDACT_PERSONAL_DATA_PROFILE_ID) {
+    const loaded = await guard.loadProfile(profileId);
+    if (loaded) return loaded;
+    const profile = createRedactPersonalDataProfile();
+    return { profileId, version: 1, hash: hashGuardProfile(profile), name: profile.name, profile };
   }
   const loaded = await guard.loadProfile(profileId);
   if (!loaded) throw new Error(`Rule set '${profileId}' does not exist. Pick a stored rule set on the Content Rules node.`);

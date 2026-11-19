@@ -25,6 +25,7 @@ export * from "./profile";
 export * from "./registry";
 export * from "./evaluate";
 export * from "./default-profile";
+export * from "./redact-personal-data-profile";
 export * from "./spotlighting";
 export * from "./detectors/text-normalize";
 export * from "./detectors/injection-patterns";

@@ -74,6 +74,7 @@ import {
   type NodeErrorConfig,
   retryDelayFor,
   statusInList,
+  resolveRagSearchMode,
   type DataDestinationRow,
   type DestinationRef,
   type McpToolOpenWorldOverride
@@ -6205,11 +6206,12 @@ async function executeNodeHandler(
 
       await store.upsert(allDocs, embedder);
 
-      // Phase 9.3 — searchMode picks vector / bm25 / hybrid. Default
-      // "vector" preserves Phase 9.1 behavior; bm25 + hybrid only work
+      // Phase 9.3 — searchMode picks vector / bm25 / hybrid; bm25 + hybrid only work
       // when the underlying store supports them (currently the
-      // KnowledgeBaseVectorStoreAdapter via FTS5).
-      const searchMode = typeof config.searchMode === "string" ? config.searchMode : "vector";
+      // KnowledgeBaseVectorStoreAdapter via FTS5). Unset: hybrid with the
+      // built-in Token embedder (its vectors alone rank poorly), vector with
+      // every other embedder (shared rag-search.ts).
+      const searchMode = resolveRagSearchMode({ searchMode: config.searchMode, embedderId });
       let documents;
       if (searchMode === "hybrid" && store instanceof KnowledgeBaseVectorStoreAdapter) {
         const candidatesPerRanker = typeof config.candidatesPerRanker === "number" && config.candidatesPerRanker > 0

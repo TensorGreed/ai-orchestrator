@@ -101,6 +101,22 @@ describe("RAG Retrieve fields", () => {
     expect(config).not.toHaveProperty("candidatesPerRanker");
   });
 
+  it("searches hybrid by default with the Token embedder and says so; Vector is kept when picked", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn();
+    render(<NodeInspector {...props(node("rag_retrieve", { vectorStoreId: "knowledge-base", embedderId: "token-embedder", knowledgeBaseId: "kb-faq" }), { onSave })} />);
+    const mode = await screen.findByRole("combobox", { name: /Search Mode/ });
+    expect(mode).toHaveValue("hybrid");
+    expect(screen.getByTestId("rag-search-mode-default")).toHaveTextContent(/Hybrid by default/);
+    await user.selectOptions(mode, "vector");
+    expect(screen.queryByTestId("rag-search-mode-default")).toBeNull();
+    expect((await save(onSave)).searchMode).toBe("vector");
+
+    // A mode picked is stored as picked, so changing the embedder later does not change it.
+    await user.selectOptions(mode, "hybrid");
+    expect((await save(onSave)).searchMode).toBe("hybrid");
+  });
+
   it("reads a knowledge base id kept in the store config, warns on an embedder mismatch, and moves the id when changed", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn();
