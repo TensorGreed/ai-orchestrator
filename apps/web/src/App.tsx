@@ -72,6 +72,8 @@ import {
   fetchWorkflows,
   importExternalWorkflow,
   importWorkflow,
+  previewWorkflowImport,
+  type WorkflowImportPreview,
   listApprovals,
   validateStoredWorkflow,
   isMfaChallenge,
@@ -174,6 +176,7 @@ import { ErrorWorkflowDialog } from "./components/ErrorWorkflowDialog";
 import { WorkflowCardMenu } from "./components/WorkflowCardMenu";
 import { WorkflowCanvasArea, type ImportPanelBinding } from "./components/WorkflowCanvasArea";
 import { ExternalImportDialog, type ExternalImportSource } from "./components/ExternalImportDialog";
+import { ImportConflictDialog, type ImportConflictChoice } from "./components/ImportConflictDialog";
 import { SecretSaveWarnings } from "./components/SecretSaveWarnings";
 import { DraftWarnings } from "./components/DraftWarnings";
 import { WebhookTestPayloadDialog } from "./components/WebhookTestPayloadDialog";
@@ -3801,24 +3804,62 @@ function StudioApp() {
     URL.revokeObjectURL(href);
   }, [buildCurrentWorkflow]);
 
+  /** An imported file whose id is a workflow you can see: import it as new (the default) or replace that one. */
+  const [importConflict, setImportConflict] = useState<{
+    content: string;
+    fileName?: string;
+    preview: WorkflowImportPreview & { existing: NonNullable<WorkflowImportPreview["existing"]> };
+    error: string | null;
+  } | null>(null);
+
+  const commitNativeImport = useCallback(
+    async (content: string, mode: "new" | "replace") => {
+      const imported = await importWorkflow({ json: content, mode });
+      const workflows = await fetchWorkflows({ projectId: activeProjectId });
+      setWorkflowList(workflows);
+      hydrateWorkflow(imported);
+      storeLocalWipWorkflow(imported);
+      setActiveMode("editor");
+    },
+    [activeProjectId, hydrateWorkflow, setActiveMode, setWorkflowList]
+  );
+
   const importNativeText = useCallback(
-    async (content: string) => {
+    async (content: string, fileName?: string) => {
       try {
         setBusy(true);
         setError(null);
-        const imported = await importWorkflow({ json: content });
-        const workflows = await fetchWorkflows({ projectId: activeProjectId });
-        setWorkflowList(workflows);
-        hydrateWorkflow(imported);
-        storeLocalWipWorkflow(imported);
-        setActiveMode("editor");
+        // A file whose id you can see asks first; anything else is imported as a new workflow.
+        const preview = await previewWorkflowImport({ json: content });
+        if (preview.existing) {
+          setImportConflict({ content, fileName, preview: { ...preview, existing: preview.existing }, error: null });
+          return;
+        }
+        await commitNativeImport(content, "new");
       } catch (importError) {
         handleApiError(importError, "Failed to import workflow");
       } finally {
         setBusy(false);
       }
     },
-    [activeProjectId, handleApiError, hydrateWorkflow, setActiveMode, setWorkflowList]
+    [commitNativeImport, handleApiError]
+  );
+
+  const confirmImportConflict = useCallback(
+    async (choice: ImportConflictChoice) => {
+      if (!importConflict) return;
+      try {
+        setBusy(true);
+        await commitNativeImport(importConflict.content, choice);
+        setImportConflict(null);
+      } catch (importError) {
+        const message = importError instanceof Error ? importError.message : "Failed to import workflow";
+        setImportConflict((current) => (current ? { ...current, error: message } : current));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [commitNativeImport, importConflict]
   );
 
   const openExternalImport = useCallback((source: ExternalImportSource | null = null) => {
@@ -3844,7 +3885,7 @@ function StudioApp() {
         openExternalImport({ text: content, fileName: file.name });
         return;
       }
-      await importNativeText(content);
+      await importNativeText(content, file.name);
     },
     [canManageWorkflows, importNativeText, openExternalImport]
   );
@@ -3887,7 +3928,7 @@ function StudioApp() {
   const handleNativeFileInImportDialog = useCallback(
     (source: ExternalImportSource) => {
       closeExternalImport();
-      void importNativeText(source.text);
+      void importNativeText(source.text, source.fileName);
     },
     [closeExternalImport, importNativeText]
   );
@@ -6105,6 +6146,19 @@ function StudioApp() {
           )}
         </main>
       </div>
+
+      {importConflict ? (
+        <ImportConflictDialog
+          fileName={importConflict.fileName}
+          importedName={importConflict.preview.workflow.name.replace(/ \(imported\)$/, "")}
+          existing={importConflict.preview.existing}
+          diff={importConflict.preview.diff}
+          busy={busy}
+          error={importConflict.error}
+          onConfirm={(choice) => void confirmImportConflict(choice)}
+          onClose={() => setImportConflict(null)}
+        />
+      ) : null}
 
       <ExternalImportDialog
         open={externalImportOpen}

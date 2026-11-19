@@ -67,6 +67,7 @@ import type {
 import type { DocumentScanRequest, DocumentScanResult } from "@ai-orchestrator/shared";
 import { EVAL_RUN_FINISHED_STATUSES } from "@ai-orchestrator/shared";
 import type { GuardEntityEngineInfo } from "@ai-orchestrator/shared";
+import type { WorkflowDiff } from "@ai-orchestrator/shared";
 import type {
   EvalCaseDetail,
   EvalCaseResult,
@@ -612,10 +613,33 @@ export async function duplicateWorkflow(
   });
 }
 
-export async function importWorkflow(payload: { json?: string; workflow?: unknown }) {
+/**
+ * Imports a workflow JSON file. `mode: "new"` (the default) makes a new workflow: the file's id is kept when it is
+ * free, otherwise the import gets a new id. `mode: "replace"` overwrites the stored workflow with the file's id.
+ */
+export async function importWorkflow(payload: { json?: string; workflow?: unknown; mode?: "new" | "replace" }) {
   return apiRequest<Workflow>("/api/workflows/import", {
     method: "POST",
     body: JSON.stringify(payload)
+  });
+}
+
+export interface WorkflowImportPreview {
+  dryRun: true;
+  mode: "new" | "replace";
+  /** The workflow the import would save in this mode. */
+  workflow: Workflow;
+  /** The stored workflow (readable by you) with the file's id, if any. */
+  existing: { id: string; name: string; updatedAt: string | null; projectId: string | null } | null;
+  /** What replacing `existing` with the file changes. */
+  diff: WorkflowDiff | null;
+}
+
+/** Previews a workflow JSON import without storing anything. */
+export async function previewWorkflowImport(payload: { json?: string; workflow?: unknown }) {
+  return apiRequest<WorkflowImportPreview>("/api/workflows/import", {
+    method: "POST",
+    body: JSON.stringify({ ...payload, dryRun: true })
   });
 }
 

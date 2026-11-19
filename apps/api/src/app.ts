@@ -88,6 +88,7 @@ import {
   WorkflowError,
   WORKFLOW_TOOL_ADAPTER_ID
 } from "@ai-orchestrator/shared";
+import { diffWorkflows } from "@ai-orchestrator/shared";
 import { BUDGET_SCOPE_TYPES, isBudgetScopeType, readTraceCarrier, repairWorkflowErrorConfigs, type BudgetScopeType } from "@ai-orchestrator/shared";
 import { CREDENTIAL_EXPIRING_EVENT, credentialRotateBodySchema, KEY_ROTATION_GRACE_HOURS } from "@ai-orchestrator/shared";
 import { CREDENTIAL_EXPIRY_SWEEP_INTERVAL_MS, CredentialExpiryService } from "./services/credential-expiry-service.js";
@@ -552,7 +553,15 @@ const authLoginSchema = z.object({
 
 const workflowImportSchema = z.object({
   json: z.string().optional(),
-  workflow: z.unknown().optional()
+  workflow: z.unknown().optional(),
+  /**
+   * `new` (the default): a new workflow. The file's id is kept when no workflow has it; otherwise the import gets a new
+   * id, " (imported)" after its name and its own trigger paths. `replace`: overwrite the stored workflow with the
+   * file's id (it must exist and be writable); a version of what it replaced is kept.
+   */
+  mode: z.enum(["new", "replace"]).default("new"),
+  /** Nothing is stored: returns the workflow the import would save, the stored one it matches and what a replace changes. */
+  dryRun: z.boolean().optional()
 });
 
 const externalWorkflowImportSchema = z.object({
@@ -11312,13 +11321,66 @@ export async function createApp(
         };
       }
 
-      // 12.2 — an export carries its source's trust settings; imported by a non-admin, the stored ones stay instead.
-      const importedWorkflow = user.role === "admin" ? workflow : withStoredTriggerTrust(await store.getWorkflow(workflow.id), workflow);
+      const mode = parsed.data.mode;
+      const sourceId = workflow.id;
+      const stored = await store.getWorkflow(sourceId);
+      // Only a workflow the user can read is named back (or diffed); an unreadable one still keeps its id from the import.
+      const readableStored = stored && (await runAccess.workflow(user, stored.id, "workflow:read")).ok ? stored : null;
+      if (mode === "replace" && !readableStored) {
+        reply.code(404);
+        return { error: `No workflow with id '${sourceId}' to replace` };
+      }
+
+      let importedWorkflow: Workflow;
+      if (mode === "replace" || !stored) {
+        // 12.2 — an export carries its source's trust settings; imported by a non-admin, the stored ones stay instead.
+        importedWorkflow = user.role === "admin" ? workflow : withStoredTriggerTrust(stored, workflow);
+      } else {
+        // A new workflow from a file whose id is taken: like a duplicate, it gets its own id and trigger paths.
+        importedWorkflow = {
+          ...workflow,
+          id: await makeUniqueWorkflowId(store, sourceId),
+          name: `${workflow.name} (imported)`.slice(0, 200),
+          workflowVersion: 1
+        };
+        delete importedWorkflow.createdAt;
+        delete importedWorkflow.updatedAt;
+        importedWorkflow.nodes = withUniqueTriggerPaths(importedWorkflow, await releaseService.usedRoutingKeys()).nodes;
+        if (user.role !== "admin") importedWorkflow = withStoredTriggerTrust(null, importedWorkflow);
+      }
+
+      if (parsed.data.dryRun === true) {
+        return {
+          dryRun: true,
+          mode,
+          workflow: importedWorkflow,
+          existing: readableStored
+            ? { id: readableStored.id, name: readableStored.name, updatedAt: readableStored.updatedAt ?? null, projectId: readableStored.projectId ?? null }
+            : null,
+          diff: readableStored ? diffWorkflows(readableStored, workflow, { defaultProjectId: DEFAULT_PROJECT_ID }) : null
+        };
+      }
+
       const saveDenial = await workflowSaveDenial(user, importedWorkflow);
       if (saveDenial) return denyRunAccess(reply, saveDenial);
 
+      const replacing = mode === "replace" && stored !== null;
       const savedWorkflow = await store.upsertWorkflow(importedWorkflow, { createdBy: user.id });
+      await workflowVersionService.snapshot({
+        workflow: savedWorkflow,
+        createdBy: user.id,
+        changeNote: replacing ? "replaced by import" : "imported"
+      });
       await workflowChanged(savedWorkflow.id);
+      await audit(request, user, {
+        category: "workflow",
+        eventType: "workflow.import",
+        action: replacing ? "update" : "create",
+        resourceType: "workflow",
+        resourceId: savedWorkflow.id,
+        projectId: savedWorkflow.projectId,
+        metadata: { name: savedWorkflow.name, mode, sourceId, version: savedWorkflow.workflowVersion }
+      });
       return savedWorkflow;
     } catch (error) {
       reply.code(400);
