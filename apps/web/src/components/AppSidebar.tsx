@@ -169,7 +169,8 @@ export function AppSidebar({
   const items = visible.filter((item) => !item.section);
   const mcpItems = visible.filter((item) => item.section === "mcp");
   const activeProject = projects?.find((project) => project.id === activeProjectId);
-  const showProjects = Boolean(projects && onChangeActiveProject);
+  // No project to pick and none to create (someone in no project, strict isolation): no project picker.
+  const showProjects = Boolean(projects && onChangeActiveProject && (projects.length > 0 || onCreateProject));
 
   // The drawer always shows labels; the stored desktop collapsed preference is left alone.
   const showCollapsed = collapsed && !isDrawer;

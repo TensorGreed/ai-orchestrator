@@ -6,7 +6,8 @@ import { expect, test, type Browser, type Page } from "@playwright/test";
  * runs it first; the operator it is shared with runs it from the editor, the run picker reads "Your runs" and lists only
  * their run, and the admin's run answers 404 to them. Needs a server with PROJECT_ISOLATION=strict (with role
  * isolation an operator reads every project, so the share is never all they have); skipped otherwise. No model is
- * called. Everything it makes is removed at the end.
+ * called. Everything it makes is removed at the end. Also: a deep link opens any workflow the person can read (and
+ * only those), and a person with no project of their own lands on the workflows shared with them.
  */
 
 const ADMIN_EMAIL = process.env.E2E_ADMIN_EMAIL ?? "admin@example.com";
@@ -52,10 +53,10 @@ async function pageAs(browser: Browser, email: string, password: string) {
   return { context, page, ollama };
 }
 
-function flow(id: string, projectId: string) {
+function flow(id: string, projectId: string, name = "E2E Own runs flow") {
   return {
     id,
-    name: "E2E Own runs flow",
+    name,
     schemaVersion: "1.0.0",
     workflowVersion: 1,
     projectId,
@@ -134,6 +135,155 @@ test.describe("own runs only", () => {
       await page.request.delete(`/api/workflows/${id}`);
       await page.request.delete(`/api/projects/${projectId}`);
       await page.request.delete(`/api/projects/${homeId}`);
+      for (const userId of userIds) await page.request.delete(`/api/users/${userId}`);
+    }
+  });
+});
+
+test.describe("opening shared workflows (strict isolation)", () => {
+  test.setTimeout(180_000);
+
+  test("a deep link opens a workflow shared with you and stays on it; one you cannot read is not found", async ({ page, browser }) => {
+    const ollama = await guardLocalModels(page);
+    await signIn(page);
+    const stamp = Date.now();
+    const projectId = `e2e-link-${stamp}`;
+    const homeId = `e2e-link-home-${stamp}`;
+    const shared = `wf-e2e-link-shared-${stamp}`;
+    const hidden = `wf-e2e-link-hidden-${stamp}`;
+    const own = `wf-e2e-link-own-${stamp}`;
+    const userIds: string[] = [];
+    try {
+      for (const [id, name] of [[projectId, "E2E Link team"], [homeId, "E2E Link home"]] as const) {
+        expect((await page.request.post("/api/projects", { data: { id, name } })).ok()).toBeTruthy();
+      }
+      for (const [id, project, name] of [[shared, projectId, "E2E Link shared"], [hidden, projectId, "E2E Link hidden"], [own, homeId, "E2E Link own"]] as const) {
+        const created = await page.request.post("/api/workflows", { data: flow(id, project, name) });
+        expect(created.ok(), await created.text()).toBeTruthy();
+      }
+      const operator = await makeUser(page, `e2e-link-${stamp}@example.com`, "operator");
+      userIds.push(operator.id);
+      expect((await page.request.post(`/api/projects/${homeId}/members`, { data: { email: operator.email, role: "viewer" } })).ok()).toBeTruthy();
+      expect((await page.request.post(`/api/workflows/${shared}/user-shares`, { data: { email: operator.email, accessLevel: "execute" } })).ok()).toBeTruthy();
+
+      const as = await pageAs(browser, operator.email, operator.password);
+      try {
+        const access = (await (await as.page.request.get(`/api/workflows/${shared}/access`)).json()) as { ownRunsOnly?: boolean };
+        test.skip(access.ownRunsOnly !== true, "Needs a server with PROJECT_ISOLATION=strict");
+
+        const name = as.page.getByLabel("Workflow name");
+        await as.page.goto(`/?projectId=${encodeURIComponent(homeId)}&workflowId=${encodeURIComponent(shared)}&mode=editor`);
+        await expect(name).toHaveValue("E2E Link shared", { timeout: 60_000 });
+        // It stays open: the project's own workflow does not replace it.
+        await as.page.waitForTimeout(2_000);
+        await expect(name).toHaveValue("E2E Link shared");
+        await as.page.screenshot({ path: path.join(SHOT_DIR, "deep-link-shared.png") });
+
+        // A workflow in another project, not shared with them, and one that does not exist: the same answer.
+        for (const id of [hidden, `wf-e2e-link-missing-${stamp}`]) {
+          await as.page.goto(`/?projectId=${encodeURIComponent(homeId)}&workflowId=${encodeURIComponent(id)}&mode=editor`);
+          await expect(as.page.getByText("Workflow not found").first()).toBeVisible({ timeout: 60_000 });
+          await expect(name).toHaveValue("E2E Link own", { timeout: 30_000 });
+          await expect(as.page.getByText("E2E Link hidden")).toHaveCount(0);
+        }
+        await as.page.screenshot({ path: path.join(SHOT_DIR, "deep-link-not-found.png") });
+        expect(as.ollama).toEqual([]);
+      } finally {
+        await as.context.close();
+      }
+      expect(ollama).toEqual([]);
+    } finally {
+      for (const id of [shared, hidden, own]) await page.request.delete(`/api/workflows/${id}`);
+      for (const id of [projectId, homeId]) await page.request.delete(`/api/projects/${id}`);
+      for (const userId of userIds) await page.request.delete(`/api/users/${userId}`);
+    }
+  });
+
+  test("a deep link opens a workflow of another of your projects while one project is active (either isolation mode)", async ({ page, browser }) => {
+    const ollama = await guardLocalModels(page);
+    await signIn(page);
+    const stamp = Date.now();
+    const [a, b] = [`e2e-link-a-${stamp}`, `e2e-link-b-${stamp}`];
+    const [inA, inB] = [`wf-e2e-link-a-${stamp}`, `wf-e2e-link-b-${stamp}`];
+    const userIds: string[] = [];
+    try {
+      for (const [id, name] of [[a, "E2E Link A"], [b, "E2E Link B"]] as const) {
+        expect((await page.request.post("/api/projects", { data: { id, name } })).ok()).toBeTruthy();
+      }
+      for (const [id, project, name] of [[inA, a, "E2E Link in A"], [inB, b, "E2E Link in B"]] as const) {
+        expect((await page.request.post("/api/workflows", { data: flow(id, project, name) })).ok()).toBeTruthy();
+      }
+      const builder = await makeUser(page, `e2e-link-builder-${stamp}@example.com`, "builder");
+      userIds.push(builder.id);
+      for (const project of [a, b]) {
+        expect((await page.request.post(`/api/projects/${project}/members`, { data: { email: builder.email, role: "viewer" } })).ok()).toBeTruthy();
+      }
+      const as = await pageAs(browser, builder.email, builder.password);
+      try {
+        const name = as.page.getByLabel("Workflow name");
+        await as.page.goto(`/?projectId=${encodeURIComponent(a)}&workflowId=${encodeURIComponent(inB)}&mode=editor`);
+        await expect(name).toHaveValue("E2E Link in B", { timeout: 60_000 });
+        await as.page.waitForTimeout(2_000);
+        await expect(name).toHaveValue("E2E Link in B");
+        await expect(as.page.getByText("Workflow not found")).toHaveCount(0);
+        expect(as.ollama).toEqual([]);
+      } finally {
+        await as.context.close();
+      }
+      expect(ollama).toEqual([]);
+    } finally {
+      for (const id of [inA, inB]) await page.request.delete(`/api/workflows/${id}`);
+      for (const id of [a, b]) await page.request.delete(`/api/projects/${id}`);
+      for (const userId of userIds) await page.request.delete(`/api/users/${userId}`);
+    }
+  });
+
+  test("someone in no project lands on the workflows shared with them, with no offer to create a project", async ({ page, browser }) => {
+    const ollama = await guardLocalModels(page);
+    await signIn(page);
+    const stamp = Date.now();
+    const projectId = `e2e-nomember-${stamp}`;
+    const id = `wf-e2e-nomember-${stamp}`;
+    // Shared from the default project, the one the page falls back to: still listed as shared, not as the project's.
+    const fromDefault = `wf-e2e-nomember-default-${stamp}`;
+    const userIds: string[] = [];
+    try {
+      expect((await page.request.post("/api/projects", { data: { id: projectId, name: "E2E No-member team" } })).ok()).toBeTruthy();
+      expect((await page.request.post("/api/workflows", { data: flow(id, projectId, "E2E No-member shared") })).ok()).toBeTruthy();
+      expect((await page.request.post("/api/workflows", { data: flow(fromDefault, "default", "E2E No-member from default") })).ok()).toBeTruthy();
+      const operator = await makeUser(page, `e2e-nomember-${stamp}@example.com`, "operator");
+      userIds.push(operator.id);
+      for (const shared of [id, fromDefault]) {
+        expect((await page.request.post(`/api/workflows/${shared}/user-shares`, { data: { email: operator.email, accessLevel: "execute" } })).ok()).toBeTruthy();
+      }
+
+      const as = await pageAs(browser, operator.email, operator.password);
+      try {
+        const projects = (await (await as.page.request.get("/api/projects")).json()) as { projects: unknown[] };
+        test.skip(projects.projects.length > 0, "Needs a server with PROJECT_ISOLATION=strict");
+
+        await as.page.goto("/");
+        const sharedWithYou = as.page.getByRole("region", { name: "Shared with you" });
+        await expect(sharedWithYou).toBeVisible({ timeout: 60_000 });
+        await expect(sharedWithYou.getByRole("button", { name: /E2E No-member shared/ })).toBeVisible();
+        await expect(sharedWithYou.getByRole("button", { name: /E2E No-member from default/ })).toBeVisible();
+        await expect(as.page.getByText("You are not a member of any project yet")).toBeVisible();
+        await expect(as.page.getByText(/Nothing is shared with you yet/)).toHaveCount(0);
+        // An operator may not create projects: no offer to.
+        await expect(as.page.getByRole("button", { name: "New project" })).toHaveCount(0);
+        await expect(as.page.locator("option", { hasText: "New project" })).toHaveCount(0);
+        await as.page.screenshot({ path: path.join(SHOT_DIR, "no-project-landing.png") });
+
+        await sharedWithYou.getByRole("button", { name: /E2E No-member shared/ }).click();
+        await expect(as.page.getByLabel("Workflow name")).toHaveValue("E2E No-member shared", { timeout: 60_000 });
+        expect(as.ollama).toEqual([]);
+      } finally {
+        await as.context.close();
+      }
+      expect(ollama).toEqual([]);
+    } finally {
+      for (const shared of [id, fromDefault]) await page.request.delete(`/api/workflows/${shared}`);
+      await page.request.delete(`/api/projects/${projectId}`);
       for (const userId of userIds) await page.request.delete(`/api/users/${userId}`);
     }
   });

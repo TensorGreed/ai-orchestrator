@@ -275,6 +275,12 @@ project member keeps the full view, and so does anyone who also has the workflow
   rules, recent tool calls in the MCP catalog and the dead-letter queue leave such a workflow out or answer `404`.
 - **The editor.** `GET /api/workflows/:id/access` answers `ownRunsOnly: true` for them.
 
+**Opening shared workflows.** A link to a workflow (`?workflowId=`) opens it for anyone who can read it, through their
+project, a share to a project or a share with them, whichever project is active. A workflow they cannot read answers
+"Workflow not found", as one that does not exist. Someone who is a member of no project (with
+`PROJECT_ISOLATION=strict`) lands on Home with the workflows shared with them. Only people who may create projects
+(builders and admins) are offered **New project**.
+
 ## Project access
 
 Project memberships (project admin, editor, viewer, or a custom role) set what a
