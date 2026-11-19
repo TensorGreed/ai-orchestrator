@@ -11,7 +11,7 @@
  */
 import { ErrorCategory, WorkflowError } from "@ai-orchestrator/shared";
 import type { SecretReference } from "@ai-orchestrator/shared";
-import { renderCheckedTemplate as renderTemplate } from "../template";
+import { isTemplateValueMissingError, renderCheckedTemplate as renderTemplate } from "../template";
 import { renderIntegerField, renderRequiredString } from "./template-fields";
 
 export interface Tier1Context {
@@ -142,7 +142,8 @@ export async function executeSlackSendMessage(
   if (blocksRaw.trim()) {
     try {
       blocks = JSON.parse(renderTemplate(blocksRaw, ctx.templateData));
-    } catch {
+    } catch (error) {
+      if (isTemplateValueMissingError(error)) throw error;
       throw new WorkflowError(
         "slack_send_message: 'blocks' must be valid JSON",
         ErrorCategory.NODE_CONFIG,

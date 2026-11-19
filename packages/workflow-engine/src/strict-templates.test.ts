@@ -123,4 +123,73 @@ describe("the strictTemplates workflow setting", () => {
     expect(isTemplateValueMissingError(thrown)).toBe(true);
     expect(runWithStrictTemplates(true, () => evaluateConditionTemplate("{{score}} > 5", { score: 9 })).result).toBe(true);
   });
+
+  it("keeps its code and is not retried when a node handler passes errors on as its own (an HTML node)", async () => {
+    const workflow: Workflow = {
+      ...setWorkflow("x", { strictTemplates: true }),
+      nodes: [
+        { id: "start", type: "text_input", name: "Start", position, config: { text: "hello" } },
+        { id: "set", type: "html_node", name: "Html", position, config: { operation: "generate", template: "<p>{{nope}}</p>" }, errorConfig: { retryOnFail: true, maxRetries: 2, retryIntervalMs: 1 } }
+      ]
+    };
+    const result = await executeWorkflow({ workflow }, dependencies());
+    const html = result.nodeResults.find((node) => node.nodeId === "set");
+    expect(html?.status).toBe("error");
+    expect(html?.errorCode).toBe(TEMPLATE_VALUE_MISSING_CODE);
+    expect(html?.errorCategory).toBe("node_config");
+    expect(html?.attempts ?? 1).toBe(1);
+  });
+
+  it("follows the workflow that runs: a sub-workflow uses its own setting, not its caller's", async () => {
+    const child = (strict: boolean): Workflow => ({
+      id: "child",
+      name: "Child",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      ...(strict ? { settings: { strictTemplates: true } } : {}),
+      nodes: [
+        { id: "c1", type: "text_input", name: "C1", position, config: { text: "x" } },
+        { id: "c2", type: "set_node", name: "C2", position, config: { assignments: [{ key: "v", valueTemplate: "<{{nope}}>" }] } }
+      ],
+      edges: [{ id: "ce", source: "c1", target: "c2" }]
+    });
+    const parent = (strict: boolean): Workflow => ({
+      id: "parent",
+      name: "Parent",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      ...(strict ? { settings: { strictTemplates: true } } : {}),
+      nodes: [
+        { id: "p1", type: "text_input", name: "P1", position, config: { text: "x" } },
+        { id: "p2", type: "execute_workflow", name: "Call", position, config: { workflowId: "child" } }
+      ],
+      edges: [{ id: "pe", source: "p1", target: "p2" }]
+    });
+    const runWith = async (parentStrict: boolean, childStrict: boolean) =>
+      (await executeWorkflow({ workflow: parent(parentStrict) }, { ...dependencies(), loadWorkflow: async () => child(childStrict) })).status;
+    expect(await runWith(true, false)).toBe("success");
+    expect(await runWith(false, true)).toBe("error");
+  });
+
+  it("applies to an approval message, and not to a Respond to Webhook node's default body", async () => {
+    const approval: Workflow = {
+      ...setWorkflow("x", { strictTemplates: true }),
+      nodes: [
+        { id: "start", type: "text_input", name: "Start", position, config: { text: "hello" } },
+        { id: "set", type: "human_approval", name: "Approve", position, config: { approvalMessage: "ok {{nope}}", timeoutMinutes: 5 } }
+      ]
+    };
+    const approvalRun = await executeWorkflow({ workflow: approval }, dependencies());
+    expect(approvalRun.status).toBe("error");
+    expect(approvalRun.nodeResults.find((node) => node.nodeId === "set")?.errorCode).toBe(TEMPLATE_VALUE_MISSING_CODE);
+
+    const respond: Workflow = {
+      ...setWorkflow("x", { strictTemplates: true }),
+      nodes: [
+        { id: "start", type: "text_input", name: "Start", position, config: { text: "hello" } },
+        { id: "set", type: "webhook_response", name: "Respond", position, config: { statusCode: 200 } }
+      ]
+    };
+    expect((await executeWorkflow({ workflow: respond }, dependencies())).status).toBe("success");
+  });
 });

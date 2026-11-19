@@ -1467,8 +1467,18 @@ function StudioApp() {
   // Ids a new node must not take: the workflow's nodes, its pinned data and the last run's nodes (a new node with the
   // id of a deleted one would show that node's pinned data or run result).
   const nodeIdsInUseRef = useRef<() => Set<string>>(() => new Set());
-  nodeIdsInUseRef.current = () =>
-    new Set([...nodes.map((node) => node.id), ...pinnedNodeIds, ...(executionResult?.nodeResults ?? []).map((result) => result.nodeId)]);
+  // Field names of the last run's data count as taken too: a parent's id is a key of its child's input next to the
+  // fields, so a node named like a field (`order_id`) would hide that field from `{{order_id}}`.
+  nodeIdsInUseRef.current = () => {
+    const taken = new Set([...nodes.map((node) => node.id), ...pinnedNodeIds]);
+    for (const result of executionResult?.nodeResults ?? []) {
+      taken.add(result.nodeId);
+      for (const value of [result.input, result.output]) {
+        if (value && typeof value === "object" && !Array.isArray(value)) for (const key of Object.keys(value)) taken.add(key);
+      }
+    }
+    return taken;
+  };
   const currentWorkflowExists = workflowList.some((item) => item.id === currentWorkflow.id);
   const canManageWorkflows = authUser?.role === "admin" || authUser?.role === "builder";
   const canManageSecrets = authUser?.role === "admin" || authUser?.role === "builder";

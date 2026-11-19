@@ -79,7 +79,11 @@ Turn on **Strict templates** in the workflow's **More actions** menu to make a m
 - is a path with no value, such as `{{customer.id}}` when the input has no `customer`;
 - is an expression that returns nothing (`undefined`) or fails, such as `{{ $json.customer.name.first }}`.
 
-The error names the template, for example `Template {{customer.id}} has no value, and this workflow uses strict templates`, and the node's result carries `errorCode: "template_value_missing"` (a webhook caller gets it as `code`). The failure is not retried, and the node's **On Error** setting applies as for any other failure, so an Error output can catch it. A field that holds `null` still renders empty, and so do the run's optional prompt fields `{{system_prompt}}`, `{{user_prompt}}` and `{{session_id}}`, which nodes read by default and fall back from when the run has none. IF conditions follow the setting too.
+The error names the template, for example `Template {{customer.id}} has no value, and this workflow uses strict templates`, and the node's result carries `errorCode: "template_value_missing"` (a webhook caller gets it as `code`). The failure is not retried, and the node's **On Error** setting applies as for any other failure, so an Error output can catch it. A field that holds `null` still renders empty, and so do the run's optional prompt fields `{{system_prompt}}`, `{{user_prompt}}` and `{{session_id}}`, which nodes read by default and fall back from when the run has none. A Respond to Webhook node without its own body template (the default `{{result}}`) is not affected either.
+
+- IF conditions follow the setting: a condition that tests whether a field is there, such as `{{ $json.coupon }}`, fails when it is missing. Write the test out instead: `{{ $json.coupon !== undefined }}`.
+- A sub-workflow uses its own setting, not its caller's.
+- When [content rules](/product/content-rules) check a node's outbound settings before it sends, the check itself renders without strict templates (it reads settings the node may not use). The node then fails on a path without a value in a setting it sends; an expression in such a setting is not evaluated a second time.
 
 A path only walks objects and arrays: on a text, `{{answer.length}}` renders empty. Write it as an expression instead, such as `{{ answer.trim().length }}`.
 

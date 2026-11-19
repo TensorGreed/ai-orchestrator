@@ -114,6 +114,20 @@ describe("template field autocomplete", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it("lets Shift+Tab move focus as usual, and opens the list again for a new {{ after an Escape", () => {
+    renderInspector(<NodeInspector {...props()} />);
+    const url = screen.getByLabelText("URL Template") as HTMLTextAreaElement;
+    fireEvent.focus(url);
+    type(url, "{{");
+    fireEvent.keyDown(url, { key: "Tab", shiftKey: true });
+    expect(url.value).toBe("{{");
+    fireEvent.keyDown(url, { key: "Escape" });
+    expect(screen.queryByTestId("template-suggest")).toBeNull();
+    type(url, "");
+    type(url, "{{");
+    expect(screen.getByTestId("template-suggest")).toBeInTheDocument();
+  });
+
   it("offers every step under results with its label, even without run data", () => {
     renderInspector(<NodeInspector {...props({ executionResult: null })} />);
     const url = screen.getByLabelText("URL Template") as HTMLTextAreaElement;
@@ -240,6 +254,12 @@ describe("dragging run data fields into a template field", () => {
     render(<NodeRunInput result={two} labelFor={(id) => id} isTrigger={false} draggableFields />);
     expect(dragText(screen.getByRole("rowheader", { name: "status" }))).toBe("{{results.fetch_items.status}}");
     expect(dragText(screen.getByRole("rowheader", { name: "note" }))).toBe("{{results.other_step.note}}");
+  });
+
+  it("reads a connected step's list by the step's id", () => {
+    const list: RunNodeResult = { ...input, input: { parent_outputs: { rows_1: [{ title: "a" }] }, rows_1: [{ title: "a" }] } };
+    render(<NodeRunInput result={list} labelFor={(id) => id} isTrigger={false} draggableFields />);
+    expect(dragText(screen.getByRole("columnheader", { name: "title" }))).toBe("{{rows_1.0.title}}");
   });
 
   it("does not make fields draggable outside the inspector's Input pane", () => {

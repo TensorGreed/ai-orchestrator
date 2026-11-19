@@ -525,7 +525,14 @@ export function NodeRunInput({
               value={entry.value}
               label={`From ${entry.label}`}
               // One upstream step: its fields read as `{{field}}`; with several, `{{results.<id>.field}}` says whose.
-              fieldPath={draggableFields ? (split.receivedFrom.length === 1 ? "" : joinTemplatePath("results", entry.nodeId)) : undefined}
+              // A list (or single value) is not spread into the input: it reads by its step's id.
+              fieldPath={
+                draggableFields
+                  ? split.receivedFrom.length === 1 && isRecord(entry.value)
+                    ? ""
+                    : joinTemplatePath(split.receivedFrom.length === 1 ? "" : "results", entry.nodeId)
+                  : undefined
+              }
             />
           </section>
         ))

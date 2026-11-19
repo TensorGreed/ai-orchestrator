@@ -1,7 +1,7 @@
 import { withExpressionEvaluator, isComplexExpression, type ExpressionContext } from "./expression";
 import { isExpressionSandboxFailure, toSandboxJson } from "./expression-sandbox";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { TEMPLATE_VALUE_MISSING_ERROR_CODE } from "@ai-orchestrator/shared";
+import { ErrorCategory, TEMPLATE_VALUE_MISSING_ERROR_CODE, WorkflowError } from "@ai-orchestrator/shared";
 import { recordTemplateRead } from "./data-labels";
 
 // ---------------------------------------------------------------------------
@@ -19,9 +19,11 @@ const OPTIONAL_RUN_FIELDS = new Set(["system_prompt", "user_prompt", "session_id
 
 /**
  * A `{{ }}` rendered nothing while strict templates are on: its path has no value, or its expression returned
- * nothing or failed. The message names the template body (which the author wrote), never a value.
+ * nothing or failed. The message names the template body (which the author wrote), never a value. A WorkflowError
+ * that is not retryable, with `metadata.code` `template_value_missing`, so handlers that pass WorkflowErrors on keep
+ * it as it is and the run reports the code.
  */
-export class TemplateValueMissingError extends Error {
+export class TemplateValueMissingError extends WorkflowError {
   readonly code = TEMPLATE_VALUE_MISSING_CODE;
   constructor(
     readonly body: string,
@@ -30,14 +32,18 @@ export class TemplateValueMissingError extends Error {
     super(
       reason === "missing"
         ? `Template {{${body}}} has no value, and this workflow uses strict templates. Check the field name, or turn off Strict templates in the workflow menu to render it empty.`
-        : `Template {{${body}}} could not be evaluated, and this workflow uses strict templates. Fix the expression, or turn off Strict templates in the workflow menu to render it empty.`
+        : `Template {{${body}}} could not be evaluated, and this workflow uses strict templates. Fix the expression, or turn off Strict templates in the workflow menu to render it empty.`,
+      ErrorCategory.NODE_CONFIG,
+      false,
+      { code: TEMPLATE_VALUE_MISSING_CODE },
+      "Strict templates are on for this workflow. Open the node and fix the field the error names (type {{ in it for the fields the last run had), or turn off Strict templates in the workflow menu."
     );
     this.name = "TemplateValueMissingError";
   }
 }
 
 export function isTemplateValueMissingError(error: unknown): error is TemplateValueMissingError {
-  return error instanceof TemplateValueMissingError || (error instanceof Error && (error as Error & { code?: unknown }).code === TEMPLATE_VALUE_MISSING_CODE);
+  return error instanceof TemplateValueMissingError || (error instanceof WorkflowError && error.metadata?.code === TEMPLATE_VALUE_MISSING_CODE);
 }
 
 const strictness = new AsyncLocalStorage<boolean>();
@@ -344,7 +350,19 @@ export function renderCheckedTemplate(template: string, values: Record<string, u
   const renderings = checkedRenderings.get(values);
   if (!renderings) return renderTemplate(template, values);
   const checked = renderings.get(template);
-  if (checked !== undefined) return checked;
+  if (checked !== undefined) {
+    // The check rendered it without strict templates (it renders settings this operation may not use). With strict
+    // templates on, a path the handler uses must still have a value; an expression is never evaluated a second time.
+    if (strictTemplatesOn()) {
+      const missing: MissingTemplateValue[] = [];
+      for (const match of template.matchAll(TEMPLATE_BODY)) {
+        const body = (match[1] ?? "").trim();
+        if (SIMPLE_PATH.test(body) && resolvePath(values, body) === undefined) missing.push({ body, reason: "missing" });
+      }
+      throwIfStrictMissing(missing);
+    }
+    return checked;
+  }
   if (template.includes("{{")) {
     throw new Error("A templated setting was not checked by the content rules before sending, so the request was not sent.");
   }

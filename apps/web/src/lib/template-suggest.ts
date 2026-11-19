@@ -105,9 +105,12 @@ export function buildTemplateSuggestions(sources: TemplateSuggestSources): Templ
   const isInternalKey = sources.isInternalKey ?? (() => false);
   const out: TemplateSuggestion[] = [];
   const parentIds = new Set(sources.parents.map((parent) => parent.id));
-  // Fields of the steps connected straight in: `{{field}}`.
+  // Fields of the steps connected straight in: `{{field}}`. Only an object's fields are spread into the input: a
+  // step whose output is a list (or a single value) is read by its id (`{{<id>.0.title}}`).
   for (const parent of sources.parents) {
-    collectPaths(parent.output, "", parent.label, out, isInternalKey);
+    const base = isRecord(parent.output) ? "" : joinTemplatePath("", parent.id);
+    if (base === undefined) continue;
+    collectPaths(parent.output, base, parent.label, out, isInternalKey);
   }
   // What the node received in the run besides its parents' fields: run input (webhook body, prompt) and context.
   if (isRecord(sources.input)) {
@@ -137,6 +140,22 @@ export function buildTemplateSuggestions(sources: TemplateSuggestSources): Templ
     seen.add(entry.path);
     return true;
   });
+}
+
+const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
+
+/**
+ * A template path as JavaScript under `root`: `items.0.title` is `$json.items[0].title`, and a key that is not a
+ * name is quoted (`$json.headers["content-type"]`), since an expression reads `.0` and `-` differently from a path.
+ */
+export function expressionPath(root: string, path: string): string {
+  let out = root;
+  for (const segment of path.split(".")) {
+    if (/^\d+$/.test(segment)) out += `[${segment}]`;
+    else if (IDENTIFIER.test(segment)) out += `.${segment}`;
+    else out += `[${JSON.stringify(segment)}]`;
+  }
+  return out;
 }
 
 /** The `{{ }}` token being typed at the caret: the range to replace and the text typed so far. */
@@ -171,7 +190,7 @@ export function rankTemplateSuggestions(all: TemplateSuggestion[], query: string
   let needle = query;
   if (query.startsWith("$json.")) {
     const direct = all.filter((entry) => !entry.path.startsWith("results.") && !entry.path.startsWith("$"));
-    pool = direct.map((entry) => ({ ...entry, path: `$json.${entry.path}` }));
+    pool = direct.map((entry) => ({ ...entry, path: expressionPath("$json", entry.path) }));
   }
   needle = needle.toLowerCase();
   const scored: Array<{ entry: TemplateSuggestion; score: number; depth: number; index: number }> = [];

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyTemplateSuggestion,
   buildTemplateSuggestions,
+  expressionPath,
   joinTemplatePath,
   rankTemplateSuggestions,
   templateForPath,
@@ -83,10 +84,17 @@ describe("ranking what was typed", () => {
     expect(rankTemplateSuggestions(all, "status").map((entry) => entry.path)).not.toContain("status");
   });
 
-  it("offers the input fields under $json.", () => {
+  it("offers the input fields under $json., written as JavaScript", () => {
     const ranked = rankTemplateSuggestions(all, "$json.bo").map((entry) => entry.path);
     expect(ranked[0]).toBe("$json.body");
     expect(ranked.every((path) => path.startsWith("$json."))).toBe(true);
+    expect(ranked).toContain("$json.body.items[0].title");
+    expect(expressionPath("$json", "headers.content-type")).toBe('$json.headers["content-type"]');
+  });
+
+  it("reads a connected step whose output is a list by its id", () => {
+    const list = buildTemplateSuggestions({ nodeId: "x", parents: [{ id: "rows_1", label: "Rows", output: [{ title: "a" }] }], steps: [] });
+    expect(list.map((entry) => entry.path).slice(0, 2)).toEqual(["rows_1.0", "rows_1.0.title"]);
   });
 });
 

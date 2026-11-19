@@ -166,7 +166,6 @@ import {
 import {
   bindCheckedRenderings,
   evaluateConditionTemplate,
-  isTemplateValueMissingError,
   renderTemplate,
   runWithStrictTemplates,
   TEMPLATE_VALUE_MISSING_CODE,
@@ -4568,21 +4567,7 @@ function executeNode(
  * fails the node with a `template_value_missing` error that is never retried (the same data fails the same way).
  */
 async function runWithNodeTemplateMode<T>(context: Pick<NodeRuntimeContext, "workflow">, body: () => Promise<T>): Promise<T> {
-  const strict = context.workflow.settings?.strictTemplates === true;
-  try {
-    return await runWithStrictTemplates(strict, body);
-  } catch (error) {
-    if (!(error instanceof WorkflowError) && isTemplateValueMissingError(error)) {
-      throw new WorkflowError(
-        error.message,
-        ErrorCategory.NODE_CONFIG,
-        false,
-        { code: TEMPLATE_VALUE_MISSING_CODE },
-        "Strict templates are on for this workflow. Open the node and fix the field the error names (type {{ in it for the fields the last run had), or turn off Strict templates in the workflow menu."
-      );
-    }
-    throw error;
-  }
+  return await runWithStrictTemplates(context.workflow.settings?.strictTemplates === true, body);
 }
 
 function isStrictTemplateFailure(error: unknown): boolean {
@@ -4610,7 +4595,9 @@ async function executeNodeHandler(
   // Phase 12.4 — the MCP tool policy decides a direct tool call before the guard's destination check.
   await directMcpPolicyPreCheck(node, config, context, dependencies);
   // Phase 16 — outbound checks (egress, MCP destination rules) run before the handler, and before a replay's stub.
-  const outbound = await outboundPreCheck(node, config, context, dependencies);
+  // The check renders every templated setting, also ones this operation does not use: never strictly (the handler's
+  // own renders are, when the workflow says so).
+  const outbound = await runWithStrictTemplates(false, () => outboundPreCheck(node, config, context, dependencies));
 
   // Phase 12 coverage — the Reveal node (never stubbed: `replayStubFor`); in a replay it passes its input through.
   if (node.type === "guard_reveal") {
@@ -8331,7 +8318,8 @@ async function executeNodeHandler(
           ? Math.max(100, Math.min(599, Math.floor(config.statusCode)))
           : 200;
       const headersTemplate = typeof config.headersTemplate === "string" ? config.headersTemplate : "{}";
-      const bodyTemplate = typeof config.bodyTemplate === "string" ? config.bodyTemplate : "{{result}}";
+      const ownBodyTemplate = typeof config.bodyTemplate === "string" ? config.bodyTemplate : undefined;
+      const bodyTemplate = ownBodyTemplate ?? "{{result}}";
 
       const renderedHeaders = renderTemplate(headersTemplate, templateData);
       let headersRecord: Record<string, unknown> = {};
@@ -8346,7 +8334,8 @@ async function executeNodeHandler(
         normalizedHeaders[key] = String(value);
       }
 
-      const renderedBody = renderTemplate(bodyTemplate, templateData);
+      // The default body (`{{result}}`) is not the author's template: strict templates do not apply to it.
+      const renderedBody = ownBodyTemplate === undefined ? runWithStrictTemplates(false, () => renderTemplate(bodyTemplate, templateData)) : renderTemplate(bodyTemplate, templateData);
       const body = parseTemplateValue(renderedBody);
 
       return {
@@ -8627,7 +8616,7 @@ async function executeNodeWithRetry(
   if (replayStub) {
     throwIfAborted(dependencies.abortSignal);
     // Phase 16 — the egress check runs just before the stub: nothing is sent, nothing pauses.
-    await runWithNodeTemplateMode(context, () => runInLabelScope(context.labelScope, () => outboundPreCheck(node, config, context, dependencies)));
+    await runWithStrictTemplates(false, () => runInLabelScope(context.labelScope, () => outboundPreCheck(node, config, context, dependencies)));
     return { output: resolveReplayStub(replayStub, context), attempts: 1 };
   }
   const retry = getRetryConfigForNode(node);
@@ -9069,7 +9058,11 @@ export async function executeWorkflow(
       ...(dependencies.logger ? { logger: dependencies.logger } : {})
     });
   };
-  return owner ? runWithSandboxOwner(`workflow:${owner}`, run) : run();
+  // Strict templates follow the workflow that runs: a sub-workflow uses its own setting, not its caller's, also for
+  // the templates a run renders outside a node's handler (an approval message).
+  const strict = (request.resumeState?.workflow ?? request.workflow)?.settings?.strictTemplates === true;
+  const runWithMode = () => runWithStrictTemplates(strict, run);
+  return owner ? runWithSandboxOwner(`workflow:${owner}`, runWithMode) : runWithMode();
 }
 
 /**

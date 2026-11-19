@@ -791,6 +791,8 @@ function useTemplateAutocomplete<T extends TextEntryElement>({
     if (same) return;
     setToken(next);
     setActiveOption(0);
+    // An Escape closes the list for the `{{` it was pressed in; another `{{` (or none) opens it again.
+    if (next?.from !== token?.from) setDismissedAt(null);
   };
 
   const apply = (option: TemplateSuggestion) => {
@@ -812,7 +814,7 @@ function useTemplateAutocomplete<T extends TextEntryElement>({
         event.preventDefault();
         const step = event.key === "ArrowDown" ? 1 : -1;
         setActiveOption((activeIndex + step + options.length) % options.length);
-      } else if (event.key === "Enter" || event.key === "Tab") {
+      } else if (event.key === "Enter" || (event.key === "Tab" && !event.shiftKey)) {
         event.preventDefault();
         apply(options[activeIndex]!);
       } else if (event.key === "Escape") {
@@ -856,7 +858,10 @@ function useTemplateAutocomplete<T extends TextEntryElement>({
     elementRef,
     /** Call from the field's change handler with the element, after passing the new text on. */
     onTextChange: updateToken,
-    close: () => setToken(null)
+    close: () => {
+      setToken(null);
+      setDismissedAt(null);
+    }
   };
 }
 
