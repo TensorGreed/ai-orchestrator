@@ -238,6 +238,11 @@ describe("workflow shares with people", () => {
     expect(forOperator.json()).toMatchObject({ workflows: [{ id: "wf-team", name: "Flow wf-team", ownerProjectId: "team", accessLevel: "execute", effectiveAccess: "execute" }] });
     const forViewer = await call(context, "GET", "/api/projects/ops/shared-workflows", viewer.cookie);
     expect(forViewer.json()).toMatchObject({ workflows: [{ id: "wf-team", effectiveAccess: "read" }] });
+    // A global viewer who edits in ops still may not run (the run routes need operator and up).
+    await context.store.upsertProjectRole({ userId: viewer.id, projectId: "ops", role: "editor" });
+    expect((await call(context, "GET", "/api/projects/ops/shared-workflows", viewer.cookie)).json()).toMatchObject({ workflows: [{ id: "wf-team", effectiveAccess: "read" }] });
+    // A missing project reads the same as one you cannot see.
+    expect((await call(context, "GET", "/api/projects/nope/shared-workflows", outsider.cookie)).statusCode).toBe(404);
     // Not a member of ops (strict isolation): the project reads as missing.
     expect((await call(context, "GET", "/api/projects/ops/shared-workflows", outsider.cookie)).statusCode).toBe(404);
     // The owning project lists its own workflows elsewhere.

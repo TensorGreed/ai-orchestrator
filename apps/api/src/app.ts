@@ -206,7 +206,7 @@ import {
   oidcUserErrorCode,
   type FetchLike as OidcFetch
 } from "./services/oidc-service.js";
-import { editorRunOptionsError, editorRunOptionsRefused } from "./run-editor-options.js";
+import { editorRunOptionsError, editorRunOptionsRefused, savedRunLimits } from "./run-editor-options.js";
 import {
   ALL_PERMISSIONS,
   RbacService,
@@ -2812,7 +2812,7 @@ export async function createApp(
             // 12.7 — a run started from a sensitive run's content streams rule event digests, not masked evidence; so
             // does the resumed part of a run whose paused part read sensitive content (or carried it in).
             ...(input.sensitiveInput === true ||
-            (input.usePinnedData === true && (input.workflow.pinnedDataSensitive?.length ?? 0) > 0) ||
+            (input.usePinnedData !== false && (input.workflow.pinnedDataSensitive?.length ?? 0) > 0) ||
             input.resumeState?.sensitiveSessionRead === true ||
             input.resumeState?.sensitiveSessionReadMarked === true
               ? { sensitiveInput: true }
@@ -3038,7 +3038,7 @@ export async function createApp(
       if (
         captureTicket &&
         !captureHandedOff &&
-        (input.sensitiveInput === true || (input.usePinnedData === true && (input.workflow.pinnedDataSensitive?.length ?? 0) > 0))
+        (input.sensitiveInput === true || (input.usePinnedData !== false && (input.workflow.pinnedDataSensitive?.length ?? 0) > 0))
       ) {
         replayCapture?.abandon(captureTicket, "skipped_sensitive_input");
         captureHandedOff = true;
@@ -10870,7 +10870,8 @@ export async function createApp(
     const target = await runAccess.project(user, request.params.id, "workflow:read");
     if (!target.ok) return denyRunAccess(reply, target);
     const projectId = request.params.id;
-    const mayRunHere = await rbacService.can(user, projectId, "workflow:execute");
+    // The run routes also need a global role that may run (operator and up).
+    const mayRunHere = hasRequiredRole(user, ["operator"]) && (await rbacService.can(user, projectId, "workflow:execute"));
     const shared = await store.listWorkflowSummariesSharedToProject(projectId);
     const items = shared
       .filter((share) => share.ownerProjectId !== projectId)
@@ -12573,15 +12574,16 @@ export async function createApp(
           systemPrompt: parsed.data.system_prompt,
           userPrompt: parsed.data.user_prompt,
           sessionId: parsed.data.session_id,
-          executionTimeoutMs: normalizeExecutionTimeoutMs(
-            parsed.data.executionTimeoutMs,
-            parsed.data.execution_timeout_ms,
-            config.WORKFLOW_EXECUTION_TIMEOUT_MS
-          ),
           customData: parsed.data.customData,
           executionId,
           triggerType: "webhook_api",
-          triggeredBy: user.email
+          triggeredBy: user.email,
+          // Operators run the selected workflow: no pinned data, and no longer than the deployment's timeout.
+          ...savedRunLimits(
+            user.role,
+            normalizeExecutionTimeoutMs(parsed.data.executionTimeoutMs, parsed.data.execution_timeout_ms, config.WORKFLOW_EXECUTION_TIMEOUT_MS),
+            config.WORKFLOW_EXECUTION_TIMEOUT_MS
+          )
         },
         progress: { requestInput: agentWebhookRequestInput(parsed.data), customData: parsed.data.customData },
         history: { requestInput: agentWebhookRequestInput(parsed.data), customData: parsed.data.customData }
@@ -13696,14 +13698,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             systemPrompt: parsed.data.system_prompt,
             userPrompt: parsed.data.user_prompt,
             sessionId: parsed.data.session_id,
-            executionTimeoutMs: normalizeExecutionTimeoutMs(
-              parsed.data.executionTimeoutMs,
-              parsed.data.execution_timeout_ms,
-              config.WORKFLOW_EXECUTION_TIMEOUT_MS
-            ),
             executionId,
             triggerType: "webhook_api_stream",
-            triggeredBy: user.email
+            triggeredBy: user.email,
+            // Operators run the selected workflow: no pinned data, and no longer than the deployment's timeout.
+            ...savedRunLimits(
+              user.role,
+              normalizeExecutionTimeoutMs(parsed.data.executionTimeoutMs, parsed.data.execution_timeout_ms, config.WORKFLOW_EXECUTION_TIMEOUT_MS),
+              config.WORKFLOW_EXECUTION_TIMEOUT_MS
+            )
           },
           progress: { requestInput: agentWebhookRequestInput(parsed.data) },
           history: { requestInput: agentWebhookRequestInput(parsed.data) }

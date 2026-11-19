@@ -41,7 +41,7 @@ import {
   normalizeSessionId,
   retryAfterSeconds
 } from "./run-helpers.js";
-import { editorRunOptionsError, editorRunOptionsRefused } from "./run-editor-options.js";
+import { editorRunOptionsError, editorRunOptionsRefused, savedRunLimits } from "./run-editor-options.js";
 import { startSseHeartbeat, type SseSessionWatch } from "./sse-heartbeat.js";
 import { traceUrlFor } from "./telemetry/trace-url.js";
 import { maskRunEvent, maskRunNodeData, runViewHidesNodeData } from "./response-run-view.js";
@@ -167,6 +167,12 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     if (!user) {
       return;
     }
+    // The editor's options are refused before anything else is checked (budgets included).
+    const refusedOptions = editorRunOptionsRefused(user.role, request.body);
+    if (refusedOptions.length > 0) {
+      reply.code(403);
+      return editorRunOptionsError(refusedOptions);
+    }
 
     const access = await runAccess.workflow(user, request.params.id, "workflow:execute");
     if (!access.ok) return denyRunAccess(reply, access);
@@ -218,11 +224,6 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
         details: parsed.error.issues
       };
     }
-    const refusedOptions = editorRunOptionsRefused(user.role, request.body);
-    if (refusedOptions.length > 0) {
-      reply.code(403);
-      return editorRunOptionsError(refusedOptions);
-    }
     const prepared = await prepareWorkflowExecutionPayload(parsed.data, reply, user);
     if (!prepared) {
       return { error: "Source execution not found" };
@@ -251,17 +252,18 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       systemPrompt: executionPayload.system_prompt,
       userPrompt: executionPayload.user_prompt,
       sessionId: normalizeSessionId(executionPayload.sessionId, executionPayload.session_id),
-      executionTimeoutMs: normalizeExecutionTimeoutMs(
-        executionPayload.executionTimeoutMs,
-        executionPayload.execution_timeout_ms,
-        config.WORKFLOW_EXECUTION_TIMEOUT_MS
-      ),
       customData: executionPayload.customData,
       executionId,
       triggerType: executeTrigger,
       triggeredBy: user.email,
       captureSource,
-      captureInputOrigin: captureSource ? "user" : undefined
+      captureInputOrigin: captureSource ? "user" : undefined,
+      // Operators run the saved workflow: no pinned data, and no longer than the deployment's timeout.
+      ...savedRunLimits(
+        user.role,
+        normalizeExecutionTimeoutMs(executionPayload.executionTimeoutMs, executionPayload.execution_timeout_ms, config.WORKFLOW_EXECUTION_TIMEOUT_MS),
+        config.WORKFLOW_EXECUTION_TIMEOUT_MS
+      )
       },
       progress: { requestInput: prepared.requestInput, customData: executionPayload.customData },
       history: { requestInput: prepared.requestInput, customData: executionPayload.customData },
@@ -281,6 +283,12 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const user = await requireRole(request, reply, ["operator"]);
     if (!user) {
       return;
+    }
+    // The editor's options are refused before anything else is checked (budgets included).
+    const refusedOptions = editorRunOptionsRefused(user.role, request.body);
+    if (refusedOptions.length > 0) {
+      reply.code(403);
+      return editorRunOptionsError(refusedOptions);
     }
 
     const access = await runAccess.workflow(user, request.params.id, "workflow:execute");
@@ -303,11 +311,6 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
         error: "Invalid execution payload",
         details: parsed.error.issues
       };
-    }
-    const refusedOptions = editorRunOptionsRefused(user.role, request.body);
-    if (refusedOptions.length > 0) {
-      reply.code(403);
-      return editorRunOptionsError(refusedOptions);
     }
     const prepared = await prepareWorkflowExecutionPayload(parsed.data, reply, user);
     if (!prepared) {
@@ -396,17 +399,18 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
         systemPrompt: executionPayload.system_prompt,
         userPrompt: executionPayload.user_prompt,
         sessionId: normalizeSessionId(executionPayload.sessionId, executionPayload.session_id),
-        executionTimeoutMs: normalizeExecutionTimeoutMs(
-          executionPayload.executionTimeoutMs,
-          executionPayload.execution_timeout_ms,
-          config.WORKFLOW_EXECUTION_TIMEOUT_MS
-        ),
         customData: executionPayload.customData,
         executionId,
         triggerType: executeTrigger,
         triggeredBy: user.email,
         captureSource,
-        captureInputOrigin: captureSource ? "user" : undefined
+        captureInputOrigin: captureSource ? "user" : undefined,
+        // Operators run the saved workflow: no pinned data, and no longer than the deployment's timeout.
+        ...savedRunLimits(
+          user.role,
+          normalizeExecutionTimeoutMs(executionPayload.executionTimeoutMs, executionPayload.execution_timeout_ms, config.WORKFLOW_EXECUTION_TIMEOUT_MS),
+          config.WORKFLOW_EXECUTION_TIMEOUT_MS
+        )
         },
         progress: { requestInput: prepared.requestInput, customData: executionPayload.customData },
         history: { requestInput: prepared.requestInput, customData: executionPayload.customData },

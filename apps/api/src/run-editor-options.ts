@@ -1,7 +1,7 @@
 /**
  * Who may start a run with what. A caller with `workflow:execute` on a workflow (operators, and people with an execute
  * share) may run the saved workflow by id with their input. Options that change what runs (start from a node, run one
- * node, pinned or copied node outputs, variable overrides, recording the run's MCP calls) and a workflow graph sent
+ * node, pinned or copied node outputs, recording the run's MCP calls) and a workflow graph sent
  * with the request are the editor's: builder and up only. (The run routes never run a graph from the request; an
  * operator who sends one is told so instead of having it ignored.)
  */
@@ -17,7 +17,6 @@ export const EDITOR_RUN_OPTIONS = [
   "nodeOutputs",
   "sourceExecutionId",
   "nodeOutputsExecutionId",
-  "variables",
   "record",
   "workflow",
   "nodes",
@@ -51,4 +50,17 @@ export function editorRunOptionsError(refused: string[]): { error: string; refus
     error: `Only builders and admins may set ${refused.join(", ")} on a run; run the saved workflow with your input instead`,
     refusedOptions: refused
   };
+}
+
+/**
+ * What a run by a role without the editor's options gets on top of its request: no pinned data (the engine uses the
+ * workflow's pins unless told not to; pins are the editor's), and a timeout no longer than the deployment's.
+ */
+export function savedRunLimits(
+  role: UserRole,
+  timeoutMs: number,
+  defaultTimeoutMs: number
+): { usePinnedData?: false; pinnedData?: undefined; executionTimeoutMs: number } {
+  if (roleMayUseEditorRunOptions(role)) return { executionTimeoutMs: timeoutMs };
+  return { usePinnedData: false, pinnedData: undefined, executionTimeoutMs: Math.min(timeoutMs, defaultTimeoutMs) };
 }

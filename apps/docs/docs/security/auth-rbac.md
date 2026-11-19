@@ -193,11 +193,14 @@ in `MFA_REQUIRED_ROLES`, see [MFA required per role](#mfa-required-per-role)).
 `POST /api/workflows/:id/execute`, `/execute/stream`, `POST /api/webhooks/execute` and `/stream` take operators and up,
 with `workflow:execute` on the workflow (a project membership, an execute share to a project, or an execute share to
 the person). They run the saved workflow the route runs for that id (the draft from a signed-in session, production
-for an API key, as before) with the caller's input: `input`, `payload`, `system_prompt`, `user_prompt`, `sessionId`,
-`customData` and a timeout. Options that change what runs stay with builders and admins: `startNodeId`,
+for an API key, as before) with the caller's input: `input`, `payload`, `variables`, `system_prompt`, `user_prompt`,
+`sessionId`, `customData` and a timeout. An operator's run uses no pinned data, and its timeout is at most
+`WORKFLOW_EXECUTION_TIMEOUT_MS`. Options that change what runs stay with builders and admins: `startNodeId`,
 `runMode: "single_node"`, `usePinnedData`, `pinnedData`, `nodeOutputs`, `sourceExecutionId`, `nodeOutputsExecutionId`,
-`variables`, `record`, and a `workflow`, `nodes` or `edges` sent with the request; an operator who sends one gets `403`
-with `refusedOptions`. Viewers are refused. Runs are audited as before.
+`record`, and a `workflow`, `nodes` or `edges` sent with the request; an operator who sends one gets `403` with
+`refusedOptions`, before any other check. Viewers are refused. Runs are audited as before. A session id is not tied
+to a person: anyone who may run a workflow and knows a session id can continue that session's memory, as before for
+builders and webhook callers.
 
 ## Sharing a workflow with people
 

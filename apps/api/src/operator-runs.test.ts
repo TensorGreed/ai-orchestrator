@@ -143,17 +143,33 @@ describe("runs by role", () => {
     await context.store.upsertWorkflow(flow("wf-ops", "default"));
     const graph = { ...flow("wf-ops", "default"), nodes: [] };
 
-    for (const body of [{ startNodeId: "out" }, { runMode: "single_node" }, { usePinnedData: true }, { pinnedData: { out: [] } }, { variables: { a: "b" } }, { record: true }, { workflow: graph }, { nodes: [], edges: [] }]) {
+    for (const body of [{ startNodeId: "out" }, { runMode: "single_node" }, { usePinnedData: true }, { pinnedData: { out: [] } }, { record: true }, { workflow: graph }, { nodes: [], edges: [] }]) {
       const refused = await call(context, "POST", "/api/workflows/wf-ops/execute", operator.cookie, body);
       expect(refused.statusCode, JSON.stringify(body)).toBe(403);
       expect(refused.json<{ refusedOptions: string[] }>().refusedOptions.length).toBeGreaterThan(0);
       expect((await call(context, "POST", "/api/workflows/wf-ops/execute/stream", operator.cookie, body)).statusCode).toBe(403);
     }
-    expect((await call(context, "POST", "/api/webhooks/execute", operator.cookie, { workflow_id: "wf-ops", variables: { a: "b" } })).statusCode).toBe(403);
-    expect((await call(context, "POST", "/api/webhooks/execute/stream", operator.cookie, { workflow_id: "wf-ops", variables: { a: "b" } })).statusCode).toBe(403);
-    // Harmless values pass, and a builder keeps every option.
-    expect((await call(context, "POST", "/api/workflows/wf-ops/execute", operator.cookie, { runMode: "workflow", usePinnedData: false })).statusCode).toBe(200);
+    expect((await call(context, "POST", "/api/webhooks/execute", operator.cookie, { workflow_id: "wf-ops", nodes: [] })).statusCode).toBe(403);
+    expect((await call(context, "POST", "/api/webhooks/execute/stream", operator.cookie, { workflow_id: "wf-ops", nodes: [] })).statusCode).toBe(403);
+    // Harmless values pass (variables are input, as `input` is), and a builder keeps every option.
+    expect((await call(context, "POST", "/api/workflows/wf-ops/execute", operator.cookie, { runMode: "workflow", usePinnedData: false, variables: { a: "b" } })).statusCode).toBe(200);
+    expect((await call(context, "POST", "/api/webhooks/execute", operator.cookie, { workflow_id: "wf-ops", variables: { a: "b" } })).statusCode).toBe(200);
     expect((await call(context, "POST", "/api/workflows/wf-ops/execute", builder.cookie, { usePinnedData: true, variables: { a: "b" } })).statusCode).toBe(200);
+  });
+
+  it("runs an operator's request without the workflow's pinned data, which a builder's run uses", async () => {
+    const context = await createTestContext();
+    const operator = await login(context, "operator");
+    const builder = await login(context, "builder");
+    await context.store.upsertWorkflow({ ...flow("wf-pins", "default"), pinnedData: { out: { result: "PINNED_VALUE" } } });
+    const byOperator = await call(context, "POST", "/api/workflows/wf-pins/execute", operator.cookie, { input: { a: 1 } });
+    expect(byOperator.statusCode, byOperator.body).toBe(200);
+    expect(byOperator.body).not.toContain("PINNED_VALUE");
+    const byOperatorWebhook = await call(context, "POST", "/api/webhooks/execute", operator.cookie, { workflow_id: "wf-pins" });
+    expect(byOperatorWebhook.statusCode, byOperatorWebhook.body).toBe(200);
+    expect(byOperatorWebhook.body).not.toContain("PINNED_VALUE");
+    const byBuilder = await call(context, "POST", "/api/workflows/wf-pins/execute", builder.cookie, { usePinnedData: true });
+    expect(byBuilder.body).toContain("PINNED_VALUE");
   });
 
   it("still refuses viewers on every run route", async () => {
