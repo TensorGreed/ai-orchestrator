@@ -285,9 +285,13 @@ describe("project members by email", () => {
 
 describe("what the editor may show", () => {
   it("answers canEdit, canRun and canShare per user and workflow", async () => {
-    const { context, owner, operator, viewer, outsider } = await seed();
+    const { context, owner, operator, viewer, outsider, editor } = await seed();
     const access = async (cookie: string) => (await call(context, "GET", "/api/workflows/wf-team/access", cookie)).json<Record<string, unknown>>();
-    expect(await access(owner.cookie)).toMatchObject({ canEdit: true, canRun: true, canShare: true });
+    expect(await access(owner.cookie)).toMatchObject({ canEdit: true, canRun: true, canShare: true, canShareWithProjects: true });
+    // A project editor may change the workflow and share it with projects, not with people: canShare follows the
+    // share routes, which refuse the editor.
+    expect(await access(editor.cookie)).toMatchObject({ canEdit: true, canShare: false, canShareWithProjects: true });
+    expect((await call(context, "POST", "/api/workflows/wf-team/user-shares", editor.cookie, { email: viewer.email, accessLevel: "read" })).statusCode).toBe(403);
     expect((await call(context, "GET", "/api/workflows/wf-team/access", viewer.cookie)).statusCode).toBe(404);
     await call(context, "POST", "/api/workflows/wf-team/user-shares", owner.cookie, { email: viewer.email, accessLevel: "execute" });
     await call(context, "POST", "/api/workflows/wf-team/user-shares", owner.cookie, { email: operator.email, accessLevel: "execute" });

@@ -187,7 +187,8 @@ in `MFA_REQUIRED_ROLES`, see [MFA required per role](#mfa-required-per-role)).
   read-only workflow nodes open but cannot be moved, connected or saved, the node ring offers only Edit, outputs show
   no `+`, the inspector offers no <span v-pre>`{{`</span> suggestions, helper chips, Input fields to drag in or
   **Run node**, and the workflow settings in **More actions** are not offered.
-  `GET /api/workflows/:id/access` answers what the signed-in user may do.
+  `GET /api/workflows/:id/access` answers what the signed-in user may do: `canEdit`, `canRun`, `canShare` (share with
+  people, as the share routes allow) and `canShareWithProjects`.
 - **Shared with this project.** The Workflows page lists the workflows other projects share to the active one, with
   the access members get there (`GET /api/projects/:id/shared-workflows`).
 
@@ -214,8 +215,16 @@ person's queued runs (`POST /api/workflows/:id/enqueue`) and their messages to a
 sessions. Someone who may run a workflow only through a share with them keeps their own key with an API key of their
 own too. Builders and admins with access through their projects, other API keys and service accounts (whatever role
 the key has), schedules and webhooks keep the workflow's sessions, as before; their runs do not see the sessions kept to a person, and a person's
-runs do not see theirs. A retry from history runs as the person who retries it. A Simple Memory or Session Artifact
-namespace that starts with `~person:` is refused, since that prefix marks one person's sessions.
+runs do not see theirs. A run records whose sessions it used, and a retry or an MCP replay of it keeps them: the
+person's own retry continues their session; anyone else's retry runs under that person's key with a new session id, so
+it neither shows them that person's memory nor writes into the workflow's sessions or a session the person uses. A
+retry of a run that used the workflow's sessions runs as a new run of the person who retries it. A Simple Memory or
+Session Artifact namespace that starts with `~person:` is refused, since that prefix marks one person's sessions.
+
+A person's session rows stay inside the project's key, so project retention and project legal holds cover them, and a
+legal hold on a workflow covers them for the workflow's default namespaces. Deleting a user removes the session memory,
+tool cache and artifacts kept to them, except rows a legal hold keeps. A data-subject request by session id finds and
+erases them (see [Data-subject requests](./data-subject-requests.md)).
 
 ## Sharing a workflow with people
 

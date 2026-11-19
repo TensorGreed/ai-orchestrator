@@ -50,6 +50,7 @@ import type {
 } from "@ai-orchestrator/workflow-engine";
 import type { SafeUser } from "./services/auth-service.js";
 import { productionRefusalCode } from "./services/release-service.js";
+import { PERSON_SESSION_MARKER, personSessionNamespace, projectSessionNamespace } from "./db/person-sessions.js";
 
 type MemoryStore = NonNullable<WorkflowExecutionDependencies["memoryStore"]>;
 type ToolDataStore = NonNullable<WorkflowExecutionDependencies["toolDataStore"]>;
@@ -140,22 +141,8 @@ export interface RunScopeOptions {
   sessionOwner?: string;
 }
 
-/** The stored key for a namespace in a project. The length prefix keeps it unambiguous. */
-export function projectSessionNamespace(projectId: string, namespace: string): string {
-  return `project:${projectId.length}:${projectId}:${namespace}`;
-}
-
-/** The marker that starts a person's part of a project session key; a namespace of the project's own cannot start with it. */
-export const PERSON_SESSION_MARKER = "~person:";
-
-/**
- * The stored key for a namespace in a project, kept to one person: the project prefix stays first (retention, legal
- * holds and exports find a project's sessions by it), then the person. The length prefixes keep it unambiguous, and
- * `projectSessionNamespace` is never asked for a namespace that starts with the marker (see `sessionStoresFor`).
- */
-export function personSessionNamespace(userId: string, projectId: string, namespace: string): string {
-  return projectSessionNamespace(projectId, `${PERSON_SESSION_MARKER}${userId.length}:${userId}:${namespace}`);
-}
+// The stored session keys (db/person-sessions.ts): a project's, and one person's within a project.
+export { PERSON_SESSION_MARKER, personSessionNamespace, projectSessionNamespace };
 
 export function createRunScope(deps: RunScopeDeps) {
   /**

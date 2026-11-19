@@ -206,7 +206,7 @@ for (const kind of kinds) {
       const { store, service } = await setup();
       await store.upsertWorkflow(WORKFLOW);
       await saveRun(store, "run-1", { customerId: "CUST-777", session_id: "sess-9" });
-      expect(await service.recordRunRefs({ executionId: "run-1", workflow: WORKFLOW, run: { input: { customerId: "CUST-777" }, sessionId: "sess-9" } })).toBe(4);
+      expect(await service.recordRunRefs({ executionId: "run-1", workflow: WORKFLOW, run: { input: { customerId: "CUST-777" }, sessionId: "sess-9" } })).toBe(6);
       // No customer id: only the session reference (and its memory sessions).
       expect(await service.recordRunRefs({ executionId: "run-2", workflow: WORKFLOW, run: { input: {}, sessionId: null } })).toBe(0);
       // A workflow without references stores nothing.
@@ -218,7 +218,22 @@ for (const kind of kinds) {
       expect((await store.listSubjectRefs(hash, 10)).map((ref) => `${ref.kind}:${ref.rowId}`)).toEqual(["run:run-1"]);
       const sessionRefs = await store.listSubjectRefs(await service.hashValue("sess-9"), 10);
       expect(sessionRefs.map((ref) => `${ref.kind}:${ref.rowId}`).sort()).toEqual(
-        ["run:run-1", `memory_session:${memorySessionRowId("support-artifacts", "sess-9")}`, `memory_session:${memorySessionRowId("wf-refs:mem", "sess-9")}`].sort()
+        [
+          "run:run-1",
+          // Rows from before project scoping use the bare namespace; rows since, the project's key (run-scope.ts).
+          `memory_session:${memorySessionRowId("support-artifacts", "sess-9")}`,
+          `memory_session:${memorySessionRowId("wf-refs:mem", "sess-9")}`,
+          `memory_session:${memorySessionRowId("project:7:default:support-artifacts", "sess-9")}`,
+          `memory_session:${memorySessionRowId("project:7:default:wf-refs:mem", "sess-9")}`
+        ].sort()
+      );
+      // v79 — a run kept to one person refers to that person's keys only.
+      expect(await service.recordRunRefs({ executionId: "run-4", workflow: WORKFLOW, run: { input: {}, sessionId: "sess-op", sessionOwner: "usr_op" } })).toBe(3);
+      expect((await store.listSubjectRefs(await service.hashValue("sess-op"), 10)).map((ref) => ref.rowId).filter((row) => row !== "run-4").sort()).toEqual(
+        [
+          memorySessionRowId("project:7:default:~person:6:usr_op:support-artifacts", "sess-op"),
+          memorySessionRowId("project:7:default:~person:6:usr_op:wf-refs:mem", "sess-op")
+        ].sort()
       );
       const text = await subjectTablesText(store);
       expect(text).not.toContain("CUST-777");

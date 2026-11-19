@@ -523,6 +523,10 @@ export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentR
    */
   setExecutionTraceId(executionId: string, traceId: string, options?: { fence?: QueueClaimFence }): Promise<boolean>;
   getExecutionRelease(executionId: string): Promise<{ channel: "production" | "draft"; version: number | null } | null>;
+  /** v79 — the user whose session memory a finished run used (operators and share-only runners); set once per run. */
+  setExecutionSessionOwner(executionId: string, userId: string): Promise<void>;
+  /** v79 — that user, or null for a run that used the workflow's sessions (or an older record). */
+  getExecutionSessionOwner(executionId: string): Promise<string | null>;
   /**
    * v74 — whether content copied from this run is sensitive: its record is marked, or its run never wrote a final
    * answer (see saveExecutionHistory's `sensitive`). Null when there is no record.

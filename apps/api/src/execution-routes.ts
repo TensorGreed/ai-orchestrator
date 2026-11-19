@@ -134,6 +134,25 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const owner = await deps.sessionOwnerFor(user, workflow);
     return owner ? { sessionOwner: owner } : {};
   };
+  /**
+   * The session scope of a retry or an MCP replay of `sourceId`. A run kept to one person's sessions stays kept to that
+   * person, whoever repeats it: never the workflow's sessions or the repeating person's. Someone else repeating it gets
+   * a new session id under that person's key, so the run neither reads that person's existing memory into their view
+   * nor writes into a session the person uses. A run that used the workflow's sessions is repeated in the repeating
+   * person's scope, as a new run of theirs would be.
+   */
+  const repeatSessionScope = async (
+    sourceId: string,
+    user: SafeUser,
+    workflow: Workflow,
+    executionId: string,
+    sessionId: string | undefined
+  ): Promise<{ sessionOwner?: string; sessionId?: string }> => {
+    const sourceOwner = await deps.store.getExecutionSessionOwner(sourceId);
+    if (!sourceOwner) return { ...(await sessionOwnerOption(user, workflow)), ...(sessionId !== undefined ? { sessionId } : {}) };
+    if (sourceOwner === user.id) return { sessionOwner: sourceOwner, ...(sessionId !== undefined ? { sessionId } : {}) };
+    return { sessionOwner: sourceOwner, sessionId: `repeat-${executionId}` };
+  };
   const {
     app,
     store,
@@ -647,9 +666,8 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       variables: executionPayload.variables,
       systemPrompt: executionPayload.system_prompt,
       userPrompt: executionPayload.user_prompt,
-      sessionId: normalizeSessionId(executionPayload.sessionId, executionPayload.session_id),
-      // Operators' and share-only runners' session memory is kept to them.
-      ...await sessionOwnerOption(user, workflow),
+      // v79 — the failed run's session scope (see repeatSessionScope).
+      ...await repeatSessionScope(sourceExecution.id, user, workflow, executionId, normalizeSessionId(executionPayload.sessionId, executionPayload.session_id)),
       executionTimeoutMs: normalizeExecutionTimeoutMs(
         executionPayload.executionTimeoutMs,
         executionPayload.execution_timeout_ms,
@@ -730,12 +748,16 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const sourceGatewayGuard = parseGatewayGuardStack(asRecord(source.customData)[GATEWAY_GUARD_CUSTOM_DATA_KEY]);
     // v74 — the source run's input and recorded MCP answers are its content.
     const sensitiveInput = await copiedRunSensitive(source.id, user);
+    const replayRunInput = replayRunInputFor(source.triggerType, storedInput);
+    const replayScope = await repeatSessionScope(source.id, user, workflow, executionId, replayRunInput.sessionId);
     const result = await runDispatcher.run({
       v: DISPATCH_SPEC_VERSION,
       run: {
       // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
       channel: "draft",
-      ...replayRunInputFor(source.triggerType, storedInput),
+      ...replayRunInput,
+      // v79 — the source run's session scope (see repeatSessionScope).
+      ...replayScope,
       ...(source.triggerType ? { inputTriggerType: source.triggerType } : {}),
       // Phase 16 — the source run's input origin, not the user replaying it (12.2: recorded on this run's trigger
       // result too, so a replay of this replay keeps it).

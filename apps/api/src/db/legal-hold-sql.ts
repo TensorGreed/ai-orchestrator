@@ -176,7 +176,10 @@ export function holdMatchSql(table: HoldableTable, ref: string, lh = "lh"): stri
     const projectKey = (projectId: string) => `('project:' || length(${projectId}) || ':' || ${projectId})`;
     parts.push(
       `(${lh}.scope_type = 'project' AND (${hasPrefix(ns, projectKey(`${lh}.scope_id`))} OR ${hasPrefix(ns, `${lh}.scope_id`)} OR EXISTS (SELECT 1 FROM workflows lhw WHERE lhw.project_id = ${lh}.scope_id AND ${hasPrefix(ns, "lhw.id")})))`,
-      `(${lh}.scope_type = 'workflow' AND (${hasPrefix(ns, `${lh}.scope_id`)} OR EXISTS (SELECT 1 FROM workflows lhw WHERE lhw.id = ${lh}.scope_id AND (${hasPrefix(ns, `(${projectKey("lhw.project_id")} || ':' || lhw.id)`)} OR ${hasPrefix(ns, "lhw.project_id || ':' || lhw.id")}))))`
+      // A person's key (`<project key>:~person:<m>:<userId>:<namespace>`, db/person-sessions.ts) of the workflow's
+      // default namespace is the workflow's too. The LIKE may match a little more (`_` and `%` in ids): a hold keeps more,
+      // never less.
+      `(${lh}.scope_type = 'workflow' AND (${hasPrefix(ns, `${lh}.scope_id`)} OR EXISTS (SELECT 1 FROM workflows lhw WHERE lhw.id = ${lh}.scope_id AND (${hasPrefix(ns, `(${projectKey("lhw.project_id")} || ':' || lhw.id)`)} OR ${hasPrefix(ns, "lhw.project_id || ':' || lhw.id")} OR ${ns} LIKE (${projectKey("lhw.project_id")} || ':~person:%:' || lhw.id || ':%')))))`
     );
   }
   const itemConditions = [

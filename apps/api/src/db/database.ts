@@ -1,3 +1,4 @@
+import { isPersonSessionOf, personSessionLikePattern, PERSON_SESSION_TABLES } from "./person-sessions.js";
 import { SUB_WORKFLOW_USAGE_TRIGGER, USAGE_AVG_DURATION, USAGE_EXECS, USAGE_EXECUTION_ROW } from "./usage-sql.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -3940,6 +3941,8 @@ export class SqliteStore implements Store {
     // What a replay job's golden sets held when it was queued, and which published version a production run ran.
     this.ensureColumn("eval_runs", "set_snapshot_json", "TEXT");
     this.ensureColumn("execution_history", "release_channel", "TEXT");
+    // v79 — the person whose session memory the run used.
+    this.ensureColumn("execution_history", "session_owner", "TEXT");
     this.ensureColumn("execution_history", "release_version", "INTEGER");
     this.exec(`
       CREATE TABLE IF NOT EXISTS release_gates (
@@ -5372,6 +5375,13 @@ export class SqliteStore implements Store {
     this.exec(`DELETE FROM user_project_roles WHERE user_id = ?`, [id]);
     this.exec(`DELETE FROM workflow_user_shares WHERE user_id = ?`, [id]);
     this.exec(`DELETE FROM user_invites WHERE user_id = ?`, [id]);
+    // v79 — the session memory, tool cache and artifacts kept to the person go with them, except what a legal hold keeps.
+    for (const table of PERSON_SESSION_TABLES) {
+      const keys = this.queryAll<{ namespace: string }>(`SELECT DISTINCT namespace FROM ${table} WHERE namespace LIKE ?`, [personSessionLikePattern(id)])
+        .map((row) => String(row.namespace))
+        .filter((namespace) => isPersonSessionOf(namespace, id));
+      for (const namespace of keys) this.exec(`DELETE FROM ${table} WHERE namespace = ? AND ${notHeldSql(table)}`, [namespace]);
+    }
     return this.db.prepare(`DELETE FROM users WHERE id = ?`).run(id).changes > 0;
   }
 
@@ -10158,6 +10168,18 @@ export class SqliteStore implements Store {
     const row = this.queryOne<{ sensitive: number | null }>(`SELECT sensitive FROM execution_history WHERE id = ?`, [executionId]);
     // 2 (a record its run has not finished writing: still running, or ended by a cancel or a reconcile) fails closed.
     return row ? Number(row.sensitive ?? 0) !== 0 : null;
+  }
+
+  /** v79 — see Store.setExecutionSessionOwner. */
+  async setExecutionSessionOwner(executionId: string, userId: string): Promise<void> {
+    this.exec(`UPDATE execution_history SET session_owner = ? WHERE id = ?`, [userId, executionId]);
+    this.persist();
+  }
+
+  /** v79 — see Store.getExecutionSessionOwner. */
+  async getExecutionSessionOwner(executionId: string): Promise<string | null> {
+    const row = this.queryOne<{ session_owner: string | null }>(`SELECT session_owner FROM execution_history WHERE id = ?`, [executionId]);
+    return row?.session_owner ? String(row.session_owner) : null;
   }
 
   async getExecutionRelease(executionId: string): Promise<{ channel: "production" | "draft"; version: number | null } | null> {

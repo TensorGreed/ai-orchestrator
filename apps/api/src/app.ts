@@ -2599,6 +2599,8 @@ export async function createApp(
    */
   // Bounded: a run whose history is never persisted must not grow it forever.
   const runReleases = new Map<string, { channel: ReleaseChannel; version: number | null }>();
+  // v79 — the person a run's session memory was kept to, recorded on its history so a retry or a replay keeps it.
+  const runSessionOwners = new Map<string, string>();
 
   // The run's trace span (only while tracing is on): it covers the host's work around the engine as well, and the
   // engine's node, agent and tool spans are its children.
@@ -2643,6 +2645,10 @@ export async function createApp(
     if (input.executionId && !input.replay) {
       if (runReleases.size >= 5_000) runReleases.delete(runReleases.keys().next().value!);
       runReleases.set(input.executionId, { channel, version: releaseVersion });
+      if (input.sessionOwner) {
+        if (runSessionOwners.size >= 5_000) runSessionOwners.delete(runSessionOwners.keys().next().value!);
+        runSessionOwners.set(input.executionId, input.sessionOwner);
+      }
     }
     // The model spend of the run's sub-workflows joins its usage row (a replay starts none).
     const runSubWorkflowSpend =
@@ -2894,6 +2900,7 @@ export async function createApp(
             }
             // The paused state carries the version now; the resume records it again.
             runReleases.delete(paused.executionId);
+            runSessionOwners.delete(paused.executionId);
             // Phase 11.2 — who may decide, when it expires; audited and notified.
             try {
               await approvalService.recordPause({
@@ -3349,6 +3356,15 @@ export async function createApp(
       status: input.result.status
     });
 
+    const sessionOwner = runSessionOwners.get(input.executionId);
+    runSessionOwners.delete(input.executionId);
+    if (persisted && sessionOwner) {
+      try {
+        await store.setExecutionSessionOwner(input.executionId, sessionOwner);
+      } catch (error) {
+        app.log.warn({ executionId: input.executionId, error: error instanceof Error ? error.message : String(error) }, "Failed to record whose session memory a run used");
+      }
+    }
     const ranOn = runReleases.get(input.executionId);
     runReleases.delete(input.executionId);
     if (persisted && ranOn !== undefined) {
@@ -3371,7 +3387,8 @@ export async function createApp(
             output: input.result.output,
             customData: input.customData ?? input.result.customData,
             sessionId: runSessionId(input.requestInput, input.customData ?? input.result.customData),
-            triggeredBy: input.triggeredBy ?? null
+            triggeredBy: input.triggeredBy ?? null,
+            sessionOwner: sessionOwner ?? null
           }
         });
       }
@@ -5808,6 +5825,7 @@ export async function createApp(
   /** A queued run the queue stopped (lease lost, or draining): nothing of it is stored here; its record is the queue's. */
   const abandonQueueStoppedRun = (executionId: string, workflowId: string, job: QueueJobContext) => {
     runReleases.delete(executionId);
+    runSessionOwners.delete(executionId);
     dropCapture(executionId, "skipped_not_stored");
     // The run leaves no usage row; what its sub-workflows spent is still recorded.
     subWorkflowSpend.abandon(executionId, "stopped by the queue", job).catch((error: unknown) => {
@@ -11201,8 +11219,12 @@ export async function createApp(
     const isBuilder = hasRequiredRole(user, ["builder"]);
     const canWrite = isBuilder && (await runAccess.workflow(user, workflow.id, "workflow:write")).ok;
     const canExecute = hasRequiredRole(user, ["operator"]) && (await runAccess.workflow(user, workflow.id, "workflow:execute")).ok;
-    const canShare = user.role === "admin" || (await rbacService.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "workflow:write"));
-    return { workflowId: workflow.id, role: user.role, canRead: true, canEdit: canWrite, canRun: canExecute, canShare };
+    const owningProject = workflow.projectId ?? DEFAULT_PROJECT_ID;
+    // The same checks as the share routes: sharing with people takes project:invite (workflowShareManager); sharing
+    // with another project takes workflow:write on the owning project.
+    const canShare = user.role === "admin" || (await rbacService.can(user, owningProject, "project:invite"));
+    const canShareWithProjects = user.role === "admin" || (await rbacService.can(user, owningProject, "workflow:write"));
+    return { workflowId: workflow.id, role: user.role, canRead: true, canEdit: canWrite, canRun: canExecute, canShare, canShareWithProjects };
   });
 
   app.get<{ Params: { id: string } }>("/api/workflows/:id/variables", async (request, reply) => {

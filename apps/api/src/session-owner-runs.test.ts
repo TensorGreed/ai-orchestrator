@@ -248,6 +248,72 @@ describe("session memory kept to the person for operators and share-only runners
   });
 });
 
+describe("a retry keeps the failed run's session scope (v79)", () => {
+  /** Loads the session note, saves the run's note, then stops with an error. */
+  const failingNotebook = (): Workflow => ({
+    ...notebook("wf-fail", "default"),
+    nodes: [
+      ...notebook("wf-fail", "default").nodes.filter((node) => node.id !== "out"),
+      { id: "boom", type: "stop_and_error", name: "Boom", position: { x: 600, y: 0 }, config: { message: "stop here" } }
+    ],
+    edges: [
+      { id: "e1", source: "start", target: "load" },
+      { id: "e2", source: "load", target: "save" },
+      { id: "e3", source: "save", target: "boom" }
+    ]
+  });
+  const loaded = (body: string): string => {
+    const parsed = JSON.parse(body) as { nodeResults?: Array<{ nodeId: string; output?: { artifact?: unknown } }> };
+    const artifact = parsed.nodeResults?.find((entry) => entry.nodeId === "load")?.output?.artifact;
+    return artifact === undefined || artifact === null ? "" : String(artifact);
+  };
+
+  it("an operator's failed run retried by a builder stays in the operator's scope, on a new session id", async () => {
+    const context = await createTestContext();
+    const olivia = await login(context, "operator", "olivia");
+    const bea = await login(context, "builder", "bea");
+    await context.store.upsertWorkflow(failingNotebook());
+    await context.store.upsertWorkflow(notebook("wf-notes", "default"));
+
+    const first = await call(context, "POST", "/api/workflows/wf-fail/execute", olivia.cookie, { input: { note: "olivia-1" }, sessionId: "shared-session" });
+    expect(first.json<{ status: string }>().status, first.body).toBe("error");
+    const failedId = first.json<{ executionId: string }>().executionId;
+    expect(await context.store.getExecutionSessionOwner(failedId)).toBe(olivia.id);
+
+    const retried = await call(context, "POST", `/api/executions/${failedId}/retry`, bea.cookie, { input: { note: "bea-retry" }, sessionId: "shared-session" });
+    expect(retried.statusCode, retried.body).toBeLessThan(500);
+    // The builder's retry does not read Olivia's note into their view...
+    expect(loaded(retried.body)).toBe("");
+    const retryId = retried.json<{ executionId: string }>().executionId;
+    // ...stays kept to Olivia (so a retry of the retry does too)...
+    expect(await context.store.getExecutionSessionOwner(retryId)).toBe(olivia.id);
+    // ...and wrote neither into the workflow's session nor into the session Olivia uses.
+    expect(await runNote(context, bea.cookie, "wf-notes", "bea-1")).toBe("");
+    const oliviaNext = await call(context, "POST", "/api/workflows/wf-fail/execute", olivia.cookie, { input: { note: "olivia-2" }, sessionId: "shared-session" });
+    expect(loaded(oliviaNext.body)).toBe("olivia-1");
+  });
+
+  it("an operator's own retry continues their session", async () => {
+    const context = await createTestContext();
+    const olivia = await login(context, "operator", "olivia");
+    await context.store.upsertWorkflow(failingNotebook());
+    const first = await call(context, "POST", "/api/workflows/wf-fail/execute", olivia.cookie, { input: { note: "olivia-1" }, sessionId: "shared-session" });
+    const failedId = first.json<{ executionId: string }>().executionId;
+    // Retry is a builder route: Olivia, promoted to builder, retries the run she started as an operator.
+    expect(await context.store.updateUserRole(olivia.id, "builder")).toBe(true);
+    const retried = await call(context, "POST", `/api/executions/${failedId}/retry`, olivia.cookie, { input: { note: "olivia-2" }, sessionId: "shared-session" });
+    expect(loaded(retried.body)).toBe("olivia-1");
+  });
+
+  it("a run that used the workflow's sessions records no owner", async () => {
+    const context = await createTestContext();
+    const bea = await login(context, "builder", "bea");
+    await context.store.upsertWorkflow(failingNotebook());
+    const first = await call(context, "POST", "/api/workflows/wf-fail/execute", bea.cookie, { input: { note: "bea-1" }, sessionId: "shared-session" });
+    expect(await context.store.getExecutionSessionOwner(first.json<{ executionId: string }>().executionId)).toBeNull();
+  });
+});
+
 describe("operators run the released version", () => {
   it("an operator runs the published version while a builder runs the draft; an operator cannot ask for the draft", async () => {
     const context = await createTestContext();

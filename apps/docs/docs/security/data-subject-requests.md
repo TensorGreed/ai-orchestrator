@@ -52,7 +52,9 @@ Two things to know when choosing paths:
 - **A `session_id` reference names the memory session.** The run's own reference is a hash, but the reference to its
   agent memory stores the memory session's namespace and session id, as the memory table itself does. When the
   session id is the person's email or phone number, that value is stored next to the hash. Deleting the session's
-  memory removes the reference on the next sweep.
+  memory removes the reference on the next sweep. The reference names the keys the memory is stored under: the
+  project's key (and the bare namespace of memory from before project scoping), or, for a run kept to one person (an
+  operator's run), that person's key.
 
 References are part of the workflow's settings (`settings.dataProtection.subjectRefs`), exported and imported with it.
 A reference whose run is deleted (by retention or by hand) is removed by a background sweep.
@@ -175,7 +177,8 @@ releases record them, and how many audit-log rows they have. On confirmation:
   that records who started, wrote, shared, decided or changed something (runs, usage, approvals, workflows, versions,
   releases, gates, rules, MCP servers and policies, destinations, variables, legal holds, requests and more);
 - their account is deleted the way **Settings → Users → Delete** does: sessions, API keys, MFA, SSO identities, project
-  roles, invites and their MCP sign-ins go with it;
+  roles, invites, workflow shares, their MCP sign-ins and the agent memory kept to them (except what a legal hold
+  keeps) go with it;
 - **their audit-log rows are kept unchanged** for security logging until `AUDIT_LOG_RETENTION_DAYS` removes them.
   Rewriting them would break the audit chain, which still verifies afterwards.
 

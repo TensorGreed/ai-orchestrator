@@ -3106,6 +3106,20 @@ export const MIGRATIONS: Migration[] = [
     down: `
       DROP TABLE IF EXISTS workflow_user_shares;
     `
+  },
+  {
+    version: 79,
+    description: "The person whose session memory a run used (operators and share-only runners)",
+    // session_owner: the user id a run's session memory, tool cache and artifacts were kept to (run-scope.ts
+    // personSessionNamespace), or NULL for the workflow's sessions. A retry or an MCP replay of the run keeps it, so an
+    // operator's run never moves into the workflow's sessions or into the retrying person's.
+    up: `
+      ALTER TABLE execution_history ADD COLUMN IF NOT EXISTS session_owner TEXT;
+    `,
+    // An older build ignores the column; dropping it makes retries of such runs use the retrying person's sessions.
+    down: `
+      ALTER TABLE execution_history DROP COLUMN IF EXISTS session_owner;
+    `
   }
 ];
 
