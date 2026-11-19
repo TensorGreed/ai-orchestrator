@@ -45,6 +45,12 @@ describe("rankTemplatesForPrompt", () => {
     expect(rankTemplatesForPrompt("slack", templates, 1)).toHaveLength(1);
   });
 
+  it("puts templates that run without a model first", () => {
+    const withModel = templates.map((template) => ({ ...template, needsModel: template.id === "slack" }));
+    expect(rankTemplatesForPrompt("When a webhook arrives, send a message to Slack", withModel).map((t) => t.id)).not.toContain("slack");
+    expect(rankTemplatesForPrompt("slack", withModel, 4).at(-1)!.id).toBe("slack");
+  });
+
   it("matches words, not stop words or plurals", () => {
     expect(builderKeywords("Send the emails to my customers")).toEqual(["email", "customer"]);
   });

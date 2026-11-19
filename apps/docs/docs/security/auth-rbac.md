@@ -99,6 +99,8 @@ needs a role also accepts every role above it.
 
 - Workflow read: all authenticated roles
 - Workflow create/update/delete: `builder`, `admin`
+- Describe a workflow (`POST /api/workflow-builder/build`, a draft preview from a description): `builder`, `admin` with
+  `workflow:write` in the project, and `secret:use` for a credential the request names
 - Execute workflow/webhook API trigger: `operator`, `builder`, `admin` with `workflow:execute` (operators run the saved
   workflow with their input; see [Running workflows by role](#running-workflows-by-role))
 - Secrets list/create: `builder`, `admin`

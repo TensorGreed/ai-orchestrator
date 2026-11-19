@@ -93,6 +93,8 @@ import {
   retryExecution,
   runWebhookStream,
   saveWorkflow,
+  useTemplate as instantiateTemplate,
+  fetchWorkflowBuilderStatus,
   saveWorkflowPin,
   updateWorkflowVariables,
   type AuthUser,
@@ -190,6 +192,7 @@ import { editorAccess, roleMayUseEditorRunOptions, type WorkflowAccessView } fro
 import { SecretSaveWarnings } from "./components/SecretSaveWarnings";
 import { DraftWarnings } from "./components/DraftWarnings";
 import { WebhookTestPayloadDialog } from "./components/WebhookTestPayloadDialog";
+import { WorkflowBuilderDialog } from "./components/WorkflowBuilderDialog";
 import { apiErrorText, draftIssueShown } from "./lib/draft-validation";
 import { canvasLabelBadge, type CanvasLabelBadge } from "./lib/taint-sources";
 import {
@@ -1189,6 +1192,9 @@ function StudioApp() {
   const [mcpServerDefinitions, setMcpServerDefinitions] = useState<MCPServerDefinition[]>([]);
   // Hosted model providers whose key the API server's environment sets (from /api/definitions, builders only).
   const [envModelProviders, setEnvModelProviders] = useState<string[]>([]);
+  // "Describe it" (from /api/definitions; off until the server says it is on, and on older servers).
+  const [workflowBuilderEnabled, setWorkflowBuilderEnabled] = useState(false);
+  const [workflowBuilderOpen, setWorkflowBuilderOpen] = useState(false);
   const [secrets, setSecrets] = useState<SecretListItem[]>([]);
 
   const [loading, setLoading] = useState(false);
@@ -1595,6 +1601,25 @@ function StudioApp() {
   );
   // Workflow settings in the More actions menu are edits too: only for someone who may save this workflow.
   const canEditOpenWorkflow = canManageWorkflows && !editDisabledReason;
+
+  // Whether "Describe it" is on: asked once per sign-in by someone who may build (older servers: off).
+  useEffect(() => {
+    if (!canManageWorkflows) {
+      setWorkflowBuilderEnabled(false);
+      return;
+    }
+    let cancelled = false;
+    fetchWorkflowBuilderStatus()
+      .then((status) => {
+        if (!cancelled) setWorkflowBuilderEnabled(status.enabled === true);
+      })
+      .catch(() => {
+        if (!cancelled) setWorkflowBuilderEnabled(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [canManageWorkflows, authUser?.id]);
   // Phase 11.2 — pending approvals the user can decide, for the sidebar badge.
   const [pendingApprovalCount, setPendingApprovalCount] = useState(0);
   const [approvalFocusExecutionId, setApprovalFocusExecutionId] = useState<string | null>(null);
@@ -2606,6 +2631,7 @@ function StudioApp() {
         setDefinitions(definitionPayload.nodes);
         setMcpServerDefinitions(definitionPayload.mcpServers);
         setEnvModelProviders(definitionPayload.envModelProviders ?? []);
+        setWorkflowBuilderEnabled(definitionPayload.workflowBuilder?.enabled === true);
       } catch (definitionError) {
         if (cancelled) {
           return;
@@ -3195,6 +3221,35 @@ function StudioApp() {
       }
     },
     [activeProjectId, handleApiError, hydrateWorkflow, setWorkflowList]
+  );
+
+  /** "Describe it": the draft is saved as a new workflow (a new id, never an existing one) and opened. */
+  const handleCreateBuiltWorkflow = useCallback(
+    async (workflow: Workflow) => {
+      const saved = await saveWorkflow({ ...workflow, projectId: workflow.projectId ?? activeProjectId });
+      // A slower load of another workflow must not replace the new one.
+      workflowLoadSeqRef.current += 1;
+      pendingWorkflowLoadIdRef.current = null;
+      const workflows = await fetchWorkflows({ projectId: activeProjectId });
+      applyProjectWorkflowList(activeProjectId, workflows);
+      hydrateWorkflow(saved);
+      storeLocalWipWorkflow(saved);
+      rememberTabWorkflowId(saved.id);
+      setWorkflowBuilderOpen(false);
+      setError(null);
+      setActiveMode("editor");
+    },
+    [activeProjectId, applyProjectWorkflowList, hydrateWorkflow, setActiveMode]
+  );
+
+  /** "Describe it" without a real model offers templates: one makes a new workflow, as in the gallery. */
+  const handleBuilderTemplate = useCallback(
+    async (templateId: string) => {
+      const created = await instantiateTemplate(templateId);
+      await handleTemplateWorkflowCreated(created.workflowId);
+      setWorkflowBuilderOpen(false);
+    },
+    [handleTemplateWorkflowCreated]
   );
 
   const docsUrl = useMemo(() => {
@@ -5524,6 +5579,16 @@ function StudioApp() {
                       Import…
                     </button>
                   )}
+                  {canManageWorkflows && !inNoProject && workflowBuilderEnabled && (
+                    <button
+                      className="pg-btn"
+                      onClick={() => setWorkflowBuilderOpen(true)}
+                      disabled={busy}
+                      title="Say what it should do and review a draft before it is saved"
+                    >
+                      Describe it…
+                    </button>
+                  )}
                   {!inNoProject && (
                     <button
                       className="pg-btn primary"
@@ -5866,6 +5931,7 @@ function StudioApp() {
               reactFlowInstance={reactFlowInstance}
               editDisabledReason={editDisabledReason}
               runDisabledReason={runDisabledReason}
+              onDescribeWorkflow={canEditOpenWorkflow && workflowBuilderEnabled ? () => setWorkflowBuilderOpen(true) : undefined}
               onClearCanvas={() => {
                 if (editDisabledReason) return;
                 if (nodes.length === 0 && edges.length === 0) return;
@@ -6555,6 +6621,17 @@ function StudioApp() {
             })
           }
           onClose={() => setSubjectRefsDialogOpen(false)}
+        />
+      )}
+
+      {workflowBuilderOpen && canManageWorkflows && (
+        <WorkflowBuilderDialog
+          defaultModel={pickDefaultModelProvider({ envProviders: envModelProviders, secrets })}
+          secrets={secrets}
+          projectId={activeProjectId}
+          onCreate={handleCreateBuiltWorkflow}
+          onUseTemplate={handleBuilderTemplate}
+          onClose={() => setWorkflowBuilderOpen(false)}
         />
       )}
 

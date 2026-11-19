@@ -986,6 +986,13 @@ export const openApiSpec = {
         responses: { "200": { description: "Duplicated workflow" } }
       }
     },
+    "/api/workflow-builder": {
+      get: {
+        tags: ["Workflows"],
+        summary: "Whether the describe-it builder is on (builder role)",
+        responses: { "200": { description: "{ enabled }" }, "403": { description: "Not a builder" } }
+      }
+    },
     "/api/workflow-builder/build": {
       post: {
         tags: ["Workflows"],

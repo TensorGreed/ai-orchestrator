@@ -16838,7 +16838,17 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     resolveSecretForUser,
     providerRegistryFor: (projectId) => modelAllowlistService.registry(baseProviderRegistry, { projectId, source: "workflow_builder" }),
     listTemplates: async () =>
-      (await store.listTemplates()).map((template) => ({ ...template, featured: FEATURED_TEMPLATE_IDS.has(template.id) })),
+      await mapAsync(await store.listTemplates(), async (template) => {
+        // A template whose model node needs a provider is offered after the ones that run without a model.
+        let needsModel = false;
+        const full = await store.getTemplate(template.id);
+        try {
+          needsModel = full?.workflowJson ? computeTemplateDependencies(JSON.parse(full.workflowJson)).some((dep) => dep.kind === "provider") : false;
+        } catch {
+          needsModel = false;
+        }
+        return { ...template, featured: FEATURED_TEMPLATE_IDS.has(template.id), needsModel };
+      }),
     prepareDraft: async (workflow) => {
       // Like a duplicate or a template: trigger paths nobody uses, and no setting only an admin may make.
       const withPaths = withUniqueTriggerPaths(workflow, await releaseService.usedRoutingKeys());

@@ -104,11 +104,12 @@ export function builderKeywords(text: string): string[] {
 
 /**
  * The templates closest to a description, best first: a word of the description in the template's name counts most,
- * then its tags, category and description. Featured templates win ties, so a vague description still gets the
- * starting points the gallery leads with.
+ * then its tags, category and description. Templates that need a model (`needsModel`) come after the ones that run
+ * without one, since they are offered when no real model is set. Featured templates win ties, so a vague description
+ * still gets the starting points the gallery leads with.
  */
 export function rankTemplatesForPrompt<
-  T extends { id: string; name: string; description?: string; category?: string; tags?: readonly string[]; featured?: boolean }
+  T extends { id: string; name: string; description?: string; category?: string; tags?: readonly string[]; featured?: boolean; needsModel?: boolean }
 >(prompt: string, templates: readonly T[], limit = 3): T[] {
   const wanted = builderKeywords(prompt);
   const scored = templates.map((template, index) => {
@@ -126,7 +127,11 @@ export function rankTemplatesForPrompt<
     return { template, index, score };
   });
   scored.sort(
-    (a, b) => b.score - a.score || Number(Boolean(b.template.featured)) - Number(Boolean(a.template.featured)) || a.index - b.index
+    (a, b) =>
+      Number(Boolean(a.template.needsModel)) - Number(Boolean(b.template.needsModel)) ||
+      b.score - a.score ||
+      Number(Boolean(b.template.featured)) - Number(Boolean(a.template.featured)) ||
+      a.index - b.index
   );
   return scored.slice(0, Math.max(0, limit)).map((entry) => entry.template);
 }

@@ -42,6 +42,42 @@ Open the palette with **Add node**, a double-click on empty canvas, or the `+` b
 
 The canvas pans to show a node it adds when the node would land out of view.
 
+## Describe a workflow
+
+Builders and admins can say what a workflow should do and get a draft to review. **Describe it…** is on the Workflows
+page (Home) and on an empty canvas.
+
+1. Write what should start the workflow and what it should do, for example "When a form is submitted, check the
+   email address, post the details to our CRM API and reply with a thank-you".
+2. **Build** asks the model for a workflow. The model reads the node catalog (the node types, their settings, their
+   outputs and an agent's model, memory, tool and worker ports) and hands in a workflow. That workflow is checked
+   against the workflow schema and the same graph rules as a save; when something is wrong, the problems go back to
+   the model, which fixes them (three tries in all). If the description is too vague, the model asks a question
+   instead: add the answer to your description and build again.
+3. The preview shows a small drawing of the workflow and lists what it creates, the credentials to pick, the settings
+   still to fill in and the addresses it calls when it runs. Nothing is saved yet. **Edit description** goes back.
+4. **Create draft** saves it as a new workflow and opens it. It never replaces a workflow you have.
+
+What the builder never does:
+
+- It runs nothing while it builds. The model's answer is only read as a workflow and checked.
+- It never fills in credentials. Credential values and secret references in the model's answer are left out (the
+  preview says so); pick saved credentials on the nodes afterwards. Settings only an admin may make, such as a
+  trigger's input trust, are left out too.
+- Model nodes it creates use the model the builder used, never a provider or base URL the model wrote.
+- Triggers get paths no other workflow uses.
+
+It uses the same model a new **LLM Call** starts on (see [Model nodes](#model-nodes)). Under **More** you can choose
+another one (a provider, a model, a base URL for an OpenAI-compatible server, Azure OpenAI or Ollama, and a saved
+credential); the browser remembers the choice, never a key. On **Echo** nothing is sent to a model: Echo only repeats its
+input, so the dialog says a real model is needed and offers the three closest templates, those that run without a model
+first.
+
+An admin can turn the builder off with `WORKFLOW_BUILDER_ENABLED=false` on the API server: **Describe it…** goes away and
+`POST /api/workflow-builder/build` answers `403` with `code: "workflow_builder_disabled"`. Each build is audited as
+`workflow.builder.build` (the model, the outcome and the number of tries, never the description). One build runs at a
+time per person, for at most two minutes, and the project's model allowlist applies.
+
 ## Undo and redo
 
 `Ctrl+Z` undoes the last canvas change and `Ctrl+Shift+Z` or `Ctrl+Y` redoes it (`Cmd` on macOS). Every change is

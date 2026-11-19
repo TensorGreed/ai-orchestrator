@@ -68,6 +68,7 @@ import type { DocumentScanRequest, DocumentScanResult } from "@ai-orchestrator/s
 import { EVAL_RUN_FINISHED_STATUSES } from "@ai-orchestrator/shared";
 import type { GuardEntityEngineInfo } from "@ai-orchestrator/shared";
 import type { WorkflowDiff } from "@ai-orchestrator/shared";
+import type { WorkflowBuilderRequest, WorkflowBuilderResult } from "@ai-orchestrator/shared";
 import type {
   EvalCaseDetail,
   EvalCaseResult,
@@ -617,6 +618,19 @@ export async function duplicateWorkflow(
  * Imports a workflow JSON file. `mode: "new"` (the default) makes a new workflow: the file's id is kept when it is
  * free, otherwise the import gets a new id. `mode: "replace"` overwrites the stored workflow with the file's id.
  */
+/** Whether "Describe it" is on for this server (builders only). */
+export async function fetchWorkflowBuilderStatus() {
+  return apiRequest<{ enabled: boolean }>("/api/workflow-builder");
+}
+
+/** Describe-it builder: a description in, a workflow draft preview out (nothing is saved). */
+export async function buildWorkflowFromDescription(payload: WorkflowBuilderRequest) {
+  return apiRequest<WorkflowBuilderResult>("/api/workflow-builder/build", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
 export async function importWorkflow(payload: { json?: string; workflow?: unknown; mode?: "new" | "replace" }) {
   return apiRequest<Workflow>("/api/workflows/import", {
     method: "POST",
@@ -1107,6 +1121,8 @@ export async function fetchDefinitions() {
     mcpServers: Array<{ id: string; label: string; description: string }>;
     /** Hosted model providers whose API key the server's environment sets (builders only). */
     envModelProviders?: string[];
+    /** Whether "Describe it" is on (builders only; absent on older servers). */
+    workflowBuilder?: { enabled: boolean };
   }>("/api/definitions");
 }
 

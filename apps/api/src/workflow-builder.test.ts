@@ -293,11 +293,15 @@ describe("POST /api/workflow-builder/build", () => {
     expect(response.json()).toMatchObject({ code: "workflow_builder_disabled" });
     const definitions = await context.app.inject({ method: "GET", url: "/api/definitions", headers: { cookie } });
     expect(definitions.json()).toMatchObject({ workflowBuilder: { enabled: false } });
+    expect((await context.app.inject({ method: "GET", url: "/api/workflow-builder", headers: { cookie } })).json()).toEqual({ enabled: false });
     expect(modelRequests).toHaveLength(0);
 
     const on = await createTestContext();
     const onCookie = await login(on, "builder", "builder2@example.com");
     const onDefinitions = await on.app.inject({ method: "GET", url: "/api/definitions", headers: { cookie: onCookie } });
     expect(onDefinitions.json()).toMatchObject({ workflowBuilder: { enabled: true } });
+    expect((await on.app.inject({ method: "GET", url: "/api/workflow-builder", headers: { cookie: onCookie } })).json()).toEqual({ enabled: true });
+    const viewer = await login(on, "viewer");
+    expect((await on.app.inject({ method: "GET", url: "/api/workflow-builder", headers: { cookie: viewer } })).statusCode).toBe(403);
   });
 });

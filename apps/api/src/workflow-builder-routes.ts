@@ -1,6 +1,7 @@
 /**
  * Describe-it builder.
  *
+ *   GET  /api/workflow-builder         builder+: { enabled }
  *   POST /api/workflow-builder/build   builder+: a description in, a workflow draft preview out (nothing is saved)
  *
  * The model is the one the request names, else the default model (a provider whose key the server's environment sets,
@@ -54,7 +55,7 @@ export interface WorkflowBuilderRoutesDeps {
   /** The model registry for the project (its model allowlist applies). */
   providerRegistryFor: (projectId: string) => ProviderRegistry;
   /** Templates every signed-in person may read. */
-  listTemplates: () => Promise<Array<{ id: string; name: string; description?: string; category?: string; tags?: string[]; featured?: boolean }>>;
+  listTemplates: () => Promise<Array<{ id: string; name: string; description?: string; category?: string; tags?: string[]; featured?: boolean; needsModel?: boolean }>>;
   /** Gives the draft trigger paths nobody uses and takes out settings only an admin sets. */
   prepareDraft: (workflow: Workflow) => Promise<Workflow>;
   isModelNotAllowed: (error: unknown) => boolean;
@@ -66,6 +67,13 @@ export function registerWorkflowBuilderRoutes(deps: WorkflowBuilderRoutesDeps): 
   const { app } = deps;
   // One build at a time per person: each one makes several model calls.
   const building = new Set<string>();
+
+  // Whether builders get "Describe it" (the studio asks once, to show or hide it).
+  app.get("/api/workflow-builder", async (request, reply) => {
+    const user = await deps.requireRole(request, reply, ["builder"]);
+    if (!user) return;
+    return { enabled: deps.enabled };
+  });
 
   app.post<{ Body: unknown }>("/api/workflow-builder/build", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["builder"]);
