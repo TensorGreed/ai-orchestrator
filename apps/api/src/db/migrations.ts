@@ -3083,6 +3083,43 @@ export const MIGRATIONS: Migration[] = [
     down: `
       ALTER TABLE mcp_toolset_members DROP COLUMN IF EXISTS options_json;
     `
+  },
+  {
+    version: 78,
+    description: "Per-workflow user shares — a workflow shared with a person (read or execute)",
+    // workflow_user_shares: one row per workflow and person. access_level 'read' or 'execute'; a share never gives more
+    // than the person's own role allows (a viewer's execute share reads only) and never write. Removed with the
+    // workflow (deleteWorkflow) and with the user (deleteUser). shared_by is the email of whoever shared it.
+    // idx_workflow_user_shares_user_id: the workflows shared with one person, read once per workflow list.
+    up: `
+      CREATE TABLE IF NOT EXISTS workflow_user_shares (
+        workflow_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        access_level TEXT NOT NULL DEFAULT 'read',
+        shared_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (workflow_id, user_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_workflow_user_shares_user_id ON workflow_user_shares(user_id);
+    `,
+    // An older build ignores the table; dropping it removes every user share.
+    down: `
+      DROP TABLE IF EXISTS workflow_user_shares;
+    `
+  },
+  {
+    version: 79,
+    description: "The person whose session memory a run used (operators and share-only runners)",
+    // session_owner: the user id a run's session memory, tool cache and artifacts were kept to (run-scope.ts
+    // personSessionNamespace), or NULL for the workflow's sessions. A retry or an MCP replay of the run keeps it, so an
+    // operator's run never moves into the workflow's sessions or into the retrying person's.
+    up: `
+      ALTER TABLE execution_history ADD COLUMN IF NOT EXISTS session_owner TEXT;
+    `,
+    // An older build ignores the column; dropping it makes retries of such runs use the retrying person's sessions.
+    down: `
+      ALTER TABLE execution_history DROP COLUMN IF EXISTS session_owner;
+    `
   }
 ];
 

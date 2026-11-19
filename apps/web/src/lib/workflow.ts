@@ -1,6 +1,7 @@
 import { WORKFLOW_SCHEMA_VERSION, type Workflow, type WorkflowEdge, type WorkflowNode, type WorkflowNodeType } from "@ai-orchestrator/shared";
 import type { Edge, Node } from "reactflow";
 import type { McpCanvasMarker, McpNavTarget } from "./mcp-control-plane";
+import { readableNodeId } from "./node-ids";
 import type { CanvasLabelBadge } from "./taint-sources";
 import {
   computeAttachmentSlots,
@@ -187,9 +188,12 @@ export function editorToWorkflow(base: Workflow, nodes: EditorNode[], edges: Edg
   };
 }
 
-export function createNodeId(type: WorkflowNodeType): string {
-  const suffix = Math.random().toString(36).slice(2, 8);
-  return `${type}-${suffix}`;
+/**
+ * A new node's id, readable and derived from its label (`fetch_items`, `set_1`), and not in `taken` (the ids of the
+ * workflow's nodes, its pinned data and the last run). The id is added to `taken`, so a batch gets distinct ids.
+ */
+export function createNodeId(type: WorkflowNodeType, label: string, taken: Set<string>): string {
+  return readableNodeId(label, type, taken);
 }
 
 export function createEdgeId(source: string, target: string): string {

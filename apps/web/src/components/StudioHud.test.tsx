@@ -70,6 +70,26 @@ function makeProps(overrides: Partial<Parameters<typeof StudioHud>[0]> = {}): Pa
 }
 
 describe("StudioHud", () => {
+  it("disables Save and Run with the reason as tooltip when you cannot use them", async () => {
+    const onSave = vi.fn();
+    const onRun = vi.fn();
+    render(
+      <StudioHud
+        {...makeProps({ onSave, onRun, saveDisabledReason: "You have the viewer role", runDisabledReason: "Running needs the builder role" })}
+      />
+    );
+    const save = screen.getByRole("button", { name: /^Save/ });
+    const run = screen.getByRole("button", { name: "Run workflow" });
+    expect(save).toHaveAttribute("aria-disabled", "true");
+    expect(save).toHaveAttribute("title", "You have the viewer role");
+    expect(run).toHaveAttribute("aria-disabled", "true");
+    expect(run).toHaveAttribute("title", "Running needs the builder role");
+    await userEvent.click(save);
+    await userEvent.click(run);
+    expect(onSave).not.toHaveBeenCalled();
+    expect(onRun).not.toHaveBeenCalled();
+  });
+
   it("renders the breadcrumb with an editable name and the workflow picker in editor mode", () => {
     render(<StudioHud {...makeProps()} />);
 
@@ -130,6 +150,25 @@ describe("StudioHud", () => {
     rerender(<StudioHud {...makeProps({ onToggleNoWriteTools, noWriteTools: true })} />);
     await user.click(screen.getByRole("button", { name: "More actions" }));
     expect(screen.getByRole("menuitemcheckbox", { name: "No write tools" })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("toggles the workflow's Strict templates setting from the overflow menu, and hides it from users who cannot edit", async () => {
+    const user = userEvent.setup();
+    const onToggleStrictTemplates = vi.fn();
+    const { rerender } = render(<StudioHud {...makeProps({ onToggleStrictTemplates, strictTemplates: false })} />);
+
+    await user.click(screen.getByRole("button", { name: "More actions" }));
+    const item = screen.getByRole("menuitemcheckbox", { name: "Strict templates" });
+    expect(item).toHaveAttribute("aria-checked", "false");
+    await user.click(item);
+    expect(onToggleStrictTemplates).toHaveBeenCalledTimes(1);
+
+    rerender(<StudioHud {...makeProps({ onToggleStrictTemplates, strictTemplates: true })} />);
+    await user.click(screen.getByRole("button", { name: "More actions" }));
+    expect(screen.getByRole("menuitemcheckbox", { name: "Strict templates" })).toHaveAttribute("aria-checked", "true");
+
+    rerender(<StudioHud {...makeProps()} />);
+    expect(screen.queryByRole("menuitemcheckbox", { name: "Strict templates" })).not.toBeInTheDocument();
   });
 
   it("hides the No write tools toggle when the user cannot edit workflows", async () => {

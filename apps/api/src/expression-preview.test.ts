@@ -50,7 +50,7 @@ async function boot() {
   const preview = async (expression: string, mode: "template" | "expression" | "condition", context: Record<string, unknown>) => {
     const response = await app.inject({ method: "POST", url: "/api/expressions/preview", headers: { cookie }, payload: { expression, mode, context } });
     expect(response.statusCode).toBe(200);
-    return response.json() as { ok: boolean; result?: unknown; error?: string };
+    return response.json() as { ok: boolean; result?: unknown; error?: string; missing?: unknown };
   };
   return { preview };
 }
@@ -69,7 +69,24 @@ describe("expression preview", () => {
     const template =
       "{{results.http_request-abc12.id}}|{{results.http_request-abc12.items.0.title}}|{{ $node('http_request-abc12').output.id }}|" +
       "{{ results['http_request-abc12'].items.length }}|{{note}}|{{user_prompt}}|{{vars.region}}|{{workflow.name}}|{{execution.id}}|{{missing.path}}";
-    expect(await preview(template, "template", CONTEXT)).toEqual({ ok: true, result: "42|first|42|1|between|hi|eu|Flow|ex-1|" });
+    expect(await preview(template, "template", CONTEXT)).toEqual({
+      ok: true,
+      result: "42|first|42|1|between|hi|eu|Flow|ex-1|",
+      missing: [{ body: "missing.path", reason: "missing" }]
+    });
+  });
+
+  it("lists each {{ }} of a template that rendered nothing, and nothing when every value is there", async () => {
+    const { preview } = await boot();
+    expect(await preview("{{note}} {{vars.region}}", "template", CONTEXT)).toEqual({ ok: true, result: "between eu", missing: [] });
+    expect(await preview("{{results.http_request-abc12.nope}}{{ $json.a.b }}", "template", CONTEXT)).toEqual({
+      ok: true,
+      result: "",
+      missing: [
+        { body: "results.http_request-abc12.nope", reason: "missing" },
+        { body: "$json.a.b", reason: "expression_failed" }
+      ]
+    });
   });
 
   it("keeps expression mode as it was: the body is JavaScript", async () => {
@@ -81,10 +98,18 @@ describe("expression preview", () => {
   it("condition mode judges the text as an IF node does", async () => {
     const { preview } = await boot();
     const context = { ...CONTEXT, input: { ...CONTEXT.input, userScore: 95, answer: "no" } };
-    expect(await preview("{{userScore}} > 90", "condition", context)).toEqual({ ok: true, result: true });
-    expect(await preview("{{answer}} === 'true'", "condition", context)).toEqual({ ok: true, result: false });
-    expect(await preview("{{results.http_request-abc12.id}} === '42'", "condition", context)).toEqual({ ok: true, result: true });
-    expect(await preview("{{note}}", "condition", context)).toEqual({ ok: true, result: true });
+    expect(await preview("{{userScore}} > 90", "condition", context)).toEqual({ ok: true, result: true, missing: [] });
+    expect(await preview("{{answer}} === 'true'", "condition", context)).toEqual({ ok: true, result: false, missing: [] });
+    expect(await preview("{{results.http_request-abc12.id}} === '42'", "condition", context)).toEqual({ ok: true, result: true, missing: [] });
+    expect(await preview("{{note}}", "condition", context)).toEqual({ ok: true, result: true, missing: [] });
+    expect(await preview("{{score}} > 90 && {{ $json.user.name }}", "condition", context)).toEqual({
+      ok: true,
+      result: false,
+      missing: [
+        { body: "score", reason: "missing" },
+        { body: "$json.user.name", reason: "expression_failed" }
+      ]
+    });
     const bad = await preview("{{answer}} == done", "condition", context);
     expect(bad.ok).toBe(false);
     expect(bad.error).toMatch(/IF condition/);

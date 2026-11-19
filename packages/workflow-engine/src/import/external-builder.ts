@@ -18,7 +18,8 @@ import {
   type ImportReport,
   type ImportReportExpression,
   type ImportReportNodeEntry,
-  type ImportReportSecret
+  type ImportReportSecret,
+  type SetValueType
 } from "@ai-orchestrator/shared";
 import type { ConversionContext, ConvertedNode, ExpressionScope, NodeHandler, SourceConnection, SourceNode, SourceWorkflow } from "./handler-types.js";
 import { createAppRegistrations, type AppKit } from "./apps/index.js";
@@ -1160,10 +1161,33 @@ const codeNode: NodeHandler = (source, ctx, scope) => {
   return approximated(baseNode(source, scope, "code_node", config), reasons);
 };
 
+/** A source field type as a Set field type: the value keeps (or is converted to) the type the source gave it. */
+function setValueTypeFor(sourceType: unknown): SetValueType {
+  switch (sourceType) {
+    case "string":
+      return "string";
+    case "number":
+      return "number";
+    case "boolean":
+      return "boolean";
+    case "array":
+    case "object":
+      return "json";
+    default:
+      return "auto";
+  }
+}
+
 const setNode: NodeHandler = (source, ctx, scope) => {
   const params = source.parameters;
   const reasons: string[] = [];
-  const assignments: Array<{ key: string; valueTemplate: string }> = [];
+  const assignments: Array<{ key: string; valueTemplate: string; type: SetValueType }> = [];
+  // With the source's "ignore conversion errors", a value that does not fit its type is kept rather than failing.
+  const lenient = toRecord(params.options).ignoreConversionErrors === true;
+  const typeFor = (sourceType: unknown): SetValueType => {
+    const type = setValueTypeFor(sourceType);
+    return lenient && (type === "number" || type === "boolean" || type === "json") ? "auto" : type;
+  };
 
   const mode = asString(params.mode, "manual");
   if (mode === "raw") {
@@ -1178,10 +1202,12 @@ const setNode: NodeHandler = (source, ctx, scope) => {
     }
     if (parsed) {
       for (const [key, value] of Object.entries(parsed)) {
-        assignments.push({ key, valueTemplate: typeof value === "string" ? value : JSON.stringify(value) });
+        assignments.push(
+          typeof value === "string" ? { key, valueTemplate: value, type: "string" } : { key, valueTemplate: JSON.stringify(value), type: "json" }
+        );
       }
     } else if (rawJson) {
-      assignments.push({ key: "json", valueTemplate: tpl(rawJson, ctx, scope, "jsonOutput") });
+      assignments.push({ key: "json", valueTemplate: tpl(rawJson, ctx, scope, "jsonOutput"), type: "auto" });
       reasons.push("Raw JSON output could not be split into fields; it was assigned to the 'json' key.");
     }
   } else {
@@ -1197,7 +1223,7 @@ const setNode: NodeHandler = (source, ctx, scope) => {
           : value === undefined || value === null
             ? ""
             : JSON.stringify(value);
-      assignments.push({ key, valueTemplate });
+      assignments.push({ key, valueTemplate, type: typeFor(assignment.type) });
     }
 
     const legacy = toRecord(params.values);
@@ -1206,13 +1232,13 @@ const setNode: NodeHandler = (source, ctx, scope) => {
         const assignment = toRecord(entry);
         const key = asString(assignment.name).trim();
         if (!key) continue;
-        assignments.push({ key, valueTemplate: tpl(assignment.value, ctx, scope, `values.${type}[${index}].value`) });
+        assignments.push({ key, valueTemplate: tpl(assignment.value, ctx, scope, `values.${type}[${index}].value`), type: typeFor(type) });
       }
     }
   }
 
   if (assignments.length === 0) {
-    assignments.push({ key: "imported", valueTemplate: "true" });
+    assignments.push({ key: "imported", valueTemplate: "true", type: "boolean" });
     reasons.push("The node had no field assignments; a placeholder assignment was added.");
   }
   if (params.includeOtherFields === false || params.keepOnlySet === true) {
@@ -1475,7 +1501,11 @@ const filterNode: NodeHandler = (source, ctx, scope) => {
     reasons.push("The filter had no conditions; it passes everything through.");
   }
 
+  // An imported node's output is one source item (`$json.x` became `results.<previous node>.x`), so the source's
+  // per-item filter is the pass-or-stop mode on that item: kept items reach the pass output with their fields, as
+  // later nodes' translated references expect. Items mode would filter a list inside the item instead.
   const node = baseNode(source, scope, "filter_node", {
+    mode: "gate",
     conditions,
     combineWith: parsed?.combinator === "or" ? "OR" : "AND",
     passMode: "pass"
@@ -1887,14 +1917,14 @@ const REGISTRATIONS: readonly HandlerRegistration[] = [
   { sourceType: `${BASE}httpRequest`, targetType: "http_request", category: "core", notes: "Query parameters are appended to the URL; binary responses become text; auth becomes a secretRef placeholder.", handler: httpRequest },
   { sourceType: `${BASE}code`, targetType: "code_node", category: "core", notes: "JavaScript is wrapped in a compatibility shim; Python is kept verbatim.", handler: codeNode },
   { sourceType: `${BASE}function`, targetType: "code_node", category: "core", notes: "Legacy function code is wrapped in the same compatibility shim.", handler: codeNode },
-  { sourceType: `${BASE}set`, targetType: "set_node", category: "core", notes: "'Keep only set fields' is not supported; other fields pass through.", handler: setNode },
+  { sourceType: `${BASE}set`, targetType: "set_node", category: "core", notes: "Field types are kept (string, number, boolean; arrays and objects as JSON). 'Keep only set fields' is not supported; other fields pass through.", handler: setNode },
   { sourceType: `${BASE}if`, targetType: "if_node", category: "core", notes: "Conditions compile to one expression; outputs 0 and 1 become the true and false handles.", handler: ifNode },
   { sourceType: `${BASE}switch`, targetType: "switch_node", category: "core", notes: "Same-field equality rules become cases; other rule sets compile to a routing expression.", handler: switchNode },
   { sourceType: `${BASE}merge`, targetType: "merge_node", category: "core", notes: "Combine-by-fields keeps the first match field; SQL and position combines become append.", handler: mergeNode },
   { sourceType: `${BASE}splitOut`, targetType: "split_out_node", category: "core", notes: "Only the first field to split out is kept.", handler: splitOutNode },
   { sourceType: `${BASE}itemLists`, targetType: "split_out_node", category: "core", notes: "Legacy item list node treated as split out.", handler: splitOutNode },
   { sourceType: `${BASE}aggregate`, targetType: "aggregate_node", category: "core", notes: "Collecting values into an array is approximated with the concatenate operation.", handler: aggregateNode },
-  { sourceType: `${BASE}filter`, targetType: "filter_node", category: "core", notes: "Field-path conditions map directly; expression conditions need review.", handler: filterNode },
+  { sourceType: `${BASE}filter`, targetType: "filter_node", category: "core", notes: "Maps to Pass or stop mode: an imported node's output is one item, which passes or is filtered out. Field-path conditions map directly; expression conditions need review.", handler: filterNode },
   { sourceType: `${BASE}sort`, targetType: "sort_node", category: "core", notes: "Only the first sort field is kept; custom sort code needs review.", handler: sortNode },
   { sourceType: `${BASE}limit`, targetType: "limit_node", category: "core", notes: "", handler: limitNode },
   { sourceType: `${BASE}wait`, targetType: "wait_node", category: "core", notes: "Timer, webhook and specific-time resumes are supported; form resume is approximated as a timer.", handler: waitNode },

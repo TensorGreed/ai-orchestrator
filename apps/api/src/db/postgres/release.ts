@@ -523,6 +523,17 @@ export async function getExecutionSensitive(ctx: PgContext, executionId: string)
   return row ? Number(row.sensitive ?? 0) !== 0 : null;
 }
 
+/** v79 — see Store.setExecutionSessionOwner. */
+export async function setExecutionSessionOwner(ctx: PgContext, executionId: string, userId: string): Promise<void> {
+  await ctx.execute(`UPDATE execution_history SET session_owner = $1 WHERE id = $2`, [userId, executionId]);
+}
+
+/** v79 — see Store.getExecutionSessionOwner. */
+export async function getExecutionSessionOwner(ctx: PgContext, executionId: string): Promise<string | null> {
+  const row = await ctx.queryOne<{ session_owner: string | null }>(`SELECT session_owner FROM execution_history WHERE id = $1`, [executionId]);
+  return row?.session_owner ? String(row.session_owner) : null;
+}
+
 export async function getExecutionRelease(ctx: PgContext, executionId: string): Promise<{ channel: "production" | "draft"; version: number | null } | null> {
   const row = await ctx.queryOne<{ release_channel: string | null; release_version: number | null }>(
     `SELECT release_channel, release_version FROM execution_history WHERE id = $1`,

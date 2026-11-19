@@ -89,7 +89,7 @@ export const STEP_UP_ACTIONS = {
   "secret.delete": "Delete a secret",
   "sso_mapping.change": "Create or delete an SSO group mapping",
   "scim_token.change": "Create, rotate or revoke a SCIM provisioning token",
-  "project_member.change": "Add or remove a project member",
+  "project_member.change": "Add or remove a project member, or share a workflow with a person",
   "custom_role.change": "Create, change or delete a custom role",
   "project_retention.change": "Change a project's data retention",
   "notification_channel.change": "Create or delete a notification channel",

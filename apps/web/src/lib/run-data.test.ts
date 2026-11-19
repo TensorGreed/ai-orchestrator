@@ -6,6 +6,7 @@ import {
   compactOutputPreview,
   formatRunDuration,
   hasTestData,
+  loopPassResults,
   outputItemCount,
   runPromptInput,
   runStepOrder,
@@ -148,5 +149,33 @@ describe("run records", () => {
     expect(canvasRunPreview(result, (id) => id)).toEqual({ meta: "success · 3 items · 28 ms", output: "count: 3 · items: [3]" });
     expect(canvasRunPreview({ nodeId: "k", status: "skipped", startedAt: T0, durationMs: 0 }, (id) => id)).toEqual({ meta: "skipped" });
     expect(canvasRunPreview({ nodeId: "r", status: "running", startedAt: T0 }, (id) => id)).toEqual({ meta: "running" });
+  });
+});
+
+describe("a Loop body node's passes on the canvas", () => {
+  const pass = (n: number, output: unknown, status: "success" | "error" = "success") => ({
+    nodeId: "body",
+    status,
+    startedAt: T0,
+    durationMs: 10,
+    input: { _loop_index: n - 1 },
+    output
+  });
+
+  it("counts as passes only results recorded inside a loop", () => {
+    const passes = [pass(1, {}), pass(2, {})];
+    const other = { nodeId: "body", status: "success" as const, startedAt: T0, input: {}, output: {} };
+    expect(loopPassResults([...passes, other, { ...passes[0]!, nodeId: "x" }], "body")).toEqual(passes);
+  });
+
+  it("counts every pass and the items of all of them, not only the last pass", () => {
+    const passes = [pass(1, { a: 1 }), pass(2, { a: 2 }), pass(3, [1, 2])];
+    expect(canvasRunPreview(passes[2]!, (id) => id, { passes }).meta).toBe("success · 3 passes · 4 items · 30 ms");
+    expect(canvasRunPreview(passes[2]!, (id) => id, { passes }).output).toBe(compactOutputPreview([1, 2]));
+  });
+
+  it("keeps the one-pass summary for a node that ran once", () => {
+    const only = pass(1, { a: 1 });
+    expect(canvasRunPreview(only, (id) => id, { passes: [only] }).meta).toBe("success · 1 item · 10 ms");
   });
 });

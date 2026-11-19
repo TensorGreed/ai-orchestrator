@@ -41,12 +41,19 @@ export interface StudioHudProps {
   releaseControl?: ReactNode;
   /** Primary "Run" action; rendered in editor mode only. */
   onRun?: () => void;
+  /** Why Save is off for you (your role or your access to this workflow); Save is disabled with this as its tooltip. */
+  saveDisabledReason?: string | null;
+  /** Why Run is off for you; Run is disabled with this as its tooltip. */
+  runDisabledReason?: string | null;
   /** Shows the unsaved dot on the Save pill. */
   isDirty?: boolean;
   /** Opens the editor's share dialog from the overflow menu. */
   onShare?: () => void;
   /** Phase 10.2 — the workflow's "No write tools" setting; the menu item shows only when the toggle handler is set. */
   noWriteTools?: boolean;
+  /** The workflow's strict templates setting (a `{{ }}` without a value fails its node). */
+  strictTemplates?: boolean;
+  onToggleStrictTemplates?: () => void;
   onToggleNoWriteTools?: () => void;
   /** Phase 11.2 — the workflow's "Ask before write tools" setting (agents pause for approval before an MCP write tool); the item opens its settings. */
   writeToolApproval?: boolean;
@@ -102,6 +109,8 @@ export function StudioHud({
   onLoadWorkflowById,
   onModeChange,
   onSave,
+  saveDisabledReason,
+  runDisabledReason,
   onExport,
   onImportClick,
   onImportFileChange,
@@ -121,6 +130,8 @@ export function StudioHud({
   isDirty = false,
   onShare,
   noWriteTools = false,
+  strictTemplates = false,
+  onToggleStrictTemplates,
   onToggleNoWriteTools,
   writeToolApproval = false,
   onEditWriteToolApproval,
@@ -187,13 +198,14 @@ export function StudioHud({
 
   const paletteItems = useMemo<CommandPaletteItem[]>(() => {
     const items: CommandPaletteItem[] = [];
-    if (isEditor && onRun) {
+    if (isEditor && onRun && !runDisabledReason) {
       items.push({ id: "run", label: "Run workflow", group: "Actions", hint: "Run ▸", run: onRun });
     }
     if (showWorkflowActions) {
-      items.push({ id: "save", label: "Save workflow", group: "Actions", hint: "⌘S", run: onSave });
+      if (!saveDisabledReason) items.push({ id: "save", label: "Save workflow", group: "Actions", hint: "⌘S", run: onSave });
       items.push({ id: "export", label: "Export workflow JSON", group: "Actions", run: onExport });
-      items.push({ id: "import", label: "Import workflow JSON", group: "Actions", run: onImportClick });
+      // Importing makes a workflow: only for roles that may (the same ones the importer dialog is offered to).
+      if (onImportExternal) items.push({ id: "import", label: "Import workflow JSON", group: "Actions", run: onImportClick });
       if (onImportExternal) {
         items.push({ id: "import-external", label: "Import from another builder", group: "Actions", run: onImportExternal });
       }
@@ -244,6 +256,8 @@ export function StudioHud({
     onRun,
     onSave,
     onShare,
+    runDisabledReason,
+    saveDisabledReason,
     onToggleTheme,
     openDocs,
     showWorkflowActions,
@@ -384,9 +398,10 @@ export function StudioHud({
           <button
             type="button"
             className={["hud-pill hud-btn hud-save", isDirty && "is-dirty", isEditor && "hud-secondary"].filter(Boolean).join(" ")}
-            onClick={onSave}
+            onClick={saveDisabledReason ? undefined : onSave}
             disabled={busy}
-            title={isDirty ? "Save (unsaved changes)" : "Save"}
+            aria-disabled={saveDisabledReason ? true : undefined}
+            title={saveDisabledReason ?? (isDirty ? "Save (unsaved changes)" : "Save")}
           >
             <span>Save</span>
             {isDirty && <span className="hud-dirty-dot" aria-label="Unsaved changes" />}
@@ -424,7 +439,8 @@ export function StudioHud({
                   type="button"
                   className="hud-dropdown-item hud-phone-only"
                   role="menuitem"
-                  disabled={busy}
+                  disabled={busy || Boolean(saveDisabledReason)}
+                  title={saveDisabledReason ?? undefined}
                   onClick={() => {
                     setOverflowOpen(false);
                     onSave();
@@ -496,6 +512,24 @@ export function StudioHud({
                       {noWriteTools ? "✓" : ""}
                     </span>
                     No write tools
+                  </button>
+                )}
+                {onToggleStrictTemplates && (
+                  <button
+                    type="button"
+                    className="hud-dropdown-item hud-dropdown-check"
+                    role="menuitemcheckbox"
+                    aria-checked={strictTemplates}
+                    title="A {{ }} without a value fails its node instead of rendering empty"
+                    onClick={() => {
+                      setOverflowOpen(false);
+                      onToggleStrictTemplates();
+                    }}
+                  >
+                    <span className="hud-check-box" aria-hidden="true">
+                      {strictTemplates ? "✓" : ""}
+                    </span>
+                    Strict templates
                   </button>
                 )}
                 {onEditWriteToolApproval && (
@@ -593,9 +627,10 @@ export function StudioHud({
           <button
             type="button"
             className={["hud-pill hud-run", recordMcp && onToggleRecordMcp && "is-recording"].filter(Boolean).join(" ")}
-            onClick={onRun}
+            onClick={runDisabledReason ? undefined : onRun}
             disabled={busy}
-            title={recordMcp && onToggleRecordMcp ? "Run workflow, recording MCP calls" : "Run workflow"}
+            aria-disabled={runDisabledReason ? true : undefined}
+            title={runDisabledReason ?? (recordMcp && onToggleRecordMcp ? "Run workflow, recording MCP calls" : "Run workflow")}
             aria-label={recordMcp && onToggleRecordMcp ? "Run workflow, recording MCP calls" : "Run workflow"}
           >
             {recordMcp && onToggleRecordMcp && <span className="hud-rec-dot" aria-hidden="true" />}

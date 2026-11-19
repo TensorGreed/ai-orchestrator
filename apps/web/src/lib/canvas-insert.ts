@@ -36,6 +36,8 @@ const FIXED_SOURCE_HANDLES: Record<string, string[]> = {
   try_catch: ["success", "error"],
   guard: ["pass", "blocked", "review"],
   approval_gate: ["approved", "rejected", "timed_out"],
+  // Pass / Stopped (Pass or stop), Kept / Rejected (items mode): the same two handles, so a mode change keeps edges.
+  filter_node: ["pass", "filtered"],
   chat_intent_router: ["report", "code", "message", "missing_context"]
 };
 
@@ -83,7 +85,9 @@ export function sourceHandleIds(node: InsertNode): Array<string | null> {
 /** The first output of `node` with no outgoing edge, else its first output. */
 export function chooseSourceHandle(node: InsertNode, edges: readonly InsertEdge[]): string | null {
   const handles = sourceHandleIds(node);
-  const used = new Set(edges.filter((edge) => edge.source === node.id).map((edge) => edge.sourceHandle ?? null));
+  // A Filter's edge saved without a handle (from before it had two outputs) is drawn from its first output.
+  const unlabeled = node.data.nodeType === "filter_node" && !handles.includes(null) ? handles[0] ?? null : null;
+  const used = new Set(edges.filter((edge) => edge.source === node.id).map((edge) => edge.sourceHandle ?? unlabeled));
   return handles.find((handle) => !used.has(handle)) ?? handles[0] ?? null;
 }
 

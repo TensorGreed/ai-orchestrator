@@ -229,6 +229,17 @@ describe("run-access helper", () => {
     expect(await access.readableProjectIds(admin)).toBeNull();
   });
 
+  it("lists workflows shared with the person, inside an API key's projects only (v78)", async () => {
+    const locked = createRunAccess({
+      ...accessDeps(),
+      canInProject: async (_user, projectId) => projectId === "pa",
+      listWorkflowIdsSharedToUser: async (userId) => (userId === "u-viewer" ? ["b"] : [])
+    });
+    expect(await locked.readableWorkflowIds(user("viewer"))).toEqual(["a", "b"]);
+    expect(await locked.readableWorkflowIds(user("builder"))).toEqual(["a"]);
+    expect(await locked.readableWorkflowIds({ ...user("viewer"), projectScope: ["pa"] })).toEqual(["a"]);
+  });
+
   it("filters rows to readable workflows", async () => {
     const locked = createRunAccess({ ...accessDeps(), canInProject: async (_user, projectId) => projectId === "pa" });
     const rows = [{ workflowId: "a" }, { workflowId: "b" }, { workflowId: "gone" }];
@@ -495,7 +506,13 @@ describe("project authorization on workflow routes", () => {
     // Overwriting another project's workflow, by update or by create/import with its id.
     expect((await call(context, "PUT", "/api/workflows/wf-hidden", builder.cookie, { ...hidden, projectId: "default" })).statusCode).toBe(404);
     expect((await call(context, "POST", "/api/workflows", builder.cookie, { ...hidden, projectId: "default" })).statusCode).toBe(404);
-    expect((await call(context, "POST", "/api/workflows/import", builder.cookie, { workflow: { ...hidden, projectId: "default" } })).statusCode).toBe(404);
+    expect((await call(context, "POST", "/api/workflows/import", builder.cookie, { workflow: { ...hidden, projectId: "default" }, mode: "replace" })).statusCode).toBe(404);
+    // Imported as new (the default), the file gets its own id and the hidden workflow is untouched; a dry run does not name it.
+    const preview = await call(context, "POST", "/api/workflows/import", builder.cookie, { workflow: { ...hidden, projectId: "default" }, dryRun: true });
+    expect(preview.json()).toMatchObject({ existing: null, diff: null });
+    const asNew = await call(context, "POST", "/api/workflows/import", builder.cookie, { workflow: { ...hidden, projectId: "default" } });
+    expect(asNew.statusCode, asNew.body).toBe(200);
+    expect(asNew.json<{ id: string }>().id).not.toBe("wf-hidden");
     expect((await call(context, "PUT", "/api/workflows/wf-ro", builder.cookie, ro)).statusCode).toBe(403);
     expect((await context.store.getWorkflow("wf-hidden"))!.projectId).toBe("hidden");
     // Creating into a project the user cannot write.

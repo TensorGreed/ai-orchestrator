@@ -305,6 +305,7 @@ export const STAFF_AUTHORSHIP_COLUMNS: readonly StaffAuthorshipColumn[] = [
   { table: "variables", column: "created_by" },
   { table: "secret_shares", column: "shared_by" },
   { table: "workflow_shares", column: "shared_by" },
+  { table: "workflow_user_shares", column: "shared_by" },
   { table: "replay_capture_settings", column: "updated_by" },
   { table: "retention_policies", column: "updated_by" },
   { table: "git_configs", column: "user_email" },

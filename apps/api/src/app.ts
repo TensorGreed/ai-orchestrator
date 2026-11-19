@@ -88,6 +88,7 @@ import {
   WorkflowError,
   WORKFLOW_TOOL_ADAPTER_ID
 } from "@ai-orchestrator/shared";
+import { diffWorkflows } from "@ai-orchestrator/shared";
 import { BUDGET_SCOPE_TYPES, isBudgetScopeType, readTraceCarrier, repairWorkflowErrorConfigs, type BudgetScopeType } from "@ai-orchestrator/shared";
 import { CREDENTIAL_EXPIRING_EVENT, credentialRotateBodySchema, KEY_ROTATION_GRACE_HOURS } from "@ai-orchestrator/shared";
 import { CREDENTIAL_EXPIRY_SWEEP_INTERVAL_MS, CredentialExpiryService } from "./services/credential-expiry-service.js";
@@ -102,6 +103,8 @@ import {
   importWorkflowFromJson,
   renderExpressionTemplate,
   renderTemplate,
+  renderTemplateAdvanced,
+  type MissingTemplateValue,
   evaluateConditionTemplate,
   runWithSandboxOwner,
   validateWorkflowGraph,
@@ -205,9 +208,11 @@ import {
   oidcUserErrorCode,
   type FetchLike as OidcFetch
 } from "./services/oidc-service.js";
+import { editorRunOptionsError, editorRunOptionsRefused, personalSessionOwner, savedRunLimits } from "./run-editor-options.js";
 import {
   ALL_PERMISSIONS,
   RbacService,
+  roleMayRunWorkflows,
   isProjectRole,
   strictIsolationStartupWarning,
   type Permission,
@@ -341,6 +346,7 @@ import {
   DispatchTimeoutError,
   QUEUE_DISPATCH_CAPABILITY,
   SENSITIVE_INPUT_CAPABILITY,
+  SESSION_OWNER_CAPABILITY,
   RESPONSE_BOUNDARY_CAPABILITY,
   readDispatchedRunSpec,
   resultForQueue,
@@ -552,7 +558,15 @@ const authLoginSchema = z.object({
 
 const workflowImportSchema = z.object({
   json: z.string().optional(),
-  workflow: z.unknown().optional()
+  workflow: z.unknown().optional(),
+  /**
+   * `new` (the default): a new workflow. The file's id is kept when no workflow has it; otherwise the import gets a new
+   * id, " (imported)" after its name and its own trigger paths. `replace`: overwrite the stored workflow with the
+   * file's id (it must exist and be writable); a version of what it replaced is kept.
+   */
+  mode: z.enum(["new", "replace"]).default("new"),
+  /** Nothing is stored: returns the workflow the import would save, the stored one it matches and what a replace changes. */
+  dryRun: z.boolean().optional()
 });
 
 const externalWorkflowImportSchema = z.object({
@@ -2585,6 +2599,8 @@ export async function createApp(
    */
   // Bounded: a run whose history is never persisted must not grow it forever.
   const runReleases = new Map<string, { channel: ReleaseChannel; version: number | null }>();
+  // v79 — the person a run's session memory was kept to, recorded on its history so a retry or a replay keeps it.
+  const runSessionOwners = new Map<string, string>();
 
   // The run's trace span (only while tracing is on): it covers the host's work around the engine as well, and the
   // engine's node, agent and tool spans are its children.
@@ -2629,6 +2645,10 @@ export async function createApp(
     if (input.executionId && !input.replay) {
       if (runReleases.size >= 5_000) runReleases.delete(runReleases.keys().next().value!);
       runReleases.set(input.executionId, { channel, version: releaseVersion });
+      if (input.sessionOwner) {
+        if (runSessionOwners.size >= 5_000) runSessionOwners.delete(runSessionOwners.keys().next().value!);
+        runSessionOwners.set(input.executionId, input.sessionOwner);
+      }
     }
     // The model spend of the run's sub-workflows joins its usage row (a replay starts none).
     const runSubWorkflowSpend =
@@ -2692,7 +2712,8 @@ export async function createApp(
     const scoped = runScope.dependenciesFor(mergedWorkflow, {
       actor: input.policyActor,
       resolveRegisteredMcpServer: runPlan?.resolveRegisteredMcpServer,
-      channel
+      channel,
+      ...(input.sessionOwner ? { sessionOwner: input.sessionOwner } : {})
     });
     // The execution timeout aborts the run's signal, so it interrupts a
     // model call, MCP call or retry wait that is in flight instead of only
@@ -2801,7 +2822,7 @@ export async function createApp(
             // 12.7 — a run started from a sensitive run's content streams rule event digests, not masked evidence; so
             // does the resumed part of a run whose paused part read sensitive content (or carried it in).
             ...(input.sensitiveInput === true ||
-            (input.usePinnedData === true && (input.workflow.pinnedDataSensitive?.length ?? 0) > 0) ||
+            (input.usePinnedData !== false && (input.workflow.pinnedDataSensitive?.length ?? 0) > 0) ||
             input.resumeState?.sensitiveSessionRead === true ||
             input.resumeState?.sensitiveSessionReadMarked === true
               ? { sensitiveInput: true }
@@ -2867,7 +2888,9 @@ export async function createApp(
                 // 12.7 — an eval run's resumed part still records its Content rules verdicts as eval traffic.
                 ...(input.guardRunSource === "eval" ? { guardRunSource: "eval" as const } : {}),
                 // Who the run's budgets are matched against, kept for the resumed part (not the approver).
-                budgetSubject: input.budgetSubject ?? (({ userEmail, userId }) => ({ userEmail, userId }))(runBudgetContext(input))
+                budgetSubject: input.budgetSubject ?? (({ userEmail, userId }) => ({ userEmail, userId }))(runBudgetContext(input)),
+                // Whose sessions the run uses, so the resumed part (decided by someone else) reads the same ones.
+                ...(input.sessionOwner ? { sessionOwner: input.sessionOwner } : {})
               })
             }, queueFence ? { fence: queueFence } : {});
             if (!pausedHere) {
@@ -2877,6 +2900,7 @@ export async function createApp(
             }
             // The paused state carries the version now; the resume records it again.
             runReleases.delete(paused.executionId);
+            runSessionOwners.delete(paused.executionId);
             // Phase 11.2 — who may decide, when it expires; audited and notified.
             try {
               await approvalService.recordPause({
@@ -2928,7 +2952,12 @@ export async function createApp(
             const errorWf = errorTarget.workflow;
             // Like a sub-workflow: the run's user carries over only within the same project.
             const sameProject = (errorWf.projectId ?? DEFAULT_PROJECT_ID) === (failingWorkflow.projectId ?? DEFAULT_PROJECT_ID);
-            const errorScoped = runScope.dependenciesFor(errorWf, { actor: sameProject ? input.policyActor : null, channel });
+            // A run kept to one person's sessions keeps its error workflow to them too.
+            const errorScoped = runScope.dependenciesFor(errorWf, {
+              actor: sameProject ? input.policyActor : null,
+              channel,
+              ...(input.sessionOwner ? { sessionOwner: input.sessionOwner } : {})
+            });
             const errorModelRun: ModelRun = { runKey: `error:${payload.executionId}:${errorWf.id}`, sourceExecutionId: payload.executionId };
             try {
               const errorToolPolicySubject = await resolveToolPolicySubject(errorWf.id);
@@ -3027,7 +3056,7 @@ export async function createApp(
       if (
         captureTicket &&
         !captureHandedOff &&
-        (input.sensitiveInput === true || (input.usePinnedData === true && (input.workflow.pinnedDataSensitive?.length ?? 0) > 0))
+        (input.sensitiveInput === true || (input.usePinnedData !== false && (input.workflow.pinnedDataSensitive?.length ?? 0) > 0))
       ) {
         replayCapture?.abandon(captureTicket, "skipped_sensitive_input");
         captureHandedOff = true;
@@ -3327,6 +3356,15 @@ export async function createApp(
       status: input.result.status
     });
 
+    const sessionOwner = runSessionOwners.get(input.executionId);
+    runSessionOwners.delete(input.executionId);
+    if (persisted && sessionOwner) {
+      try {
+        await store.setExecutionSessionOwner(input.executionId, sessionOwner);
+      } catch (error) {
+        app.log.warn({ executionId: input.executionId, error: error instanceof Error ? error.message : String(error) }, "Failed to record whose session memory a run used");
+      }
+    }
     const ranOn = runReleases.get(input.executionId);
     runReleases.delete(input.executionId);
     if (persisted && ranOn !== undefined) {
@@ -3349,7 +3387,8 @@ export async function createApp(
             output: input.result.output,
             customData: input.customData ?? input.result.customData,
             sessionId: runSessionId(input.requestInput, input.customData ?? input.result.customData),
-            triggeredBy: input.triggeredBy ?? null
+            triggeredBy: input.triggeredBy ?? null,
+            sessionOwner: sessionOwner ?? null
           }
         });
       }
@@ -4018,6 +4057,18 @@ export async function createApp(
    * toolset's project.
    */
   /** A run's budget user from its trigger's name (paused states written before the subject was kept). */
+  // Whose sessions a run by this person uses, when they are kept to the person: operators, and anyone who runs the
+  // workflow only through a share with them, also with a key of their own (run-editor-options.ts personalSessionOwner).
+  // Other API keys and service accounts keep the workflow's sessions.
+  const sessionOwnerFor = async (user: SafeUser, workflow: Workflow): Promise<string | undefined> => {
+    const shareOnly =
+      user.role === "builder" && !user.serviceAccount ? await rbacService.runsOnlyThroughUserShare(user, workflow) : false;
+    return personalSessionOwner(user, shareOnly);
+  };
+  const sessionOwnerOptionFor = async (user: SafeUser, workflow: Workflow): Promise<{ sessionOwner?: string }> => {
+    const owner = await sessionOwnerFor(user, workflow);
+    return owner ? { sessionOwner: owner } : {};
+  };
   const budgetSubjectOf = (triggeredBy: string | undefined): { userEmail: string | null; userId: string | null } => {
     const user = usageUserOf(triggeredBy, undefined);
     return { userEmail: user.email, userId: user.id };
@@ -4701,7 +4752,8 @@ export async function createApp(
     canAccessWorkflow: async (user, workflow, permission) => await rbacService.canAccessWorkflow(user, workflow, permission),
     canInProject: async (user, projectId, permission) => await rbacService.can(user, projectId, permission),
     listWorkflowIdsSharedToProject: async (projectId) => (await store.listWorkflowsSharedToProject(projectId)).map((share) => share.workflowId),
-    projectExists: async (projectId) => Boolean(await store.getProject(projectId))
+    projectExists: async (projectId) => Boolean(await store.getProject(projectId)),
+    listWorkflowIdsSharedToUser: async (userId) => (await store.listWorkflowsSharedToUser(userId)).map((share) => share.workflowId)
   });
   // Phase 9.1 — built-in persistent vector store. A run sees the knowledge
   // bases of its own project and the shared ones without a project; any other
@@ -4792,6 +4844,7 @@ export async function createApp(
     getSecretProjectId: async (secretId) => (await store.getSecret(secretId))?.projectId ?? null,
     listSecretIdsSharedToProject: async (projectId) => await store.listSecretsSharedToProject(projectId),
     canUseSecretsInProject: async (user, projectId) => await rbacService.can(user, projectId, "secret:use"),
+    userMayRunViaShare: async (user, workflow) => (await rbacService.userShareAccess(user, workflow)) === "execute",
     defaultSecretsShared: config.PROJECT_ISOLATION === "role",
     getMcpServerProjectId: async (serverId) => {
       const server = await store.getMcpServer(serverId);
@@ -5374,7 +5427,7 @@ export async function createApp(
         concurrency: runsBackgroundWorkers && queueService ? queueService.concurrency() : null,
         // In cluster mode a queue consumer claims under heartbeat leases with fencing tokens.
         // ... and runs jobs another instance dispatched (EXECUTION_DISPATCH=queue checks every live consumer has this).
-        capabilities: clusterMode ? ["bus-v1", ...(runsBackgroundWorkers && queueService ? ["fenced-claims-v1", QUEUE_DISPATCH_CAPABILITY, RESPONSE_BOUNDARY_CAPABILITY, SENSITIVE_INPUT_CAPABILITY] : [])] : [],
+        capabilities: clusterMode ? ["bus-v1", ...(runsBackgroundWorkers && queueService ? ["fenced-claims-v1", QUEUE_DISPATCH_CAPABILITY, RESPONSE_BOUNDARY_CAPABILITY, SENSITIVE_INPUT_CAPABILITY, SESSION_OWNER_CAPABILITY] : [])] : [],
         appVersion: config.OTEL_SERVICE_VERSION || process.env.npm_package_version || null,
         schemaVersion: Math.max(...MIGRATIONS.map((migration) => migration.version)),
         runtime: () => ({
@@ -5772,6 +5825,7 @@ export async function createApp(
   /** A queued run the queue stopped (lease lost, or draining): nothing of it is stored here; its record is the queue's. */
   const abandonQueueStoppedRun = (executionId: string, workflowId: string, job: QueueJobContext) => {
     runReleases.delete(executionId);
+    runSessionOwners.delete(executionId);
     dropCapture(executionId, "skipped_not_stored");
     // The run leaves no usage row; what its sub-workflows spent is still recorded.
     subWorkflowSpend.abandon(executionId, "stopped by the queue", job).catch((error: unknown) => {
@@ -5905,6 +5959,8 @@ export async function createApp(
           ...(state.guardRunSource === "eval" ? { guardRunSource: "eval" as const } : {}),
           // Sub-workflows the resumed part starts are checked against the budgets of the user who started the run.
           budgetSubject: state.budgetSubject ?? budgetSubjectOf(pending.triggeredBy ?? undefined),
+          // A run kept to one person's sessions stays so after the approval, whoever decided it.
+          ...(typeof state.sessionOwner === "string" && state.sessionOwner ? { sessionOwner: state.sessionOwner } : {}),
           policyActor: actor,
           workflow: resumeWorkflow,
           executionId: job.executionId,
@@ -5960,7 +6016,12 @@ export async function createApp(
   const dispatchApprovalResume = async (job: ApprovalResumeJob): Promise<{ queued: true } | { queued: false; result: Awaited<ReturnType<typeof runWorkflowExecution>> } | null> => {
     // Phase 13.1 — with EXECUTION_DISPATCH=queue an instance without a consumer (WORKER_MODE=api) sends the resume to
     // the workers through the producer too, unless the capability gate falls back to inline.
-    if (queueService || (runDispatcher.mode === "queue" && (await runDispatcher.useQueue(DEFAULT_QUEUE_POOL)))) {
+    // A run kept to one person's sessions resumes on the queue only where every consumer keeps it so (in a cluster an
+    // older instance would ignore the owner); otherwise it resumes here.
+    const pausedOwner = asRecord((await store.getWorkflowExecutionState(job.executionId))?.state).sessionOwner;
+    const ownerNeedsCapability = typeof pausedOwner === "string" && pausedOwner !== "" && clusterMode;
+    const ownerCapable = !ownerNeedsCapability || (runDispatcher.mode === "queue" && (await runDispatcher.useQueue(DEFAULT_QUEUE_POOL, [SESSION_OWNER_CAPABILITY])));
+    if (ownerCapable && (queueService || (runDispatcher.mode === "queue" && (await runDispatcher.useQueue(DEFAULT_QUEUE_POOL))))) {
       const pending = await store.getWorkflowExecutionState(job.executionId);
       // One item per decision: a request that is reopened and decided again must not collide with the first.
       const decidedAt = Date.parse((await store.getApprovalRequest(job.requestId))?.decidedAt ?? "") || Date.now();
@@ -6105,7 +6166,13 @@ export async function createApp(
       return { ok: false, status: 400, error: "channel can only be draft" };
     }
     const viaKey = (await resolveRequestAuth(request))?.credential === "api_key";
-    if (!viaKey) return { channel: "draft" };
+    if (!viaKey) {
+      // A signed-in person who may edit the workflow runs what they see (the draft). One who may only run it (an
+      // operator, a share-only runner) runs the released version, as an API key does: never a draft nobody released.
+      if ((await runAccess.workflow(user, workflowId, "workflow:write")).ok) return { channel: "draft" };
+      if (asked === "draft") return { ok: false, status: 403, error: "Running the draft needs workflow:write on the workflow." };
+      return { channel: "production" };
+    }
     if (asked === undefined) return { channel: "production" };
     const write = await runAccess.workflow(user, workflowId, "workflow:write");
     if (!write.ok) return { ok: false, status: write.status, error: "Running the draft with an API key (channel=draft) needs workflow:write on the workflow." };
@@ -10260,6 +10327,18 @@ export async function createApp(
     return { versions: await workflowVersionService.list(request.params.id) };
   });
 
+  // Every node id the workflow uses now or used in a stored version: the editor gives new nodes other ids, so a new
+  // node never takes the id of a removed one that run history, approvals or replays still name.
+  app.get<{ Params: { id: string } }>("/api/workflows/:id/node-ids", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const access = await runAccess.workflow(user, request.params.id, "workflow:read");
+    if (!access.ok) return denyRunAccess(reply, access);
+    const ids = new Set(await workflowVersionService.nodeIds(request.params.id));
+    for (const node of access.workflow.nodes) ids.add(node.id);
+    return { nodeIds: [...ids].sort() };
+  });
+
   app.get<{ Params: { id: string; version: string } }>(
     "/api/workflows/:id/versions/:version",
     async (request, reply) => {
@@ -10471,11 +10550,15 @@ export async function createApp(
   // Phase 5.2 — Project memberships
   // ---------------------------------------------------------------------------
 
-  const projectMemberSchema = z.object({
-    userId: z.string().min(1).max(120),
-    role: z.string().min(1).max(60),
-    customRoleId: z.string().min(1).max(120).nullable().optional()
-  });
+  // The member is named by user id or, from the studio's picker, by email (exactly one of the two).
+  const projectMemberSchema = z
+    .object({
+      userId: z.string().min(1).max(120).optional(),
+      email: z.string().trim().email().max(320).optional(),
+      role: z.string().min(1).max(60),
+      customRoleId: z.string().min(1).max(120).nullable().optional()
+    })
+    .refine((value) => Boolean(value.userId) !== Boolean(value.email), { message: "Send either userId or email" });
 
   app.get<{ Params: { id: string } }>("/api/projects/:id/members", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
@@ -10489,7 +10572,9 @@ export async function createApp(
       reply.code(403);
       return { error: "Insufficient permissions to view project members" };
     }
-    return { members: await rbacService.listMembers(project.id) };
+    // Each member with the email it signs in with, so the studio shows people rather than ids.
+    const members = await rbacService.listMembers(project.id);
+    return { members: await mapAsync(members, async (member) => ({ ...member, email: (await store.getUserById(member.userId))?.email ?? null })) };
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/projects/:id/members", async (request, reply) => {
@@ -10510,11 +10595,12 @@ export async function createApp(
       reply.code(400);
       return { error: "Invalid member payload", details: parsed.error.issues };
     }
-    const targetUser = await store.getUserById(parsed.data.userId);
+    const targetUser = parsed.data.email ? await store.getUserByEmail(parsed.data.email.toLowerCase()) : await store.getUserById(parsed.data.userId!);
     if (!targetUser) {
       reply.code(400);
-      return { error: "Target user does not exist" };
+      return { error: parsed.data.email ? `No user with the email ${parsed.data.email}. Invite them first.` : "Target user does not exist" };
     }
+    const memberUserId = targetUser.id;
     const role = parsed.data.role;
     if (!isProjectRole(role) && role !== "custom") {
       reply.code(400);
@@ -10525,13 +10611,13 @@ export async function createApp(
       reply.code(403);
       return { error: "Only an admin can give a role that grants a deployment-wide permission (legal holds, data-subject requests)." };
     }
-    if (user.role !== "admin" && (await rbacService.membershipGrantsDeploymentPermission(parsed.data.userId, project.id))) {
+    if (user.role !== "admin" && (await rbacService.membershipGrantsDeploymentPermission(memberUserId, project.id))) {
       reply.code(403);
       return { error: "Only an admin can change the membership of someone whose role grants a deployment-wide permission." };
     }
     try {
       await rbacService.addMember({
-        userId: parsed.data.userId,
+        userId: memberUserId,
         projectId: project.id,
         role: role as ProjectRole | "custom",
         customRoleId: parsed.data.customRoleId ?? null
@@ -10552,11 +10638,11 @@ export async function createApp(
       eventType: "project.member.add",
       action: "add_member",
       resourceType: "project_member",
-      resourceId: `${project.id}:${parsed.data.userId}`,
+      resourceId: `${project.id}:${memberUserId}`,
       projectId: project.id,
-      metadata: { userId: parsed.data.userId, role, customRoleId: parsed.data.customRoleId ?? null }
+      metadata: { userId: memberUserId, role, customRoleId: parsed.data.customRoleId ?? null }
     });
-    return { ok: true, membership: await rbacService.getMembership(parsed.data.userId, project.id) };
+    return { ok: true, membership: await rbacService.getMembership(memberUserId, project.id) };
   });
 
   app.delete<{ Params: { id: string; userId: string } }>(
@@ -10707,7 +10793,13 @@ export async function createApp(
     if (!user) return;
     const access = await runAccess.workflow(user, request.params.id, "workflow:read");
     if (!access.ok) return denyRunAccess(reply, access);
-    return { shares: await rbacService.listWorkflowShares(access.workflow.id) };
+    const workflow = access.workflow;
+    // v78 — the people it is shared with are listed to whoever may manage its shares.
+    const manages = user.role === "admin" || (await rbacService.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite"));
+    return {
+      shares: await rbacService.listWorkflowShares(workflow.id),
+      ...(manages ? { userShares: await workflowUserShareViews(workflow.id) } : {})
+    };
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/shares", async (request, reply) => {
@@ -10783,6 +10875,157 @@ export async function createApp(
       return { ok: true };
     }
   );
+
+  // ---------------------------------------------------------------------------
+  // v78 — Workflow shares with people
+  // ---------------------------------------------------------------------------
+  // Who may manage them: users with workflow:write on the workflow's own project (or admins), as for project shares.
+  // A share gives read or execute, never write, and never more than the person's role (`effectiveAccess`).
+
+  const workflowUserShareSchema = z
+    .object({
+      email: z.string().trim().email().max(320).optional(),
+      userId: z.string().min(1).max(120).optional(),
+      accessLevel: z.enum(["read", "execute"]).default("read")
+    })
+    .refine((value) => Boolean(value.email) !== Boolean(value.userId), { message: "Send either email or userId" });
+
+  const workflowUserShareViews = async (workflowId: string) =>
+    (await rbacService.listWorkflowUserShares(workflowId)).map((share) => ({
+      ...share,
+      effectiveAccess: share.disabled || !share.role ? null : share.accessLevel === "execute" && roleMayRunWorkflows(share.role as UserRole) ? "execute" : "read"
+    }));
+
+  const workflowShareManager = async (user: SafeUser, workflowId: string): Promise<{ ok: true; workflow: Workflow } | { ok: false; status: number; error: string }> => {
+    // Unreadable reads as missing. A share is a membership for one workflow, so managing them takes what adding a
+    // project member takes: project:invite on the owning project (and the same step-up for changes).
+    const access = await runAccess.workflow(user, workflowId, "workflow:read");
+    if (!access.ok) return access;
+    const owningProject = access.workflow.projectId ?? DEFAULT_PROJECT_ID;
+    if (user.role !== "admin" && !(await rbacService.can(user, owningProject, "project:invite"))) {
+      return { ok: false, status: 403, error: "Only users who may invite members to the workflow's project can share it with people" };
+    }
+    return { ok: true, workflow: access.workflow };
+  };
+
+  // The workflows shared with you (any project), so the studio can list them next to your project's workflows.
+  app.get("/api/workflows/shared-with-me", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    // One query with the workflow summaries; the same rules as rbacService.userShareAccess, without a read per row.
+    const shared = await store.listWorkflowsSharedToUser(user.id);
+    const items = shared
+      .filter((share) => !user.projectScope || user.projectScope.includes(share.projectId))
+      .map((share) => ({
+        id: share.workflowId,
+        name: share.name,
+        projectId: share.projectId,
+        updatedAt: share.updatedAt,
+        accessLevel: share.accessLevel,
+        effectiveAccess: share.accessLevel === "execute" && roleMayRunWorkflows(user.role) ? ("execute" as const) : ("read" as const)
+      }))
+      .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+    return { workflows: items };
+  });
+
+  // The workflows other projects share to this one (read-only rows with the access level), in one query: they are not
+  // in the project's own workflow list.
+  app.get<{ Params: { id: string } }>("/api/projects/:id/shared-workflows", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const target = await runAccess.project(user, request.params.id, "workflow:read");
+    if (!target.ok) return denyRunAccess(reply, target);
+    const projectId = request.params.id;
+    // The run routes also need a global role that may run (operator and up).
+    const mayRunHere = hasRequiredRole(user, ["operator"]) && (await rbacService.can(user, projectId, "workflow:execute"));
+    const shared = await store.listWorkflowSummariesSharedToProject(projectId);
+    const items = shared
+      .filter((share) => share.ownerProjectId !== projectId)
+      .map((share) => ({
+        id: share.workflowId,
+        name: share.name,
+        ownerProjectId: share.ownerProjectId,
+        updatedAt: share.updatedAt,
+        accessLevel: share.accessLevel,
+        effectiveAccess: share.accessLevel === "execute" && mayRunHere ? ("execute" as const) : ("read" as const)
+      }))
+      .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+    return { workflows: items };
+  });
+
+  app.get<{ Params: { id: string } }>("/api/workflows/:id/user-shares", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const managed = await workflowShareManager(user, request.params.id);
+    if (!managed.ok) return denyRunAccess(reply, managed);
+    const workflow = managed.workflow;
+    return { userShares: await workflowUserShareViews(workflow.id) };
+  });
+
+  app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/user-shares", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const managed = await workflowShareManager(user, request.params.id);
+    if (!managed.ok) return denyRunAccess(reply, managed);
+    if (!await requireStepUp(request, reply, "project_member.change")) return;
+    const workflow = managed.workflow;
+    const parsed = workflowUserShareSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.code(400);
+      return { error: "Invalid share payload", details: parsed.error.issues };
+    }
+    const target = parsed.data.email ? await store.getUserByEmail(parsed.data.email.toLowerCase()) : await store.getUserById(parsed.data.userId!);
+    // Service accounts reach workflows through their keys' projects, not through shares.
+    if (!target || target.kind === "service") {
+      reply.code(400);
+      return { error: parsed.data.email ? `No user with the email ${parsed.data.email}. Invite them first.` : "Target user does not exist" };
+    }
+    if (target.id === user.id) {
+      reply.code(400);
+      return { error: "You cannot share a workflow with yourself" };
+    }
+    const saved = await rbacService.shareWorkflowWithUser({ workflowId: workflow.id, userId: target.id, accessLevel: parsed.data.accessLevel, sharedBy: user.email });
+    if (!saved) {
+      // The workflow or the user was deleted after the checks above.
+      reply.code(409);
+      return { error: "The workflow or the user no longer exists" };
+    }
+    const effectiveAccess = parsed.data.accessLevel === "execute" && roleMayRunWorkflows(target.role as UserRole) ? "execute" : "read";
+    await audit(request, user, {
+      category: "sharing",
+      eventType: "workflow.user_share",
+      action: "share",
+      resourceType: "workflow",
+      resourceId: workflow.id,
+      projectId: workflow.projectId ?? null,
+      metadata: { targetUserId: target.id, targetEmail: target.email, accessLevel: parsed.data.accessLevel, effectiveAccess }
+    });
+    return { ok: true, share: { userId: target.id, email: target.email, role: target.role, accessLevel: parsed.data.accessLevel, effectiveAccess } };
+  });
+
+  app.delete<{ Params: { id: string; userId: string } }>("/api/workflows/:id/user-shares/:userId", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const managed = await workflowShareManager(user, request.params.id);
+    if (!managed.ok) return denyRunAccess(reply, managed);
+    if (!await requireStepUp(request, reply, "project_member.change")) return;
+    const workflow = managed.workflow;
+    const removed = await rbacService.unshareWorkflowWithUser(workflow.id, request.params.userId);
+    if (!removed) {
+      reply.code(404);
+      return { error: "Share not found" };
+    }
+    await audit(request, user, {
+      category: "sharing",
+      eventType: "workflow.user_unshare",
+      action: "unshare",
+      resourceType: "workflow",
+      resourceId: workflow.id,
+      projectId: workflow.projectId ?? null,
+      metadata: { targetUserId: request.params.userId }
+    });
+    return { ok: true };
+  });
 
   // ---------------------------------------------------------------------------
   // Phase 5.2 — Secret sharing
@@ -10962,6 +11205,26 @@ export async function createApp(
     if (!access.ok) return denyRunAccess(reply, access);
 
     return access.workflow;
+  });
+
+  // What the signed-in user may do with a workflow, so the editor shows only the controls that work: edit (save,
+  // add or remove nodes), run (operator and up, with workflow:execute: operators run the saved workflow), and manage
+  // its shares.
+  app.get<{ Params: { id: string } }>("/api/workflows/:id/access", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const access = await runAccess.workflow(user, request.params.id, "workflow:read");
+    if (!access.ok) return denyRunAccess(reply, access);
+    const workflow = access.workflow;
+    const isBuilder = hasRequiredRole(user, ["builder"]);
+    const canWrite = isBuilder && (await runAccess.workflow(user, workflow.id, "workflow:write")).ok;
+    const canExecute = hasRequiredRole(user, ["operator"]) && (await runAccess.workflow(user, workflow.id, "workflow:execute")).ok;
+    const owningProject = workflow.projectId ?? DEFAULT_PROJECT_ID;
+    // The same checks as the share routes: sharing with people takes project:invite (workflowShareManager); sharing
+    // with another project takes workflow:write on the owning project.
+    const canShare = user.role === "admin" || (await rbacService.can(user, owningProject, "project:invite"));
+    const canShareWithProjects = user.role === "admin" || (await rbacService.can(user, owningProject, "workflow:write"));
+    return { workflowId: workflow.id, role: user.role, canRead: true, canEdit: canWrite, canRun: canExecute, canShare, canShareWithProjects };
   });
 
   app.get<{ Params: { id: string } }>("/api/workflows/:id/variables", async (request, reply) => {
@@ -11273,13 +11536,15 @@ export async function createApp(
     workflow.projectId = parsed.data.targetProjectId;
     workflow.folderId = undefined;
     await store.upsertWorkflow(workflow);
+    // Shares with people go with the workflow; the audit says how many moved with it.
+    const userShareCount = (await store.listWorkflowUserShares(request.params.id)).length;
     await audit(request, user, {
       category: "workflow",
       eventType: "workflow.transfer",
       action: "update",
       resourceType: "workflow",
       resourceId: request.params.id,
-      metadata: { previousProjectId, targetProjectId: parsed.data.targetProjectId }
+      metadata: { previousProjectId, targetProjectId: parsed.data.targetProjectId, userShareCount }
     });
     return { ok: true, workflowId: request.params.id, projectId: parsed.data.targetProjectId };
   });
@@ -11312,13 +11577,76 @@ export async function createApp(
         };
       }
 
-      // 12.2 — an export carries its source's trust settings; imported by a non-admin, the stored ones stay instead.
-      const importedWorkflow = user.role === "admin" ? workflow : withStoredTriggerTrust(await store.getWorkflow(workflow.id), workflow);
+      const mode = parsed.data.mode;
+      const sourceId = workflow.id;
+      const stored = await store.getWorkflow(sourceId);
+      // Only a workflow the user can read is named back (or diffed). An import never touches an unreadable one: it gets a new id.
+      const readableStored = stored && (await runAccess.workflow(user, stored.id, "workflow:read")).ok ? stored : null;
+      if (mode === "replace" && !readableStored) {
+        reply.code(404);
+        return { error: `No workflow with id '${sourceId}' to replace` };
+      }
+
+      let importedWorkflow: Workflow;
+      if (mode === "replace" || !stored) {
+        // 12.2 — an export carries its source's trust settings; imported by a non-admin, the stored ones stay instead.
+        importedWorkflow = user.role === "admin" ? workflow : withStoredTriggerTrust(stored, workflow);
+      } else {
+        // A new workflow from a file whose id is taken: like a duplicate, it gets its own id and trigger paths.
+        importedWorkflow = {
+          ...workflow,
+          id: await makeUniqueWorkflowId(store, sourceId),
+          name: `${workflow.name} (imported)`.slice(0, 200),
+          workflowVersion: 1
+        };
+        delete importedWorkflow.createdAt;
+        delete importedWorkflow.updatedAt;
+        importedWorkflow.nodes = withUniqueTriggerPaths(importedWorkflow, await releaseService.usedRoutingKeys()).nodes;
+        if (user.role !== "admin") importedWorkflow = withStoredTriggerTrust(null, importedWorkflow);
+      }
+
+      if (parsed.data.dryRun === true) {
+        // What a replace would save (the stored trust settings kept for a non-admin), so the summary and canReplace
+        // describe that save. The checks run on a copy: workflowSaveDenial binds an admin's trust settings in place.
+        const replacement = readableStored ? (user.role === "admin" ? workflow : withStoredTriggerTrust(readableStored, workflow)) : null;
+        const canReplace = replacement ? !(await workflowSaveDenial(user, { ...replacement, nodes: [...replacement.nodes] })) : false;
+        return {
+          dryRun: true,
+          mode,
+          workflow: importedWorkflow,
+          existing: readableStored
+            ? { id: readableStored.id, name: readableStored.name, updatedAt: readableStored.updatedAt ?? null, projectId: readableStored.projectId ?? null }
+            : null,
+          canReplace,
+          diff: readableStored && replacement ? diffWorkflows(readableStored, replacement, { defaultProjectId: DEFAULT_PROJECT_ID }) : null
+        };
+      }
+
       const saveDenial = await workflowSaveDenial(user, importedWorkflow);
       if (saveDenial) return denyRunAccess(reply, saveDenial);
 
+      const replacing = mode === "replace" && stored !== null;
+      // The replaced content goes into the history first: a workflow saved without a version (a seeded sample, a
+      // duplicate) would otherwise be lost.
+      if (replacing && stored) {
+        await workflowVersionService.snapshot({ workflow: stored, createdBy: user.id, changeNote: "before replace by import" });
+      }
       const savedWorkflow = await store.upsertWorkflow(importedWorkflow, { createdBy: user.id });
+      await workflowVersionService.snapshot({
+        workflow: savedWorkflow,
+        createdBy: user.id,
+        changeNote: replacing ? "replaced by import" : "imported"
+      });
       await workflowChanged(savedWorkflow.id);
+      await audit(request, user, {
+        category: "workflow",
+        eventType: "workflow.import",
+        action: replacing ? "update" : "create",
+        resourceType: "workflow",
+        resourceId: savedWorkflow.id,
+        projectId: savedWorkflow.projectId,
+        metadata: { name: savedWorkflow.name, mode, sourceId, version: savedWorkflow.workflowVersion }
+      });
       return savedWorkflow;
     } catch (error) {
       reply.code(400);
@@ -11865,6 +12193,7 @@ export async function createApp(
     openExecutionRelay,
     executionRelayWaitMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS + STUCK_JOB_MARGIN_MS,
     responseRulesExist: async () => await guardService.mayCheckChannel("response"),
+    sessionOwnerFor: (user, workflow) => sessionOwnerFor(user, workflow),
     announce
   });
 
@@ -12197,18 +12526,27 @@ export async function createApp(
 
     try {
       // Previews count against the user's own sandbox circuit breaker, not a workflow's.
-      const result = runWithSandboxOwner(`user:${user.id}`, () =>
-        parsed.data.mode === "template"
-          ? renderTemplate(parsed.data.expression, templateData)
-          : parsed.data.mode === "condition"
-            ? evaluateConditionTemplate(parsed.data.expression, templateData).result
-          : parsed.data.expression.includes("{{")
+      // Template and condition previews also list each `{{ }}` that rendered nothing (`missing`), so the editor can
+      // warn before a run renders it empty (or, with strict templates, fails the node).
+      const { result, missing } = runWithSandboxOwner(`user:${user.id}`, (): { result: unknown; missing?: MissingTemplateValue[] } => {
+        if (parsed.data.mode === "template") {
+          const rendered = renderTemplateAdvanced(parsed.data.expression, templateData);
+          return { result: rendered.rendered, missing: rendered.missing };
+        }
+        if (parsed.data.mode === "condition") {
+          const condition = evaluateConditionTemplate(parsed.data.expression, templateData);
+          return { result: condition.result, missing: condition.missing };
+        }
+        return {
+          result: parsed.data.expression.includes("{{")
             ? renderExpressionTemplate(parsed.data.expression, expressionContext)
             : evaluateExpression(parsed.data.expression, expressionContext)
-      );
+        };
+      });
       return {
         ok: true,
-        result
+        result,
+        ...(missing ? { missing } : {})
       };
     } catch (error) {
       return {
@@ -12265,7 +12603,8 @@ export async function createApp(
   };
 
   app.post<{ Body: unknown }>("/api/webhooks/execute", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
+    // Operators (and execute shares) run the selected workflow with their payload; variable overrides are a builder's.
+    const user = await requireRole(request, reply, ["operator"]);
     if (!user) {
       return;
     }
@@ -12277,6 +12616,11 @@ export async function createApp(
         error: "Invalid webhook payload",
         details: parsed.error.issues
       };
+    }
+    const refusedOptions = editorRunOptionsRefused(user.role, request.body);
+    if (refusedOptions.length > 0) {
+      reply.code(403);
+      return editorRunOptionsError(refusedOptions);
     }
 
     const workflow = await selectWebhookWorkflow(
@@ -12310,15 +12654,18 @@ export async function createApp(
           systemPrompt: parsed.data.system_prompt,
           userPrompt: parsed.data.user_prompt,
           sessionId: parsed.data.session_id,
-          executionTimeoutMs: normalizeExecutionTimeoutMs(
-            parsed.data.executionTimeoutMs,
-            parsed.data.execution_timeout_ms,
-            config.WORKFLOW_EXECUTION_TIMEOUT_MS
-          ),
+          // Operators' and share-only runners' session memory is kept to them.
+          ...await sessionOwnerOptionFor(user, workflow),
           customData: parsed.data.customData,
           executionId,
           triggerType: "webhook_api",
-          triggeredBy: user.email
+          triggeredBy: user.email,
+          // Operators run the selected workflow: no pinned data, and no longer than the deployment's timeout.
+          ...savedRunLimits(
+            user.role,
+            normalizeExecutionTimeoutMs(parsed.data.executionTimeoutMs, parsed.data.execution_timeout_ms, config.WORKFLOW_EXECUTION_TIMEOUT_MS),
+            config.WORKFLOW_EXECUTION_TIMEOUT_MS
+          )
         },
         progress: { requestInput: agentWebhookRequestInput(parsed.data), customData: parsed.data.customData },
         history: { requestInput: agentWebhookRequestInput(parsed.data), customData: parsed.data.customData }
@@ -12943,12 +13290,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       }
       const cfg = asRecord(chatNode.config);
       const authMode = typeof cfg.authMode === "string" ? cfg.authMode : "public";
+      // A signed-in chat by a viewer, an operator or a share-only reader keeps its session memory to that person.
+      let chatSessionOwner: { sessionOwner?: string } = {};
       if (authMode === "session") {
         const user = await requireRole(request, reply, ["viewer"]);
         if (!user) return;
         // Session chats are for people who can see the workflow's project.
         const access = await runAccess.workflow(user, workflow.id, "workflow:read");
         if (!access.ok) return denyRunAccess(reply, access);
+        chatSessionOwner = await sessionOwnerOptionFor(user, workflow);
       } else if (authMode === "bearer") {
         const secretRef = toSecretReference(cfg.secretRef);
         const secret = await secretService.resolveSecret(secretRef);
@@ -12993,6 +13343,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
               ...body
             },
             sessionId,
+            ...chatSessionOwner,
             userPrompt: message || undefined,
             executionId,
             triggerType: "chat",
@@ -13329,7 +13680,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   });
 
   app.post<{ Body: unknown }>("/api/webhooks/execute/stream", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
+    // Operators (and execute shares) run the selected workflow with their payload; variable overrides are a builder's.
+    const user = await requireRole(request, reply, ["operator"]);
     if (!user) {
       return;
     }
@@ -13341,6 +13693,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         error: "Invalid webhook payload",
         details: parsed.error.issues
       };
+    }
+    const refusedOptions = editorRunOptionsRefused(user.role, request.body);
+    if (refusedOptions.length > 0) {
+      reply.code(403);
+      return editorRunOptionsError(refusedOptions);
     }
 
     const workflow = await selectWebhookWorkflow(
@@ -13427,14 +13784,17 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             systemPrompt: parsed.data.system_prompt,
             userPrompt: parsed.data.user_prompt,
             sessionId: parsed.data.session_id,
-            executionTimeoutMs: normalizeExecutionTimeoutMs(
-              parsed.data.executionTimeoutMs,
-              parsed.data.execution_timeout_ms,
-              config.WORKFLOW_EXECUTION_TIMEOUT_MS
-            ),
+            // Operators' and share-only runners' session memory is kept to them.
+            ...await sessionOwnerOptionFor(user, workflow),
             executionId,
             triggerType: "webhook_api_stream",
-            triggeredBy: user.email
+            triggeredBy: user.email,
+            // Operators run the selected workflow: no pinned data, and no longer than the deployment's timeout.
+            ...savedRunLimits(
+              user.role,
+              normalizeExecutionTimeoutMs(parsed.data.executionTimeoutMs, parsed.data.execution_timeout_ms, config.WORKFLOW_EXECUTION_TIMEOUT_MS),
+              config.WORKFLOW_EXECUTION_TIMEOUT_MS
+            )
           },
           progress: { requestInput: agentWebhookRequestInput(parsed.data) },
           history: { requestInput: agentWebhookRequestInput(parsed.data) }
@@ -16021,9 +16381,18 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       systemPrompt: payload.systemPrompt,
       userPrompt: payload.userPrompt,
       sessionId: payload.sessionId,
+      // Decided when the job runs, as the run routes decide it: an operator's (or share-only runner's) queued run keeps
+      // session memory to them, uses no pinned data and runs no longer than the deployment's timeout.
+      ...(enqueuedBy ? await sessionOwnerOptionFor(enqueuedBy, workflow) : {}),
       triggerType: payload.triggerType ?? "queue",
       triggeredBy: payload.triggeredBy,
-      executionTimeoutMs: payload.executionTimeoutMs,
+      ...(enqueuedBy
+        ? savedRunLimits(
+            enqueuedBy.role,
+            normalizeExecutionTimeoutMs(payload.executionTimeoutMs, undefined, config.WORKFLOW_EXECUTION_TIMEOUT_MS),
+            config.WORKFLOW_EXECUTION_TIMEOUT_MS
+          )
+        : { executionTimeoutMs: payload.executionTimeoutMs }),
       customData: payload.customData,
       channel: "production",
       // A caller may name its queued run anything ("cron" included): it is a user's run, never the scheduler's.

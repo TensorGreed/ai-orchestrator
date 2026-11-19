@@ -19,6 +19,8 @@ import {
   userKindWhere
 } from "../store.js";
 import { toNum, toStr } from "./helpers.js";
+import { LEGAL_HOLD_LOCK_SHARED_SQL, notHeldSql } from "../legal-hold-sql.js";
+import { isPersonSessionOf, personSessionLikePattern, PERSON_SESSION_TABLES } from "../person-sessions.js";
 import type { PgContext } from "./context.js";
 import { withReferenceCheck } from "../store-errors.js";
 import type { UserDisableOutcome } from "../scim-store.js";
@@ -373,7 +375,17 @@ async function deleteUserRows(client: PgClient, id: string): Promise<boolean> {
   await client.query(`DELETE FROM mfa_secrets WHERE user_id = $1`, [id]);
   await client.query(`DELETE FROM sso_identities WHERE user_id = $1`, [id]);
   await client.query(`DELETE FROM user_project_roles WHERE user_id = $1`, [id]);
+  await client.query(`DELETE FROM workflow_user_shares WHERE user_id = $1`, [id]);
   await client.query(`DELETE FROM user_invites WHERE user_id = $1`, [id]);
+  // v79 — the session memory, tool cache and artifacts kept to the person go with them, except what a legal hold keeps
+  // (under the legal-hold lock, so a hold placed meanwhile binds it).
+  await client.query(LEGAL_HOLD_LOCK_SHARED_SQL);
+  for (const table of PERSON_SESSION_TABLES) {
+    const found = await client.query<{ namespace: string }>(`SELECT DISTINCT namespace FROM ${table} WHERE namespace LIKE $1 ESCAPE '\\'`, [personSessionLikePattern(id)]);
+    for (const namespace of found.rows.map((row) => String(row.namespace)).filter((key) => isPersonSessionOf(key, id))) {
+      await client.query(`DELETE FROM ${table} WHERE namespace = $1 AND ${notHeldSql(table)}`, [namespace]);
+    }
+  }
   const result = await client.query(`DELETE FROM users WHERE id = $1`, [id]);
   return (result.rowCount ?? 0) > 0;
 }

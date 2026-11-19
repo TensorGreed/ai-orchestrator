@@ -41,6 +41,7 @@ import {
   normalizeSessionId,
   retryAfterSeconds
 } from "./run-helpers.js";
+import { editorRunOptionsError, editorRunOptionsRefused, savedRunLimits } from "./run-editor-options.js";
 import { startSseHeartbeat, type SseSessionWatch } from "./sse-heartbeat.js";
 import { traceUrlFor } from "./telemetry/trace-url.js";
 import { maskRunEvent, maskRunNodeData, runViewHidesNodeData } from "./response-run-view.js";
@@ -48,6 +49,7 @@ import { DISPATCH_SPEC_VERSION, type RunDispatcher } from "./services/run-dispat
 import { onceEachElicitationEvent, type RunEventName, type RunRelay } from "./services/run-event-relay.js";
 import { followExecution } from "./services/execution-follow.js";
 import type { SafeUser, UserRole } from "./services/auth-service.js";
+import { repeatSessionOwner, sessionOwnerUser } from "./db/person-sessions.js";
 import type { ApprovalService } from "./services/approval-service.js";
 import type { BudgetService } from "./services/budget-service.js";
 import { clusterCancelReason } from "./services/cluster-signals.js";
@@ -124,9 +126,44 @@ export interface ExecutionRoutesDeps {
   executionRelayWaitMs: number;
   /** Phase 12 coverage — whether a stored rule set has a `response` channel (run views below builder hide node data). */
   responseRulesExist: () => Promise<boolean>;
+  /** Whose sessions a run by this person uses, when they are kept to the person (run-editor-options.ts personalSessionOwner). */
+  sessionOwnerFor: (user: SafeUser, workflow: Workflow) => Promise<string | undefined>;
 }
 
 export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
+  const sessionOwnerOption = async (user: SafeUser, workflow: Workflow): Promise<{ sessionOwner?: string }> => {
+    const owner = await deps.sessionOwnerFor(user, workflow);
+    return owner ? { sessionOwner: owner } : {};
+  };
+  /**
+   * The session scope of a retry or an MCP replay of `source`. A run kept to one person's sessions stays kept to that
+   * person, whoever repeats it: never the workflow's sessions or the repeating person's. The person's own repeat
+   * continues their sessions; anyone else's runs under the person's key in a namespace of its own (a repeat owner,
+   * db/person-sessions.ts), so it reads none of their memory, whatever its session templates say, and writes nowhere
+   * they read. A run whose owner went unrecorded (a canceled, expired or reconciled run) is judged by who started it,
+   * failing closed. A run that used the workflow's sessions is repeated in the repeating person's scope, as a new run
+   * of theirs would be. `null`: the person was deleted, so the run is not repeated (their sessions are gone).
+   */
+  const repeatSessionScope = async (
+    source: { id: string; triggeredBy?: string | null },
+    user: SafeUser,
+    workflow: Workflow,
+    executionId: string
+  ): Promise<{ sessionOwner?: string } | null> => {
+    let owner = await deps.store.getExecutionSessionOwner(source.id);
+    if (!owner && source.triggeredBy) {
+      const starter = await deps.store.getUserByEmail(source.triggeredBy.toLowerCase());
+      if (starter) {
+        owner = (await deps.sessionOwnerFor({ id: starter.id, email: starter.email, role: starter.role as SafeUser["role"], ...(starter.kind === "service" ? { serviceAccount: true as const } : {}) }, workflow)) ?? null;
+      }
+    }
+    if (!owner) return await sessionOwnerOption(user, workflow);
+    const ownerUser = sessionOwnerUser(owner);
+    if (!(await deps.store.getUserById(ownerUser))) return null;
+    if (ownerUser === user.id) return { sessionOwner: ownerUser };
+    return { sessionOwner: repeatSessionOwner(ownerUser, executionId) };
+  };
+  const repeatOwnerGone = { error: "The person whose session memory this run used no longer has an account, so it cannot be run again." };
   const {
     app,
     store,
@@ -157,13 +194,21 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     dispatchPoolOf,
     openExecutionRelay,
     executionRelayWaitMs,
-    responseRulesExist
+    responseRulesExist,
+    sessionOwnerFor
   } = deps;
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/execute", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
+    // Operators (and execute shares) run the saved workflow with their input; the editor's options are checked below.
+    const user = await requireRole(request, reply, ["operator"]);
     if (!user) {
       return;
+    }
+    // The editor's options are refused before anything else is checked (budgets included).
+    const refusedOptions = editorRunOptionsRefused(user.role, request.body);
+    if (refusedOptions.length > 0) {
+      reply.code(403);
+      return editorRunOptionsError(refusedOptions);
     }
 
     const access = await runAccess.workflow(user, request.params.id, "workflow:execute");
@@ -171,7 +216,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const executeChannel = await executeChannelFor(request, user, access.workflow.id);
     // Phase 15.6 — an API-key run on the production channel may be captured; it stays a `manual` run everywhere else.
     const executeTrigger = "manual";
-    const captureSource: CaptureSource | undefined = "channel" in executeChannel && executeChannel.channel === "production" ? "api_key" : undefined;
+    const captureSource: CaptureSource | undefined = "channel" in executeChannel && executeChannel.channel === "production" && user.apiKeyId ? "api_key" : undefined;
     if ("error" in executeChannel) return denyRunAccess(reply, executeChannel);
     const workflow = executeChannel.channel === "production" ? await productionWorkflow(access.workflow.id) : access.workflow;
     if (!workflow) {
@@ -244,17 +289,20 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       systemPrompt: executionPayload.system_prompt,
       userPrompt: executionPayload.user_prompt,
       sessionId: normalizeSessionId(executionPayload.sessionId, executionPayload.session_id),
-      executionTimeoutMs: normalizeExecutionTimeoutMs(
-        executionPayload.executionTimeoutMs,
-        executionPayload.execution_timeout_ms,
-        config.WORKFLOW_EXECUTION_TIMEOUT_MS
-      ),
+      // Operators' and share-only runners' session memory is kept to them.
+      ...await sessionOwnerOption(user, workflow),
       customData: executionPayload.customData,
       executionId,
       triggerType: executeTrigger,
       triggeredBy: user.email,
       captureSource,
-      captureInputOrigin: captureSource ? "user" : undefined
+      captureInputOrigin: captureSource ? "user" : undefined,
+      // Operators run the saved workflow: no pinned data, and no longer than the deployment's timeout.
+      ...savedRunLimits(
+        user.role,
+        normalizeExecutionTimeoutMs(executionPayload.executionTimeoutMs, executionPayload.execution_timeout_ms, config.WORKFLOW_EXECUTION_TIMEOUT_MS),
+        config.WORKFLOW_EXECUTION_TIMEOUT_MS
+      )
       },
       progress: { requestInput: prepared.requestInput, customData: executionPayload.customData },
       history: { requestInput: prepared.requestInput, customData: executionPayload.customData },
@@ -271,9 +319,15 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
   });
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/execute/stream", async (request, reply) => {
-    const user = await requireRole(request, reply, ["builder"]);
+    const user = await requireRole(request, reply, ["operator"]);
     if (!user) {
       return;
+    }
+    // The editor's options are refused before anything else is checked (budgets included).
+    const refusedOptions = editorRunOptionsRefused(user.role, request.body);
+    if (refusedOptions.length > 0) {
+      reply.code(403);
+      return editorRunOptionsError(refusedOptions);
     }
 
     const access = await runAccess.workflow(user, request.params.id, "workflow:execute");
@@ -281,7 +335,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const executeChannel = await executeChannelFor(request, user, access.workflow.id);
     // Phase 15.6 — an API-key run on the production channel may be captured; it stays a `manual_stream` run everywhere else.
     const executeTrigger = "manual_stream";
-    const captureSource: CaptureSource | undefined = "channel" in executeChannel && executeChannel.channel === "production" ? "api_key" : undefined;
+    const captureSource: CaptureSource | undefined = "channel" in executeChannel && executeChannel.channel === "production" && user.apiKeyId ? "api_key" : undefined;
     if ("error" in executeChannel) return denyRunAccess(reply, executeChannel);
     const workflow = executeChannel.channel === "production" ? await productionWorkflow(access.workflow.id) : access.workflow;
     if (!workflow) {
@@ -384,17 +438,20 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
         systemPrompt: executionPayload.system_prompt,
         userPrompt: executionPayload.user_prompt,
         sessionId: normalizeSessionId(executionPayload.sessionId, executionPayload.session_id),
-        executionTimeoutMs: normalizeExecutionTimeoutMs(
-          executionPayload.executionTimeoutMs,
-          executionPayload.execution_timeout_ms,
-          config.WORKFLOW_EXECUTION_TIMEOUT_MS
-        ),
+      // Operators' and share-only runners' session memory is kept to them.
+      ...await sessionOwnerOption(user, workflow),
         customData: executionPayload.customData,
         executionId,
         triggerType: executeTrigger,
         triggeredBy: user.email,
         captureSource,
-        captureInputOrigin: captureSource ? "user" : undefined
+        captureInputOrigin: captureSource ? "user" : undefined,
+        // Operators run the saved workflow: no pinned data, and no longer than the deployment's timeout.
+        ...savedRunLimits(
+          user.role,
+          normalizeExecutionTimeoutMs(executionPayload.executionTimeoutMs, executionPayload.execution_timeout_ms, config.WORKFLOW_EXECUTION_TIMEOUT_MS),
+          config.WORKFLOW_EXECUTION_TIMEOUT_MS
+        )
         },
         progress: { requestInput: prepared.requestInput, customData: executionPayload.customData },
         history: { requestInput: prepared.requestInput, customData: executionPayload.customData },
@@ -601,6 +658,11 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     // and records them again, so a retry of the retry keeps them.
     const gatewayGuard = parseGatewayGuardStack(asRecord(sourceExecution.customData)[GATEWAY_GUARD_CUSTOM_DATA_KEY]);
     const retryHistoryCustomData = gatewayGuard ? { ...(executionPayload.customData ?? {}), [GATEWAY_GUARD_CUSTOM_DATA_KEY]: gatewayGuard } : executionPayload.customData;
+    const retryScope = await repeatSessionScope(sourceExecution, user, workflow, executionId);
+    if (!retryScope) {
+      reply.code(409);
+      return repeatOwnerGone;
+    }
     await auditRunAction(request, user, "execution.retried", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { sourceExecutionId: sourceExecution.id });
     const result = await runDispatcher.run({
       v: DISPATCH_SPEC_VERSION,
@@ -621,6 +683,8 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       systemPrompt: executionPayload.system_prompt,
       userPrompt: executionPayload.user_prompt,
       sessionId: normalizeSessionId(executionPayload.sessionId, executionPayload.session_id),
+      // v79 — the failed run's session scope (see repeatSessionScope).
+      ...retryScope,
       executionTimeoutMs: normalizeExecutionTimeoutMs(
         executionPayload.executionTimeoutMs,
         executionPayload.execution_timeout_ms,
@@ -690,6 +754,11 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const mode: McpReplayMode = parsed.data.mode ?? "strict";
     const mcpPlan = mcpCassetteService.planReplay(cassette, mode, mcpRegistry, resolveRegisteredMcpServer);
     const executionId = crypto.randomUUID();
+    const replayScope = await repeatSessionScope(source, user, workflow, executionId);
+    if (!replayScope) {
+      reply.code(409);
+      return repeatOwnerGone;
+    }
     await auditRunAction(request, user, "execution.replayed", { executionId, workflowId: workflow.id, projectId: workflow.projectId }, { sourceExecutionId: source.id, cassetteId: cassette.id, mode });
     const storedInput = asRecord(source.input);
     // 12.6 — a replay is not the gateway client's run: its usage is the replaying user's.
@@ -701,12 +770,15 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const sourceGatewayGuard = parseGatewayGuardStack(asRecord(source.customData)[GATEWAY_GUARD_CUSTOM_DATA_KEY]);
     // v74 — the source run's input and recorded MCP answers are its content.
     const sensitiveInput = await copiedRunSensitive(source.id, user);
+    const replayRunInput = replayRunInputFor(source.triggerType, storedInput);
     const result = await runDispatcher.run({
       v: DISPATCH_SPEC_VERSION,
       run: {
       // Phase 15.4: not production traffic, so the draft (or the candidate given) runs.
       channel: "draft",
-      ...replayRunInputFor(source.triggerType, storedInput),
+      ...replayRunInput,
+      // v79 — the source run's session scope (see repeatSessionScope).
+      ...replayScope,
       ...(source.triggerType ? { inputTriggerType: source.triggerType } : {}),
       // Phase 16 — the source run's input origin, not the user replaying it (12.2: recorded on this run's trigger
       // result too, so a replay of this replay keeps it).

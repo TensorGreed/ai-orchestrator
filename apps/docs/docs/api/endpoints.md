@@ -62,12 +62,16 @@ the envelope `GET /api/executions` uses:
 - `PUT /api/workflows/:id` (both, and `POST /api/workflows/import`, save a draft: `400` only for a broken graph or a trigger, authentication, approval, content-rule or attachment setting; unfinished node settings save and `POST /api/workflows/:id/validate` lists them. The `400`'s `error` and `validation.issues` list only what blocks the save)
 - `DELETE /api/workflows/:id` (while the workflow's release gate is on and enforced, only an admin: others get `403`, audited as `release.workflow_delete.refused`)
 - `POST /api/workflows/:id/duplicate`
-- `POST /api/workflows/import`
+- `POST /api/workflows/import` (`{ json }` or `{ workflow }`, plus `mode` and `dryRun`). `mode: "new"` (the default) makes a new workflow: the file's id is kept when no workflow has it, otherwise the import gets a new id, " (imported)" after its name and its own trigger paths, and the stored workflow is not touched. `mode: "replace"` overwrites the stored workflow with the file's id (`404` when there is none you can read, `403` when you cannot write it); what it replaced is kept in the history first (`before replace by import`). `dryRun: true` stores nothing and returns `{ dryRun, mode, workflow, existing, canReplace, diff }`: the workflow the import would save, the stored workflow with that id when you can read it (`{ id, name, updatedAt, projectId }`, else null), whether you may replace it, and what a replace changes (`nodes.added`, `nodes.removed`, `nodes.changed` with the fields, `nodes.moved`, `edges.added`, `edges.removed`, `edges.changed`, `fields`, `identical`). Audited as `workflow.import` with `mode` and `sourceId`
+- `GET /api/workflows/:id/access` (any role that can read it) → `{ workflowId, role, canRead, canEdit, canRun, canShare }`: what the editor lets you do with it
+- `GET /api/workflows/shared-with-me` → `{ workflows: [{ id, name, projectId, updatedAt, accessLevel, effectiveAccess }] }`: the workflows shared with you, in any project
+- `GET /api/workflows/:id/user-shares`, `POST /api/workflows/:id/user-shares` (`{ email }` or `{ userId }`, `accessLevel: "read" | "execute"`), `DELETE /api/workflows/:id/user-shares/:userId`: share a workflow with a person; see [Sharing a workflow with people](../security/auth-rbac.md#sharing-a-workflow-with-people). `GET /api/workflows/:id/shares` also lists them as `userShares` to whoever manages its shares
 - `GET /api/workflows/:id/share-link` (admin, builder) returns `{ shareUrl, data }`; `POST /api/workflows/import-shared` with `{ data }` (or POST the `shareUrl` as it is) imports the copy. Opening a share link (a GET) imports nothing: it answers 405 with a hint
 - `POST /api/workflows/import/external` — convert an export from another builder; see [Importing from another builder](../product/importing-from-another-builder.md)
 - `GET /api/workflows/:id/export`
 - `POST /api/workflows/:id/validate`
-- `POST /api/workflows/:id/execute` (`record: true` records the run's MCP calls into a cassette; the result carries `mcpCassette`)
+- `POST /api/workflows/:id/execute` (operator and up with `workflow:execute`; the editor's options, such as `record: true`, which records the run's MCP calls into a cassette (the result carries `mcpCassette`), are a builder's: see [Running workflows by role](../security/auth-rbac.md#running-workflows-by-role))
+- `GET /api/projects/:id/shared-workflows` (`workflow:read` in the project) → `{ workflows: [{ id, name, ownerProjectId, updatedAt, accessLevel, effectiveAccess }] }`: the workflows other projects share to it
 - `POST /api/workflows/:id/execute/stream` — SSE: `node_start`, `node_complete`, `llm_delta`, `node_progress` (MCP progress: `nodeId`, `toolName`, `serverId`, `registryServerId`, `progress`, `total`, `percent`, `message`, `at`), `result`
 - On the production channel (an API key), `/execute`, `/execute/stream` and `POST /api/webhooks/execute(/stream)` answer `409` when production refuses the workflow; when the version production would run has unfinished settings the body is `{ error, code: "workflow_unfinished" }`. A run that fails because a sub-workflow it calls is refused that way carries `errorCode: "workflow_unfinished"` on the run and the node (and `code` in a webhook's answer).
 
@@ -363,7 +367,7 @@ See [Approval gates](../product/approvals.md). Release requests (Phase 15.4) app
 
 ## Webhooks
 
-- `POST /api/webhooks/execute` and `POST /api/webhooks/execute/stream` (builder; `{ workflow_id?, webhook_path?, session_id?, system_prompt?, user_prompt?, variables?, customData?, payload? }`). `payload` is the request body the run's webhook receives (what <span v-pre>`{{webhook.<field>}}`</span> reads), with the prompt fields on top of it, as a call to `/webhook/:path` gets them; without it the body holds the prompt fields only.
+- `POST /api/webhooks/execute` and `POST /api/webhooks/execute/stream` (operator and up with `workflow:execute`; an operator's run uses no pinned data; `{ workflow_id?, webhook_path?, session_id?, system_prompt?, user_prompt?, variables?, customData?, payload? }`). `payload` is the request body the run's webhook receives (what <span v-pre>`{{webhook.<field>}}`</span> reads), with the prompt fields on top of it, as a call to `/webhook/:path` gets them; without it the body holds the prompt fields only.
 - `ANY /webhook/:path` (production: answers `409` with `code: "workflow_unfinished"`, and starts no run, while the version production would run has unfinished node settings)
 - `ANY /webhook-test/:path`
 
@@ -381,7 +385,7 @@ An idempotent retry of a withheld webhook call answers the same `422`.
 
 With a `trigger_input` channel, a webhook payload the rules refuse answers `400 { error: "The request was refused by content rules.", code: "content_filter" }` before anything runs. `/api/chat` and MCP invoke are not checked this way.
 
-`POST /api/webhooks/execute` (builder) is not checked.
+`POST /api/webhooks/execute` (operator and up) is not checked.
 
 ## Helper
 

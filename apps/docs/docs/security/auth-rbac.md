@@ -99,13 +99,15 @@ needs a role also accepts every role above it.
 
 - Workflow read: all authenticated roles
 - Workflow create/update/delete: `builder`, `admin`
-- Execute workflow/webhook API trigger: `builder`, `admin`
+- Execute workflow/webhook API trigger: `operator`, `builder`, `admin` with `workflow:execute` (operators run the saved
+  workflow with their input; see [Running workflows by role](#running-workflows-by-role))
 - Secrets list/create: `builder`, `admin`
 - What an `operator` can do beyond a viewer:
   - put a run on the queue (`POST /api/workflows/:id/enqueue`; see [Queue and workers](../operations/queue-and-workers.md))
     and see the queue depth and the dead-letter queue (`GET /api/queue/depth`, `GET /api/queue/dlq`). These routes
-    exist only where a queue runs. Direct runs (`/execute`, `/execute/stream`, retry, replay and the compat webhook
-    API) need `builder`.
+    exist only where a queue runs.
+  - run the saved workflow directly (`/execute`, `/execute/stream` and the compat webhook API) with their input, without
+    the editor's options (see [Running workflows by role](#running-workflows-by-role)). Retry and replay need `builder`.
   - cancel a running or paused run (`POST /api/executions/:id/cancel`)
   - decide approval-gate requests: a gate that lists no approver roles or users accepts any operator, builder or admin
     (see [Approvals](../product/approvals.md)). Release requests in the same inbox need `workflow:publish`, which
@@ -170,6 +172,86 @@ in `MFA_REQUIRED_ROLES`, see [MFA required per role](#mfa-required-per-role)).
   invited role (including `admin`) goes with it. Set OIDC `requireEmailVerified` to true and use SAML or LDAP only with a
   directory that verifies the email, so nobody can assert an invited address they do not own.
 - **Audit.** `user.invite` (with `reinvite` and `emailed`) and `user.invite.accept` (success or failure).
+
+## Teams in the studio
+
+- **Invite user.** Settings, Users has **Invite user** for admins: an email and a role. With a mail server set the link
+  is emailed; otherwise the dialog shows it once to copy and pass on.
+- **Project members by email.** Settings, Project Members adds a member by email (admins pick from the deployment's
+  users). `POST /api/projects/:id/members` takes `{ "email": "..." }` in place of `userId`, and the member list carries
+  each member's `email`.
+- **What the editor shows.** Viewers and operators open workflows read-only: Save, Add node and Clear are disabled, and
+  their tooltip says why; viewers cannot run. Operators run the released version where they have `workflow:execute`
+  (Run and Webhook run). A builder sees the same for a workflow they may only view (one shared with them, or in a
+  project where their role is view-only); a workflow they may run but not change runs its released version. On a
+  read-only workflow nodes open but cannot be moved, connected or saved, the node ring offers only Edit, outputs show
+  no `+`, the inspector offers no <span v-pre>`{{`</span> suggestions, helper chips, Input fields to drag in or
+  **Run node**, and the workflow settings in **More actions** are not offered.
+  `GET /api/workflows/:id/access` answers what the signed-in user may do: `canEdit`, `canRun`, `canShare` (share with
+  people, as the share routes allow) and `canShareWithProjects`.
+- **Shared with this project.** The Workflows page lists the workflows other projects share to the active one, with
+  the access members get there (`GET /api/projects/:id/shared-workflows`).
+
+## Running workflows by role
+
+`POST /api/workflows/:id/execute`, `/execute/stream`, `POST /api/webhooks/execute` and `/stream` take operators and up,
+with `workflow:execute` on the workflow (a project membership, an execute share to a project, or an execute share to
+the person). Someone who may edit the workflow runs the draft from a signed-in session, as before; anyone else
+(an operator, a share-only runner, an API key) runs the released version (production: the published version, or the
+saved workflow while nothing is published and no release gate is on), and gets `403` for `channel=draft`. They run it
+with the caller's input: `input`, `payload`, `variables`, `system_prompt`, `user_prompt`,
+`sessionId`, `customData` and a timeout. An operator's run uses no pinned data, and its timeout is at most
+`WORKFLOW_EXECUTION_TIMEOUT_MS`. Options that change what runs stay with builders and admins: `startNodeId`,
+`runMode: "single_node"`, `usePinnedData`, `pinnedData`, `nodeOutputs`, `sourceExecutionId`, `nodeOutputsExecutionId`,
+`record`, and a `workflow`, `nodes` or `edges` sent with the request; an operator who sends one gets `403` with
+`refusedOptions`, before any other check. Viewers are refused. Runs are audited as before.
+
+**Session memory is kept to the person for operators and share-only runners.** A run started by a signed-in operator,
+or by anyone who may run the workflow only through a share with them, reads and writes session memory, the session
+tool cache and session artifacts under that person's own key. Another person who sends the same session id starts an
+empty session, so knowing someone's session id does not continue their conversation. The run's sub-workflows and
+error workflow, and its resumed part after an approval (whoever decides it), use the same person's key, and so do the
+person's queued runs (`POST /api/workflows/:id/enqueue`) and their messages to a chat trigger set to signed-in
+sessions. Someone who may run a workflow only through a share with them keeps their own key with an API key of their
+own too. Builders and admins with access through their projects, other API keys and service accounts (whatever role
+the key has), schedules and webhooks keep the workflow's sessions, as before; their runs do not see the sessions kept to a person, and a person's
+runs do not see theirs. A run records whose sessions it used, and a retry or an MCP replay of it keeps them: the
+person's own retry continues their sessions; anyone else's runs under that person's key in a namespace of its own, so
+it shows them none of that person's memory (whatever the nodes' session id templates are) and writes neither into the
+workflow's sessions nor anywhere the person reads. A run whose record lacks this (a canceled run) is judged by who
+started it. A run of a person whose account was deleted is not run again (`409`). A retry of a run that used the
+workflow's sessions runs as a new run of the person who retries it. A Simple Memory or
+Session Artifact namespace that starts with `~person:` is refused, since that prefix marks one person's sessions.
+
+A person's session rows stay inside the project's key, so project retention and project legal holds cover them, and a
+legal hold on a workflow covers them for the workflow's default namespaces. Deleting a user removes the session memory,
+tool cache and artifacts kept to them, except rows a legal hold keeps. A data-subject request by session id finds and
+erases them (see [Data-subject requests](./data-subject-requests.md)).
+
+## Sharing a workflow with people
+
+Besides sharing a workflow with another project, a workflow can be shared with a person, from **Share…** in the editor
+or `POST /api/workflows/:id/user-shares` with `{ "email": "...", "accessLevel": "read" | "execute" }`.
+
+- **Who shares.** Whoever may add members to the workflow's own project (`project:invite`: project admins, builders
+  without a membership there in `role` isolation, and admins), with the same step-up as adding a member
+  (`project_member.change`). A project editor may change the workflow but not open it to people. The person must have
+  an account (invite them first); service accounts and yourself are refused.
+- **What it gives.** `read`: they find it under **Shared with you** on the Workflows page, open it and read its runs,
+  all of them (other people's runs, their inputs and outputs included), as a viewer of its project would.
+  `execute`: they may also run it (see [Running workflows by role](#running-workflows-by-role)) and act on its runs
+  (approve, cancel, answer a tool's question) when their role may run workflows; an execute share with a viewer reads
+  only. Their runs use the released version and their own session memory. A share never gives write, delete, publish or the right to
+  share it on. Their runs may use the workflow's secrets, as runs of its own project do.
+- **Limits.** An API key limited to projects gets nothing from a share outside them. A deactivated user's shares stay
+  but give nothing while they cannot sign in; enabling the user again brings them back, as with project memberships.
+- **Lifecycle.** Shares go with the workflow when it is deleted (a workflow created later with the same id starts
+  unshared) and with the user. Moving the workflow to another project keeps them; the `workflow.transfer` audit event
+  counts them (`userShareCount`).
+- **Who sees them.** Managers of the workflow's shares see the list (`GET /api/workflows/:id/user-shares`, and
+  `userShares` in `GET /api/workflows/:id/shares`), with each person's role and `effectiveAccess`.
+- **Audit.** `workflow.user_share` (with `targetUserId`, `targetEmail`, `accessLevel`, `effectiveAccess`) and
+  `workflow.user_unshare`, in the `sharing` category.
 
 ## Project access
 
@@ -325,6 +407,10 @@ its own project, whichever trigger started it:
   the default project, under any namespace that no workflow of another project
   uses (as its default namespace or a literal custom one). Other projects stop
   seeing them; rows are not migrated.
+  Runs kept to one person (operators, share-only runners; see
+  [Running workflows by role](#running-workflows-by-role)) key their rows by
+  the person as well, inside the project's prefix, and read no rows from
+  before scoping.
 - Deleting a workflow also deletes its versions, shares, queue and dead-letter
   rows, eval runs, elicitations and its legacy default-namespace session state
   (exactly `<workflowId>:<nodeId>` for its nodes), so a new workflow that

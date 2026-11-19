@@ -52,6 +52,20 @@ export class WorkflowVersionService {
     return await this.store.listWorkflowVersions(workflowId, limit);
   }
 
+  /** Every node id any stored version of the workflow used (versions that do not parse are skipped). */
+  async nodeIds(workflowId: string): Promise<string[]> {
+    const ids = new Set<string>();
+    for (const json of await this.store.listWorkflowVersionJson(workflowId)) {
+      try {
+        const parsed = JSON.parse(json) as { nodes?: Array<{ id?: unknown }> };
+        for (const node of parsed.nodes ?? []) if (typeof node?.id === "string") ids.add(node.id);
+      } catch {
+        // A version that does not parse names no ids.
+      }
+    }
+    return [...ids].sort();
+  }
+
   async get(workflowId: string, version: number): Promise<WorkflowVersionFull | null> {
     const row = await this.store.getWorkflowVersion(workflowId, version);
     if (!row) return null;

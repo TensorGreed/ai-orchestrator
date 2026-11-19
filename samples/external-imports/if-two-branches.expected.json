@@ -30,11 +30,13 @@
           "assignments": [
             {
               "key": "status",
-              "valueTemplate": "active"
+              "valueTemplate": "active",
+              "type": "string"
             },
             {
               "key": "amount",
-              "valueTemplate": "250"
+              "valueTemplate": "250",
+              "type": "number"
             }
           ]
         }

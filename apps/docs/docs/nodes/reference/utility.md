@@ -381,12 +381,14 @@ Parse CSV, JSON, or XML strings/base64 into structured data, or read a PDF's tex
 
 ### `filter_node` — Filter
 
-Evaluates conditions against context data and routes to pass or filtered branches.
+Items mode sends the matching items of a list to Kept and the rest to Rejected; Pass or stop mode sends the whole input to Pass or Stopped.
 
 **Config fields**
 
 | Field | Type | Required | Values |
 |---|---|---|---|
+| `mode` | `string` | no | `items` \| `gate` |
+| `itemsFrom` | `string` | no | — |
 | `conditions` | `array<object>` | no | — |
 | `combineWith` | `string` | no | `AND` \| `OR` |
 | `passMode` | `string` | no | `pass` \| `reject` |
@@ -395,6 +397,8 @@ Evaluates conditions against context data and routes to pass or filtered branche
 
 ```json
 {
+  "mode": "items",
+  "itemsFrom": "",
   "conditions": [
     {
       "field": "status",
@@ -701,6 +705,7 @@ Iterates over an input array and executes direct downstream nodes once per item.
 | `inputKey` | `string` | yes | — |
 | `itemVariable` | `string` | yes | — |
 | `maxIterations` | `number` | no | — |
+| `collectResults` | `boolean` | no | — |
 
 **Example config**
 
@@ -708,7 +713,8 @@ Iterates over an input array and executes direct downstream nodes once per item.
 {
   "inputKey": "documents",
   "itemVariable": "item",
-  "maxIterations": 100
+  "maxIterations": 100,
+  "collectResults": true
 }
 ```
 
@@ -716,13 +722,13 @@ Iterates over an input array and executes direct downstream nodes once per item.
 
 ### `merge_node` — Merge / Join
 
-Merges outputs from multiple parent branches after fan-in.
+Merges outputs from multiple parent branches after fan-in, or collects every pass of a Loop body node.
 
 **Config fields**
 
 | Field | Type | Required | Values |
 |---|---|---|---|
-| `mode` | `string` | yes | `append` \| `combine_by_key` \| `choose_branch` |
+| `mode` | `string` | yes | `append` \| `combine_by_key` \| `choose_branch` \| `collect_loop_passes` |
 | `combineKey` | `string` | no | — |
 
 **Example config**
@@ -962,7 +968,7 @@ Saves an exact JSON artifact for the current session so later turns can reuse it
 
 ### `set_node` — Set / Transform
 
-Builds a structured output object from key/template assignments.
+Builds a structured output object from key/template assignments; each field can keep or set its value's type.
 
 **Config fields**
 
@@ -977,15 +983,18 @@ Builds a structured output object from key/template assignments.
   "assignments": [
     {
       "key": "customerId",
-      "valueTemplate": "{{webhook.customer.id}}"
+      "valueTemplate": "{{webhook.customer.id}}",
+      "type": "auto"
     },
     {
       "key": "status",
-      "valueTemplate": "active"
+      "valueTemplate": "active",
+      "type": "auto"
     },
     {
       "key": "metadata",
-      "valueTemplate": "{\"source\":\"workflow\",\"index\":{{_loop_index}}}"
+      "valueTemplate": "{\"source\":\"workflow\",\"index\":{{_loop_index}}}",
+      "type": "auto"
     }
   ]
 }

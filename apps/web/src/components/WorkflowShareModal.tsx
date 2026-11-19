@@ -4,9 +4,14 @@ import {
   ApiError,
   fetchWorkflowShares,
   shareWorkflow,
+  shareWorkflowWithUser,
   unshareWorkflow,
-  type WorkflowShareRecord
+  unshareWorkflowWithUser,
+  type WorkflowShareRecord,
+  type WorkflowUserShareRecord
 } from "../lib/api";
+
+const ACCESS_LABEL = { read: "Can view", execute: "Can view and run" } as const;
 
 interface WorkflowShareModalProps {
   workflowId: string;
@@ -30,6 +35,11 @@ export function WorkflowShareModal({
   onClose
 }: WorkflowShareModalProps) {
   const [shares, setShares] = useState<WorkflowShareRecord[]>([]);
+  /** People it is shared with; undefined when the server did not list them (you cannot manage its shares). */
+  const [userShares, setUserShares] = useState<WorkflowUserShareRecord[] | undefined>(undefined);
+  const [personEmail, setPersonEmail] = useState("");
+  const [personAccess, setPersonAccess] = useState<"read" | "execute">("read");
+  const [notice, setNotice] = useState<string | null>(null);
   const [targetProjectId, setTargetProjectId] = useState<string>("");
   const [accessLevel, setAccessLevel] = useState<"read" | "execute">("read");
   const [loaded, setLoaded] = useState(false);
@@ -40,6 +50,7 @@ export function WorkflowShareModal({
     try {
       const response = await fetchWorkflowShares(workflowId);
       setShares(response.shares);
+      setUserShares(response.userShares);
     } catch (err) {
       setError(formatError(err));
     } finally {
@@ -76,6 +87,40 @@ export function WorkflowShareModal({
     }
   };
 
+  const handleSharePerson = async () => {
+    const email = personEmail.trim();
+    if (!email) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const { share } = await shareWorkflowWithUser(workflowId, { email, accessLevel: personAccess });
+      setPersonEmail("");
+      if (share.accessLevel === "execute" && share.effectiveAccess === "read") {
+        setNotice(`${share.email} is a ${share.role}, so they can view it but not run it.`);
+      }
+      await refresh();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleUnsharePerson = async (share: WorkflowUserShareRecord) => {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await unshareWorkflowWithUser(workflowId, share.userId);
+      await refresh();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleUnshare = async (projectId: string) => {
     setBusy(true);
     setError(null);
@@ -96,7 +141,7 @@ export function WorkflowShareModal({
           <div>
             <h3 id="share-modal-title" className="pg-modal-title">Share "{workflowName}"</h3>
             <p className="settings-help">
-              Grant read or execute access to other projects. Shared workflows remain owned by{" "}
+              Let people or other projects view or run it. Nobody it is shared with can edit it, and it stays in{" "}
               <code>{owningProjectId}</code>.
             </p>
           </div>
@@ -105,10 +150,99 @@ export function WorkflowShareModal({
           </button>
         </header>
         <div className="pg-modal-body">
-          {error && <div className="settings-error">{error}</div>}
+          {error && (
+            <div className="settings-error" role="alert">
+              {error}
+            </div>
+          )}
+          {notice && (
+            <div className="info-banner" role="status">
+              {notice}
+            </div>
+          )}
+
+          {userShares !== undefined && (
+            <div className="settings-card">
+              <h4>People</h4>
+              <form
+                className="share-person-row"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void handleSharePerson();
+                }}
+              >
+                <label htmlFor="share-person-email">Email</label>
+                <input
+                  id="share-person-email"
+                  type="email"
+                  autoComplete="off"
+                  placeholder="ana@example.com"
+                  value={personEmail}
+                  onChange={(event) => setPersonEmail(event.target.value)}
+                />
+                <label htmlFor="share-person-access">Access</label>
+                <select id="share-person-access" value={personAccess} onChange={(event) => setPersonAccess(event.target.value as "read" | "execute")}>
+                  <option value="read">{ACCESS_LABEL.read}</option>
+                  <option value="execute">{ACCESS_LABEL.execute}</option>
+                </select>
+                <div className="settings-actions">
+                  <button type="submit" className="pg-btn primary" disabled={busy || !personEmail.trim()}>
+                    Share with person
+                  </button>
+                </div>
+              </form>
+              {userShares.length === 0 ? (
+                <p className="settings-muted">Not shared with anyone yet.</p>
+              ) : (
+                <table className="settings-table">
+                  <thead>
+                    <tr>
+                      <th>Person</th>
+                      <th>Access</th>
+                      <th>Shared by</th>
+                      <th>
+                        <span className="sr-only">Actions</span>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {userShares.map((share) => (
+                      <tr key={share.userId}>
+                        <td>
+                          {share.email ?? share.userId}
+                          {share.role ? <span className="settings-chip">{share.role}</span> : null}
+                          {share.disabled ? <span className="settings-chip">Disabled</span> : null}
+                        </td>
+                        <td>
+                          {share.effectiveAccess ? ACCESS_LABEL[share.effectiveAccess] : "No access while disabled"}
+                          {share.effectiveAccess === "read" && share.accessLevel === "execute" ? (
+                            <span className="settings-muted" title="Their role cannot run workflows">
+                              {" "}
+                              (role cannot run)
+                            </span>
+                          ) : null}
+                        </td>
+                        <td>{share.sharedBy ?? "—"}</td>
+                        <td>
+                          <button
+                            className="pg-btn small ghost danger"
+                            onClick={() => void handleUnsharePerson(share)}
+                            disabled={busy}
+                            aria-label={`Stop sharing with ${share.email ?? share.userId}`}
+                          >
+                            Remove
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )}
 
           <div className="settings-card">
-            <h4>Add share</h4>
+            <h4>Projects</h4>
             {eligibleProjects.length === 0 ? (
               <p className="settings-muted">No other projects available to share with.</p>
             ) : (

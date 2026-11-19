@@ -25,6 +25,10 @@
  *     workflow's exact own default namespace (`<workflowId>:<nodeId>`) or,
  *     from the default project, a namespace no workflow of another project
  *     claims.
+ *   - A run kept to one person (`sessionOwner`: operators, and people who run
+ *     a workflow only through a share with them) prefixes those keys with the
+ *     person too, and reads no unprefixed rows: knowing a session id does not
+ *     continue another person's session. Its sub-workflows inherit it.
  *
  * Phase 15.4 — a run carries its release channel: a production run (a
  * production webhook, a schedule, the MCP gateway...) loads the published
@@ -46,6 +50,7 @@ import type {
 } from "@ai-orchestrator/workflow-engine";
 import type { SafeUser } from "./services/auth-service.js";
 import { productionRefusalCode } from "./services/release-service.js";
+import { PERSON_SESSION_MARKER, personSessionNamespace, projectSessionNamespace, sessionOwnerKey } from "./db/person-sessions.js";
 
 type MemoryStore = NonNullable<WorkflowExecutionDependencies["memoryStore"]>;
 type ToolDataStore = NonNullable<WorkflowExecutionDependencies["toolDataStore"]>;
@@ -70,6 +75,8 @@ export interface RunScopeDeps {
   getSecretProjectId: (secretId: string) => Promise<string | null>;
   listSecretIdsSharedToProject: (projectId: string) => Promise<string[]>;
   canUseSecretsInProject: (user: SafeUser, projectId: string) => Promise<boolean>;
+  /** v78 — may this person run the workflow through a share with them (execute, within their role)? */
+  userMayRunViaShare?: (user: SafeUser, workflow: { id: string; projectId?: string | null }) => Promise<boolean>;
   /**
    * Do default-project secrets and MCP servers count as shared with every
    * project? True in `role` isolation; in `strict` they need an explicit share.
@@ -130,12 +137,12 @@ export interface RunScopeOptions {
   resolveRegisteredMcpServer?: McpServerResolver;
   /** Phase 15.4 — the run's release channel (default `draft`); inherited by sub-workflows. */
   channel?: ReleaseChannel;
+  /** The person the run's session keys are kept to (see the module comment); inherited by sub-workflows. */
+  sessionOwner?: string;
 }
 
-/** The stored key for a namespace in a project. The length prefix keeps it unambiguous. */
-export function projectSessionNamespace(projectId: string, namespace: string): string {
-  return `project:${projectId.length}:${projectId}:${namespace}`;
-}
+// The stored session keys (db/person-sessions.ts): a project's, and one person's within a project.
+export { PERSON_SESSION_MARKER, personSessionNamespace, projectSessionNamespace };
 
 export function createRunScope(deps: RunScopeDeps) {
   /**
@@ -173,6 +180,8 @@ export function createRunScope(deps: RunScopeDeps) {
     for (const share of workflow.id ? await deps.listWorkflowShares(workflow.id) : []) {
       if (share.accessLevel === "execute" && await deps.canUseSecretsInProject(actor, share.projectId)) return true;
     }
+    // v78 — an execute share with the person: they run it as its project's runs do.
+    if (workflow.id && deps.userMayRunViaShare && await deps.userMayRunViaShare(actor, { id: workflow.id, projectId: workflow.projectId })) return true;
     return false;
   };
 
@@ -210,15 +219,23 @@ export function createRunScope(deps: RunScopeDeps) {
     return base(registryServerId);
   };
 
-  const sessionStoresFor = (workflow: Workflow) => {
+  const sessionStoresFor = (workflow: Workflow, sessionOwner?: string) => {
     const projectId = workflow.projectId ?? DEFAULT_PROJECT_ID;
-    const key = (namespace: string) => projectSessionNamespace(projectId, namespace);
+    const key = (namespace: string) => {
+      if (sessionOwner) return sessionOwnerKey(sessionOwner, projectId, namespace);
+      // A namespace written like a person's key would reach that person's sessions: refused.
+      if (namespace.startsWith(PERSON_SESSION_MARKER)) {
+        throw new Error(`Session namespaces may not start with '${PERSON_SESSION_MARKER}'; it marks one person's sessions. Choose another namespace.`);
+      }
+      return projectSessionNamespace(projectId, namespace);
+    };
     // Unprefixed rows from before project scoping, read only where they can be
     // this workflow's own: its exact default namespace, or (from the default
     // project, where every pre-scoping row was written) any namespace that no
     // workflow of another project claims.
     const ownLegacy = (namespace: string) => workflow.nodes.some((node) => namespace === `${workflow.id}:${node.id}`);
     const legacyReadable = async (namespace: string) =>
+      !sessionOwner &&
       (projectId === DEFAULT_PROJECT_ID || ownLegacy(namespace)) &&
       (await deps.legacyNamespaceOwnerProjects(namespace)).every((owner) => owner === projectId);
     const asCaller = <T extends { namespace: string }>(row: T, namespace: string): T => ({ ...row, namespace });
@@ -322,12 +339,13 @@ export function createRunScope(deps: RunScopeDeps) {
         dependenciesFor(child, {
           actor: (child.projectId ?? DEFAULT_PROJECT_ID) === projectId ? actor : null,
           resolveRegisteredMcpServer: baseMcpResolver,
-          channel
+          channel,
+          ...(options.sessionOwner ? { sessionOwner: options.sessionOwner } : {})
         }),
       resolveSecret: resolveSecretFor(workflow, actor),
       resolveRegisteredMcpServer: mcpServerResolverFor(workflow, baseMcpResolver),
       knowledgeBaseStore: deps.knowledgeBaseStoreFor(workflow.projectId),
-      ...sessionStoresFor(workflow)
+      ...sessionStoresFor(workflow, options.sessionOwner)
     };
   };
 

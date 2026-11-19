@@ -15,6 +15,7 @@ import {
   QUEUE_RESULT_OUTPUT_LABELS_KEY,
   RESPONSE_BOUNDARY_CAPABILITY,
   SENSITIVE_INPUT_CAPABILITY,
+  SESSION_OWNER_CAPABILITY,
   capabilitiesFor,
   readDispatchedRunSpec,
   resultForQueue,
@@ -97,6 +98,9 @@ describe("decideDispatch (capability gate)", () => {
     expect(decideDispatch([current, older], "default", [SENSITIVE_INPUT_CAPABILITY]).queue).toBe(false);
     const markedPins = { ...spec(), run: { ...spec().run, workflow: { ...spec().run.workflow, pinnedData: { a: 1 }, pinnedDataSensitive: ["a"] } } };
     expect(capabilitiesFor(markedPins)).toEqual([SENSITIVE_INPUT_CAPABILITY]);
+    // A run kept to one person's sessions goes only to workers that keep it so.
+    expect(capabilitiesFor({ ...spec(), run: { ...spec().run, sessionOwner: "u-1" } })).toEqual([SESSION_OWNER_CAPABILITY]);
+    expect(decideDispatch([current, older], "default", [SESSION_OWNER_CAPABILITY]).queue).toBe(false);
     expect(capabilitiesFor({ ...markedPins, run: { ...markedPins.run, usePinnedData: false } })).toEqual([]);
     // The gate keeps one decision per pool and capability set.
     const reported: Array<{ label: string; inline: boolean; changed: boolean }> = [];

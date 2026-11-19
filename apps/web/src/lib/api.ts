@@ -67,6 +67,7 @@ import type {
 import type { DocumentScanRequest, DocumentScanResult } from "@ai-orchestrator/shared";
 import { EVAL_RUN_FINISHED_STATUSES } from "@ai-orchestrator/shared";
 import type { GuardEntityEngineInfo } from "@ai-orchestrator/shared";
+import type { WorkflowDiff } from "@ai-orchestrator/shared";
 import type {
   EvalCaseDetail,
   EvalCaseResult,
@@ -612,10 +613,35 @@ export async function duplicateWorkflow(
   });
 }
 
-export async function importWorkflow(payload: { json?: string; workflow?: unknown }) {
+/**
+ * Imports a workflow JSON file. `mode: "new"` (the default) makes a new workflow: the file's id is kept when it is
+ * free, otherwise the import gets a new id. `mode: "replace"` overwrites the stored workflow with the file's id.
+ */
+export async function importWorkflow(payload: { json?: string; workflow?: unknown; mode?: "new" | "replace" }) {
   return apiRequest<Workflow>("/api/workflows/import", {
     method: "POST",
     body: JSON.stringify(payload)
+  });
+}
+
+export interface WorkflowImportPreview {
+  dryRun: true;
+  mode: "new" | "replace";
+  /** The workflow the import would save in this mode. */
+  workflow: Workflow;
+  /** The stored workflow (readable by you) with the file's id, if any. */
+  existing: { id: string; name: string; updatedAt: string | null; projectId: string | null } | null;
+  /** What replacing `existing` with the file changes. */
+  diff: WorkflowDiff | null;
+  /** Whether you may replace `existing` (false when you can only view it). Older servers leave it out. */
+  canReplace?: boolean;
+}
+
+/** Previews a workflow JSON import without storing anything. */
+export async function previewWorkflowImport(payload: { json?: string; workflow?: unknown }) {
+  return apiRequest<WorkflowImportPreview>("/api/workflows/import", {
+    method: "POST",
+    body: JSON.stringify({ ...payload, dryRun: true })
   });
 }
 
@@ -1338,6 +1364,11 @@ export async function fetchProviderModels(payload: {
   });
 }
 
+/** Every node id the saved workflow uses now or used in a stored version. */
+export async function fetchWorkflowNodeIds(workflowId: string) {
+  return apiRequest<{ nodeIds: string[] }>(`/api/workflows/${encodeURIComponent(workflowId)}/node-ids`);
+}
+
 export async function previewExpression(payload: {
   expression: string;
   mode?: "expression" | "template" | "condition";
@@ -1354,6 +1385,8 @@ export async function previewExpression(payload: {
     ok: boolean;
     result?: unknown;
     error?: string;
+    /** Template and condition modes: each `{{ }}` that rendered nothing, and why. */
+    missing?: Array<{ body: string; reason: "missing" | "expression_failed" }>;
   }>("/api/expressions/preview", {
     method: "POST",
     body: JSON.stringify(payload)
@@ -1806,6 +1839,8 @@ export async function deleteSsoMapping(id: string) {
 
 export interface ProjectMembership {
   userId: string;
+  /** The email the member signs in with (null when the user is gone). */
+  email?: string | null;
   projectId: string;
   role: "project_admin" | "editor" | "viewer" | "custom";
   customRoleId: string | null;
@@ -1820,7 +1855,7 @@ export async function fetchProjectMembers(projectId: string) {
 
 export async function addProjectMember(
   projectId: string,
-  payload: { userId: string; role: string; customRoleId?: string | null }
+  payload: ({ userId: string; email?: never } | { email: string; userId?: never }) & { role: string; customRoleId?: string | null }
 ) {
   return apiRequest<{ ok: boolean; membership: ProjectMembership }>(
     `/api/projects/${encodeURIComponent(projectId)}/members`,
@@ -1908,8 +1943,71 @@ export interface WorkflowShareRecord {
   createdAt: string;
 }
 
+/** v78 — a workflow shared with you, in any project. */
+export interface SharedWorkflowItem {
+  id: string;
+  name: string;
+  projectId: string;
+  updatedAt: string | null;
+  accessLevel: "read" | "execute";
+  effectiveAccess: "read" | "execute";
+}
+
+export async function fetchWorkflowsSharedWithMe() {
+  return apiRequest<{ workflows: SharedWorkflowItem[] }>("/api/workflows/shared-with-me");
+}
+
+/** A workflow another project shares to the active one (read-only in the list). */
+export interface ProjectSharedWorkflowItem {
+  id: string;
+  name: string;
+  ownerProjectId: string;
+  updatedAt: string | null;
+  accessLevel: "read" | "execute";
+  effectiveAccess: "read" | "execute";
+}
+
+export async function fetchProjectSharedWorkflows(projectId: string) {
+  return apiRequest<{ workflows: ProjectSharedWorkflowItem[] }>(`/api/projects/${encodeURIComponent(projectId)}/shared-workflows`);
+}
+
+/** What you may do with a workflow (the editor shows only the controls that work). */
+export async function fetchWorkflowAccess(workflowId: string) {
+  return apiRequest<{ workflowId: string; role: string; canRead: boolean; canEdit: boolean; canRun: boolean; canShare: boolean; canShareWithProjects?: boolean }>(
+    `/api/workflows/${encodeURIComponent(workflowId)}/access`
+  );
+}
+
+/** v78 — a workflow shared with a person. `effectiveAccess` is what they get: their role caps it, null while disabled. */
+export interface WorkflowUserShareRecord {
+  workflowId: string;
+  userId: string;
+  email: string | null;
+  role: string | null;
+  disabled: boolean;
+  accessLevel: "read" | "execute";
+  effectiveAccess: "read" | "execute" | null;
+  sharedBy: string | null;
+  createdAt: string;
+}
+
+export async function fetchWorkflowUserShares(workflowId: string) {
+  return apiRequest<{ userShares: WorkflowUserShareRecord[] }>(`/api/workflows/${encodeURIComponent(workflowId)}/user-shares`);
+}
+
+export async function shareWorkflowWithUser(workflowId: string, payload: { email: string; accessLevel: "read" | "execute" }) {
+  return apiRequest<{ ok: boolean; share: { userId: string; email: string; role: string; accessLevel: "read" | "execute"; effectiveAccess: "read" | "execute" } }>(
+    `/api/workflows/${encodeURIComponent(workflowId)}/user-shares`,
+    { method: "POST", body: JSON.stringify(payload) }
+  );
+}
+
+export async function unshareWorkflowWithUser(workflowId: string, userId: string) {
+  return apiRequest<{ ok: boolean }>(`/api/workflows/${encodeURIComponent(workflowId)}/user-shares/${encodeURIComponent(userId)}`, { method: "DELETE" });
+}
+
 export async function fetchWorkflowShares(workflowId: string) {
-  return apiRequest<{ shares: WorkflowShareRecord[] }>(
+  return apiRequest<{ shares: WorkflowShareRecord[]; userShares?: WorkflowUserShareRecord[] }>(
     `/api/workflows/${encodeURIComponent(workflowId)}/shares`
   );
 }
@@ -5025,6 +5123,19 @@ export interface InviteLookup {
   email: string;
   role: AuthUser["role"];
   expiresAt: string;
+}
+
+export interface UserInviteResult {
+  user: { id: string; email: string; role: string; pending: true };
+  invite: { id: string; expiresAt: string };
+  /** True when the server emailed the link; otherwise `inviteUrl` is the link to pass on (shown this once). */
+  emailed: boolean;
+  inviteUrl?: string;
+}
+
+/** Admin: invites a person by email with a role (the studio passes the link on when no mail server is set). */
+export async function inviteUser(payload: { email: string; role: "admin" | "builder" | "operator" | "viewer" }) {
+  return apiRequest<UserInviteResult>("/api/users/invite", { method: "POST", body: JSON.stringify(payload) });
 }
 
 /** The email and role an invite link is for; throws (404) when it is used, expired or unknown. */

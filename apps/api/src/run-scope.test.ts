@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { Workflow } from "@ai-orchestrator/shared";
-import { createRunScope, projectSessionNamespace, type RunScopeDeps } from "./run-scope.js";
+import { createRunScope, personSessionNamespace, projectSessionNamespace, type RunScopeDeps } from "./run-scope.js";
 import type { SafeUser } from "./services/auth-service.js";
 
 const workflow = (id: string, projectId?: string, nodes: Array<{ id: string; namespace?: string }> = []): Workflow => ({
@@ -201,6 +201,17 @@ describe("run scope: secrets", () => {
     expect(resolved).toEqual([]);
   });
 
+  it("an execute share with the person lets their run use the workflow's secrets (v78)", async () => {
+    const { scope, workflows } = scopeFixture({
+      userMayRunViaShare: async (actor, workflow) => actor.id === "u-consumer" && workflow.id === "b-1"
+    });
+    const consumer = user("builder", "u-consumer");
+    expect(await scope.canUseSecretFor(workflows["b-1"]!, consumer, "s-b")).toBe(true);
+    // Only for that workflow, and only for that person.
+    expect(await scope.canUseSecretFor(workflows["b-read-share"]!, consumer, "s-b")).toBe(false);
+    expect(await scope.canUseSecretFor(workflows["b-1"]!, user("builder", "u-no-secrets"), "s-b")).toBe(false);
+  });
+
   it("the run's user carries over to a same-project child only", async () => {
     const { scope, workflows } = scopeFixture();
     const parent = scope.dependenciesFor(workflows["a-1"]!, { actor: user("operator", "u-no-secrets") });
@@ -341,6 +352,50 @@ describe("run scope: session memory, tool cache and artifacts", () => {
     await a.sessionArtifactStore.saveArtifact({ namespace: "art", sessionId: "s1", artifactKey: "k", value: 42 });
     expect(await b.sessionArtifactStore.loadArtifact({ namespace: "art", sessionId: "s1", artifactKey: "k" })).toBeNull();
     expect(await a.sessionArtifactStore.loadArtifact({ namespace: "art", sessionId: "s1", artifactKey: "k" })).toMatchObject({ namespace: "art", value: 42 });
+  });
+
+  it("keeps a person's run to their own keys, inside the project's prefix, and reads no legacy rows", async () => {
+    const { scope, workflows, memory, toolCalls } = scopeFixture();
+    memory.set("b-1:agent|s1", [{ role: "user", content: "legacy of b-1" }]);
+    const workflowRun = scope.dependenciesFor(workflows["b-1"]!);
+    await workflowRun.memoryStore.saveMessages("b-1:agent", "s1", [{ role: "user", content: "the workflow's" }]);
+    const olivia = scope.dependenciesFor(workflows["b-1"]!, { actor: user("operator", "olivia"), sessionOwner: "olivia" });
+    const otto = scope.dependenciesFor(workflows["b-1"]!, { actor: user("operator", "otto"), sessionOwner: "otto" });
+    expect(await olivia.memoryStore.loadMessages("b-1:agent", "s1")).toEqual([]);
+    await olivia.memoryStore.saveMessages("b-1:agent", "s1", [{ role: "user", content: "olivia's" }]);
+    expect(memory.has(`${personSessionNamespace("olivia", "pb", "b-1:agent")}|s1`)).toBe(true);
+    // Retention and legal holds find a project's sessions by its prefix: a person's keys keep it.
+    expect(personSessionNamespace("olivia", "pb", "x").startsWith(projectSessionNamespace("pb", ""))).toBe(true);
+    expect(await otto.memoryStore.loadMessages("b-1:agent", "s1")).toEqual([]);
+    expect(await olivia.memoryStore.loadMessages("b-1:agent", "s1")).toEqual([{ role: "user", content: "olivia's" }]);
+    expect(await workflowRun.memoryStore.loadMessages("b-1:agent", "s1")).toEqual([{ role: "user", content: "the workflow's" }]);
+
+    await olivia.toolDataStore.saveToolCall({ namespace: "cache", sessionId: "s1", toolName: "search", args: {}, output: "olivia result" });
+    expect(toolCalls.at(-1)!.namespace).toBe(personSessionNamespace("olivia", "pb", "cache"));
+    expect(await otto.toolDataStore.listToolCalls({ namespace: "cache", sessionId: "s1" })).toEqual([]);
+    await olivia.sessionArtifactStore.saveArtifact({ namespace: "art", sessionId: "s1", artifactKey: "k", value: 1 });
+    expect(await otto.sessionArtifactStore.loadArtifact({ namespace: "art", sessionId: "s1", artifactKey: "k" })).toBeNull();
+    expect(await workflowRun.sessionArtifactStore.loadArtifact({ namespace: "art", sessionId: "s1", artifactKey: "k" })).toBeNull();
+  });
+
+  it("refuses a workflow namespace written like a person's key, so no run reaches another person's sessions by name", async () => {
+    const { scope, workflows } = scopeFixture();
+    const run = scope.dependenciesFor(workflows["a-1"]!);
+    const crafted = "~person:6:olivia:support";
+    await expect(run.memoryStore.loadMessages(crafted, "s1")).rejects.toThrow(/may not start with/);
+    await expect(run.sessionArtifactStore.saveArtifact({ namespace: crafted, sessionId: "s1", artifactKey: "k", value: 1 })).rejects.toThrow(/may not start with/);
+    // Inside a person's own run the same text is just a namespace, nested under their key.
+    const own = scope.dependenciesFor(workflows["a-1"]!, { sessionOwner: "otto" });
+    expect(await own.memoryStore.loadMessages(crafted, "s1")).toEqual([]);
+    expect(personSessionNamespace("otto", "pa", crafted)).not.toBe(personSessionNamespace("olivia", "pa", "support"));
+  });
+
+  it("a sub-workflow of a person's run keeps the person's keys", async () => {
+    const { scope, workflows, memory } = scopeFixture();
+    const parent = scope.dependenciesFor(workflows["a-1"]!, { actor: user("operator", "olivia"), sessionOwner: "olivia" });
+    const child = parent.scopeSubWorkflow(workflows["b-shared"]!);
+    await child.memoryStore!.saveMessages("support", "s1", [{ role: "user", content: "child" }]);
+    expect(memory.has(`${personSessionNamespace("olivia", "pb", "support")}|s1`)).toBe(true);
   });
 
   it("namespace keys are unambiguous even when project ids contain the separator", () => {

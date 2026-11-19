@@ -473,3 +473,20 @@ describe("adding a node after a worker agent", () => {
     expect(screen.queryByRole("button", { name: "Add a node after this step" })).toBeNull();
   });
 });
+
+describe("a view-only canvas", () => {
+  const filter = makeNode("f", "filter_node", "Filter", { x: 0, y: 0 }, { config: { mode: "items" } });
+
+  it("draws the Filter's Kept and Rejected + for someone who may edit", async () => {
+    render(<WorkflowCanvasArea {...makeProps({ nodes: [filter], onInsertFromHandle: vi.fn() })} />);
+    await screen.findByText("Rejected");
+    // React Flow draws nodes hidden until it has measured them, so the buttons are found by their label.
+    expect(document.querySelector('button[aria-label="Add a node after the Rejected output"]')).not.toBeNull();
+  });
+
+  it("draws no + on any output, the Filter's included, when the workflow is view-only", async () => {
+    render(<WorkflowCanvasArea {...makeProps({ nodes: [filter], onInsertFromHandle: vi.fn(), editDisabledReason: "Viewers can't change workflows." })} />);
+    expect(await screen.findByText("Kept")).toBeInTheDocument();
+    expect(document.querySelector("button.wf-handle-add")).toBeNull();
+  });
+});

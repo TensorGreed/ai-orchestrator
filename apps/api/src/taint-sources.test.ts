@@ -288,7 +288,7 @@ describe("the trigger trust setting is admin-only", () => {
     const imported = await call(context, "POST", "/api/workflows/import", builder, { workflow: bound(hookWorkflow("wf-imported", { inputTrust: "user" })) });
     expect(imported.statusCode, imported.body).toBe(200);
     expect((await context.store.getWorkflow("wf-imported"))!.nodes[0]!.config.inputTrust).toBeUndefined();
-    const over = await call(context, "POST", "/api/workflows/import", builder, { workflow: { ...hookWorkflow("wf-trust", { inputTrust: "untrusted_external" }), name: "Imported over" } });
+    const over = await call(context, "POST", "/api/workflows/import", builder, { workflow: { ...hookWorkflow("wf-trust", { inputTrust: "untrusted_external" }), name: "Imported over" }, mode: "replace" });
     expect(over.statusCode, over.body).toBe(200);
     expect((await context.store.getWorkflow("wf-trust"))!.nodes[0]!.config.inputTrust).toBe("user");
 

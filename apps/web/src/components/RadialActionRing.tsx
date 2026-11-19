@@ -13,6 +13,8 @@ interface RadialActionRingProps {
   /** Absolute viewport-relative position of the node's center. */
   center: { x: number; y: number };
   onAction: (action: RadialAction) => void;
+  /** A view-only workflow: the ring offers only Edit, which opens the node to look at. */
+  readOnly?: boolean;
 }
 
 interface RingItem {
@@ -38,7 +40,7 @@ const COLOR_SWATCHES: Array<{ key: EditorNodeData["color"]; swatch: string; labe
   { key: "gray", swatch: "#94a3b8", label: "Gray" }
 ];
 
-export function RadialActionRing({ node, center, onAction }: RadialActionRingProps) {
+export function RadialActionRing({ node, center, onAction, readOnly = false }: RadialActionRingProps) {
   const [showColors, setShowColors] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -106,7 +108,7 @@ export function RadialActionRing({ node, center, onAction }: RadialActionRingPro
 
   return (
     <div ref={rootRef} className="radial-ring-root" style={rootStyle} aria-label="Node actions">
-      {items.map((item) => {
+      {(readOnly ? items.filter((item) => item.action.kind === "edit") : items).map((item) => {
         const rad = (item.angle * Math.PI) / 180;
         const tx = Math.cos(rad) * RADIUS;
         const ty = Math.sin(rad) * RADIUS;

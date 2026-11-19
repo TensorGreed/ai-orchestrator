@@ -38,6 +38,7 @@
 import crypto from "node:crypto";
 import { deflateRawSync } from "node:zlib";
 import {
+  DEFAULT_PROJECT_ID,
   STAFF_AUDIT_LOG_KEPT,
   SUBJECT_DELETION_NOT_COVERED,
   SUBJECT_REQUEST_MAX_ROWS,
@@ -59,6 +60,7 @@ import {
 } from "@ai-orchestrator/shared";
 import type { SubjectStoreKind, SubjectTextRow } from "../db/database.js";
 import type { Store } from "../db/store.js";
+import { projectSessionNamespace, sessionOwnerKey } from "../db/person-sessions.js";
 import {
   SUBJECT_SCAN_KINDS,
   memorySessionRowId,
@@ -307,6 +309,8 @@ export interface SubjectRunContext {
   customData?: unknown;
   sessionId?: string | null;
   triggeredBy?: string | null;
+  /** v79 — the person whose sessions the run used (run-scope.ts personSessionNamespace), or none for the workflow's. */
+  sessionOwner?: string | null;
 }
 
 export function subjectContextOf(run: SubjectRunContext): Record<string, unknown> {
@@ -341,6 +345,15 @@ const MEMORY_NODE_TYPES = new Set(["local_memory", "session_artifact_load", "ses
  * id is the run's (`{{session_id}}`, the default) and whose namespace is fixed (the default `<workflow>:<node>`, or a
  * namespace without `{{ }}`). A namespace built from run data cannot be known here and is left to the search.
  */
+/**
+ * The keys a run's session rows are stored under for a node namespace: a person's key when the run was kept to one
+ * person; otherwise the project's key, plus the bare namespace that rows from before project scoping use.
+ */
+export function storedSessionKeys(namespace: string, projectId: string, sessionOwner: string | null): string[] {
+  if (sessionOwner) return [sessionOwnerKey(sessionOwner, projectId, namespace)];
+  return [namespace, projectSessionNamespace(projectId, namespace)];
+}
+
 export function memoryNamespacesOf(workflow: Pick<Workflow, "id" | "nodes">): string[] {
   const namespaces = new Set<string>();
   for (const node of workflow.nodes ?? []) {
@@ -537,7 +550,9 @@ export class SubjectRequestService {
         refs.push({ hash, kind: "run", rowId: input.executionId, projectId, workflowId: input.workflow.id, createdAt });
         if (subjectRefPath(expression) === "session_id") {
           for (const namespace of memoryNamespacesOf(input.workflow)) {
-            refs.push({ hash, kind: "memory_session", rowId: memorySessionRowId(namespace, value.trim()), projectId, workflowId: input.workflow.id, createdAt });
+            for (const key of storedSessionKeys(namespace, projectId ?? DEFAULT_PROJECT_ID, input.run.sessionOwner ?? null)) {
+              refs.push({ hash, kind: "memory_session", rowId: memorySessionRowId(key, value.trim()), projectId, workflowId: input.workflow.id, createdAt });
+            }
           }
         }
       }

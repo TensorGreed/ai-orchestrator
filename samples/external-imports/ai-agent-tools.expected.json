@@ -145,7 +145,8 @@
           "assignments": [
             {
               "key": "reply",
-              "valueTemplate": "{{results.ai_agent.output.answer}}"
+              "valueTemplate": "{{results.ai_agent.output.answer}}",
+              "type": "string"
             }
           ]
         }

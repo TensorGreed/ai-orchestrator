@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useImperativeHandle, useMemo, useRef, useState, type Ref } from "react";
+import { createContext, useCallback, useContext, useEffect, useId, useImperativeHandle, useMemo, useRef, useState, type Ref } from "react";
 import type {
   LLMProviderConfig,
   NodeErrorConfig,
@@ -7,6 +7,7 @@ import type {
   McpSamplingTraceEntry,
   NodeActivityEvent,
   McpToolPolicyTrace,
+  SetValueType,
   Workflow,
   WorkflowExecutionResult
 } from "@ai-orchestrator/shared";
@@ -19,14 +20,18 @@ import {
   DEFAULT_RETRY_MAX_DELAY_MS,
   MODEL_PROVIDER_CHOICES,
   PROVIDER_CONFIG_NODE_TYPES,
+  SET_VALUE_TYPES,
   WORKFLOW_TOOL_ADAPTER_ID,
   builtInToolProviderOf,
+  filterModeOf,
   httpErrorStatusMode,
+  isSetValueType,
   parseStatusList,
   repairNodeErrorConfig,
   deriveWorkflowToolDescriptor,
   getNodeDefinition,
   nodeEmbeddingModelTarget,
+  filterRejectedView,
   parseIpAllowlist,
   triggerTrustState
 } from "@ai-orchestrator/shared";
@@ -35,11 +40,19 @@ import { isNumberOrTemplateSchema, numberOrTemplateText, parseNumberOrTemplate }
 import type { LiveNodeResult } from "../lib/run-trace";
 import { LiveElapsed } from "./WorkflowCanvasNode";
 import { latestResolvedFields, NodeActivityList, ResolvedFieldsTable } from "./NodeActivityList";
-import { NodeRunInput, NodeRunOutput, RunDataView, RunStatusLine, RunStepBar, type RunNodeResult } from "./NodeRunData";
+import { isInternalKey, NodeRunInput, NodeRunOutput, RunDataView, RunStatusLine, RunStepBar, type RunNodeResult } from "./NodeRunData";
 import { DataPane, PaneSeparator, type PaneMenuItem } from "./InspectorPane";
 import { AdvancedFields, HelpHint, countSet } from "./InspectorDisclosure";
 import { runAfterPointerRelease } from "../lib/pointer-release";
-import { attachmentUse, hasTestData, runStepOrder } from "../lib/run-data";
+import {
+  applyTemplateSuggestion,
+  buildTemplateSuggestions,
+  rankTemplateSuggestions,
+  templateTokenAt,
+  type TemplateSuggestion,
+  type TemplateToken
+} from "../lib/template-suggest";
+import { attachmentUse, hasTestData, loopPassResults, runStepOrder } from "../lib/run-data";
 import type { EditorNode, EditorNodeData, NodeTelemetry } from "../lib/workflow";
 import { NodeTypeIcon } from "./node-icons";
 import { GuardNodeFields, GuardProtectionFields, GuardRevealFields } from "./GuardNodeConfigFields";
@@ -70,6 +83,7 @@ import {
   fetchProviderModels,
   fetchWorkflow,
   fetchWorkflows,
+  ApiError,
   previewExpression,
   testCodeNode,
   testConnector,
@@ -89,6 +103,8 @@ import {
 export interface NodeInputOption {
   id: string;
   label: string;
+  /** The node is on an items-mode Filter's Rejected output: it receives the rejected items as `items`. */
+  rejectedItems?: boolean;
 }
 
 export type InspectorAttachmentHandle = "chat_model" | "memory" | "tool" | "worker" | "guard";
@@ -148,6 +164,8 @@ export interface NodeInspectorProps {
     id?: string;
     name?: string;
     vars?: Record<string, unknown>;
+    /** The workflow's strict templates setting: the editor says a missing value fails the node. */
+    strictTemplates?: boolean;
     /** Project whose MCP tool policy marks discovered tools for the current user. */
     projectId?: string;
   };
@@ -170,6 +188,8 @@ export interface NodeInspectorProps {
   onUnpinNodeOutput?: (nodeId: string) => Promise<void> | void;
   /** 12.2 — admins may set a trigger's input trust; others see it read-only (the API refuses their changes). */
   canSetTriggerTrust?: boolean;
+  /** Set when you may only view the workflow: the node's settings can be read but not saved, and this says why. */
+  readOnlyReason?: string | null;
 }
 
 type NodeConfigModalProps = NodeInspectorProps;
@@ -640,6 +660,20 @@ function readTraceList<T>(output: unknown, key: string): T[] {
   return Array.isArray(list) ? (list as T[]) : [];
 }
 
+const SET_VALUE_TYPE_LABELS: Record<SetValueType, string> = {
+  auto: "Auto (keep the value's type)",
+  string: "String",
+  number: "Number",
+  boolean: "Boolean",
+  json: "JSON (object or list)"
+};
+
+/** A Set field's type choices; "Text (as before)" is offered only on a field saved without a type. */
+function setValueTypeOptions(current: unknown): Array<{ value: string; label: string }> {
+  const options = SET_VALUE_TYPES.map((type) => ({ value: type, label: SET_VALUE_TYPE_LABELS[type] }));
+  return isSetValueType(current) ? options : [{ value: "", label: "Text (as before)" }, ...options];
+}
+
 function ToggleField({
   label,
   checked,
@@ -721,6 +755,142 @@ function HttpErrorStatusFields({
   );
 }
 
+/** What the template fields of the open node can suggest and warn about (provided by the inspector). */
+interface TemplateAssist {
+  suggestions: TemplateSuggestion[];
+  /** The node has input from the last run, so a `{{ }}` the preview cannot fill has no value in that run. */
+  hasRunInput: boolean;
+  /** The workflow's strict templates setting: a `{{ }}` without a value fails the node. */
+  strictTemplates: boolean;
+  /** You may only view this workflow: no suggestions are offered for insertion and no field can be dragged in. */
+  readOnly: boolean;
+}
+
+const TemplateAssistContext = createContext<TemplateAssist | null>(null);
+
+type TextEntryElement = HTMLTextAreaElement | HTMLInputElement;
+
+/**
+ * Autocomplete for the `{{ }}` being typed in a text field of the inspector: a list of the last run's fields under
+ * the field, opened only inside an open `{{`, so plain text and JSON fields behave as before. The arrow keys move,
+ * Enter or Tab inserts the path (closing the braces), Escape closes the list (not the inspector).
+ */
+function useTemplateAutocomplete<T extends TextEntryElement>({
+  value,
+  onChange,
+  label,
+  disabled = false
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  label: string;
+  disabled?: boolean;
+}) {
+  const assist = useContext(TemplateAssistContext);
+  const enabled = Boolean(assist) && !assist?.readOnly && !disabled;
+  const elementRef = useRef<T | null>(null);
+  const [token, setToken] = useState<TemplateToken | null>(null);
+  const [activeOption, setActiveOption] = useState(0);
+  const [dismissedAt, setDismissedAt] = useState<number | null>(null);
+  const pendingCaret = useRef<number | null>(null);
+  const listboxId = useId();
+  const options = useMemo(
+    () => (token && assist && enabled ? rankTemplateSuggestions(assist.suggestions, token.query, 50) : []),
+    [assist, enabled, token]
+  );
+  const open = Boolean(token) && options.length > 0 && dismissedAt !== token?.from;
+  const activeIndex = Math.min(activeOption, Math.max(options.length - 1, 0));
+
+  // After a suggestion is applied, the caret goes after the inserted path once the new text is in the field.
+  useEffect(() => {
+    const caret = pendingCaret.current;
+    const element = elementRef.current;
+    if (caret === null || !element || element.value !== value) return;
+    pendingCaret.current = null;
+    element.setSelectionRange(caret, caret);
+  }, [value]);
+
+  const updateToken = (element: TextEntryElement) => {
+    const caret = element.selectionStart;
+    const next = enabled && caret !== null && caret === element.selectionEnd ? templateTokenAt(element.value, caret) : null;
+    const same = next === token || (next && token && next.from === token.from && next.to === token.to && next.query === token.query);
+    if (same) return;
+    setToken(next);
+    setActiveOption(0);
+    // An Escape closes the list for the `{{` it was pressed in; another `{{` (or none) opens it again.
+    if (next?.from !== token?.from) setDismissedAt(null);
+  };
+
+  const apply = (option: TemplateSuggestion) => {
+    if (!token) return;
+    const applied = applyTemplateSuggestion(value, token, option.path);
+    pendingCaret.current = applied.caret;
+    setToken(null);
+    onChange(applied.text);
+  };
+
+  const inputProps = {
+    ref: (element: T | null) => {
+      elementRef.current = element;
+    },
+    onSelect: (event: React.SyntheticEvent<T>) => updateToken(event.currentTarget),
+    onKeyDown: (event: React.KeyboardEvent<T>) => {
+      if (!open) return;
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const step = event.key === "ArrowDown" ? 1 : -1;
+        setActiveOption((activeIndex + step + options.length) % options.length);
+      } else if (event.key === "Enter" || (event.key === "Tab" && !event.shiftKey)) {
+        event.preventDefault();
+        apply(options[activeIndex]!);
+      } else if (event.key === "Escape") {
+        // Closes the list only: the inspector ignores an Escape that was handled.
+        event.preventDefault();
+        setDismissedAt(token?.from ?? null);
+      }
+    },
+    "aria-autocomplete": enabled ? ("list" as const) : undefined,
+    "aria-controls": open ? listboxId : undefined,
+    "aria-activedescendant": open ? `${listboxId}-${activeIndex}` : undefined
+  };
+
+  const list = open ? (
+    <ul className="template-suggest" role="listbox" id={listboxId} aria-label={`${label}: fields from the last run`} data-testid="template-suggest">
+      {options.map((option, index) => (
+        <li
+          key={option.path}
+          id={`${listboxId}-${index}`}
+          role="option"
+          aria-selected={index === activeIndex}
+          className={index === activeIndex ? "active" : undefined}
+          // Keeps the focus (and the caret) in the field.
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={(event) => {
+            event.preventDefault();
+            apply(option);
+          }}
+        >
+          <code className="template-suggest-path">{option.path}</code>
+          <span className="template-suggest-source">{option.source}</span>
+          {option.detail ? <span className="template-suggest-detail">{option.detail}</span> : null}
+        </li>
+      ))}
+    </ul>
+  ) : null;
+
+  return {
+    inputProps,
+    list,
+    elementRef,
+    /** Call from the field's change handler with the element, after passing the new text on. */
+    onTextChange: updateToken,
+    close: () => {
+      setToken(null);
+      setDismissedAt(null);
+    }
+  };
+}
+
 function TextField({
   label,
   value,
@@ -734,10 +904,21 @@ function TextField({
   placeholder?: string;
   help?: React.ReactNode;
 }) {
+  const autocomplete = useTemplateAutocomplete<HTMLInputElement>({ value, onChange, label });
   return (
     <label className="cfg-field">
       <FieldLabel label={label} help={help} />
-      <input value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
+      <input
+        {...autocomplete.inputProps}
+        value={value}
+        onChange={(event) => {
+          onChange(event.target.value);
+          autocomplete.onTextChange(event.target);
+        }}
+        onBlur={autocomplete.close}
+        placeholder={placeholder}
+      />
+      {autocomplete.list}
     </label>
   );
 }
@@ -898,6 +1079,7 @@ function TextAreaField({
   const [formatError, setFormatError] = useState("");
   const showJsonFormat = !readOnly && (allowJsonFormat ?? shouldOfferJsonFormatting(label));
   const fieldId = useId();
+  const autocomplete = useTemplateAutocomplete<HTMLTextAreaElement>({ value, onChange, label, disabled: readOnly });
 
   useEffect(() => {
     setFormatError("");
@@ -924,12 +1106,18 @@ function TextAreaField({
         )}
       </div>
       <textarea
+        {...autocomplete.inputProps}
         id={fieldId}
         value={value}
-        onChange={(event) => onChange(event.target.value)}
+        onChange={(event) => {
+          onChange(event.target.value);
+          autocomplete.onTextChange(event.target);
+        }}
+        onBlur={autocomplete.close}
         rows={rows}
         readOnly={readOnly}
       />
+      {autocomplete.list}
       {formatError && <div className="cfg-field-error">{formatError}</div>}
     </div>
   );
@@ -1028,6 +1216,9 @@ function stringifyInline(value: unknown): string {
   }
 }
 
+/** The run's optional prompt fields: they render empty without a value, in strict mode too (engine template.ts). */
+const OPTIONAL_RUN_FIELDS = new Set(["system_prompt", "user_prompt", "session_id"]);
+
 function ExpressionField({
   label,
   value,
@@ -1046,8 +1237,10 @@ function ExpressionField({
   previewContext?: ExpressionPreviewContext;
   help?: React.ReactNode;
 }) {
+  const assist = useContext(TemplateAssistContext);
   const [previewText, setPreviewText] = useState("");
   const [previewError, setPreviewError] = useState("");
+  const [missingPaths, setMissingPaths] = useState<string[]>([]);
   const [formatError, setFormatError] = useState("");
   // The scope tip shows under the template field being edited only, not under every field of the node.
   const [editing, setEditing] = useState(false);
@@ -1056,6 +1249,7 @@ function ExpressionField({
   // A preview that only repeats the text typed adds nothing; it shows when the template resolved to something else.
   const showPreview = Boolean(previewError) || (Boolean(previewText) && previewText.trim() !== value.trim());
   const showJsonFormat = shouldOfferJsonFormatting(label);
+  const autocomplete = useTemplateAutocomplete<HTMLTextAreaElement>({ value, onChange, label });
 
   useEffect(() => {
     setFormatError("");
@@ -1063,6 +1257,7 @@ function ExpressionField({
     if (!expression) {
       setPreviewText("");
       setPreviewError("");
+      setMissingPaths([]);
       return;
     }
 
@@ -1078,15 +1273,21 @@ function ExpressionField({
           if (response.ok) {
             setPreviewText(stringifyInline(response.result));
             setPreviewError("");
+            setMissingPaths(
+              [...new Set((response.missing ?? []).map((entry) => entry.body).filter((body) => !OPTIONAL_RUN_FIELDS.has(body)))]
+            );
           } else {
             setPreviewText("");
             setPreviewError(response.error ?? "Preview failed.");
+            setMissingPaths([]);
           }
         })
         .catch((error) => {
           if (cancelled) return;
           setPreviewText("");
-          setPreviewError(error instanceof Error ? error.message : "Preview failed.");
+          // A role that may not preview (a viewer) sees no preview rather than a permission error under every field.
+          setPreviewError(error instanceof ApiError && error.status === 403 ? "" : error instanceof Error ? error.message : "Preview failed.");
+          setMissingPaths([]);
         });
     }, 350);
 
@@ -1100,6 +1301,25 @@ function ExpressionField({
   // so nothing below the field moves between press and release and the click lands where the user pressed.
   const fieldRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Only a run with input for this node can say a value is missing; a missing value fails the node in strict mode.
+  const missingWarning =
+    mode !== "expression" && assist?.hasRunInput && missingPaths.length > 0 ? (
+      <div className="expression-missing" role="status" data-testid="template-missing-warning">
+        <strong>{assist.strictTemplates ? "Fails in a run:" : "Empty in the last run:"}</strong>{" "}
+        {missingPaths.slice(0, 4).map((path, index) => (
+          <span key={path}>
+            {index > 0 ? ", " : null}
+            <code>{`{{${path}}}`}</code>
+          </span>
+        ))}
+        {missingPaths.length > 4 ? ` and ${missingPaths.length - 4} more` : null}
+        {missingPaths.length === 1 ? " has no value" : " have no value"}
+        {assist.strictTemplates
+          ? ", and Strict templates is on, so this node fails."
+          : ", so it renders empty. Check the path, or type {{ to pick one."}
+      </div>
+    ) : null;
 
   return (
     <div
@@ -1134,20 +1354,29 @@ function ExpressionField({
         )}
       </div>
       <textarea
+        {...autocomplete.inputProps}
         aria-label={label}
         value={value}
-        onChange={(event) => onChange(event.target.value)}
-        ref={textareaRef}
+        onChange={(event) => {
+          onChange(event.target.value);
+          autocomplete.onTextChange(event.target);
+        }}
+        ref={(element) => {
+          autocomplete.inputProps.ref(element);
+          textareaRef.current = element;
+        }}
         onFocus={() => setEditing(true)}
-        onBlur={() =>
+        onBlur={() => {
+          autocomplete.close();
           runAfterPointerRelease(() => {
             if (document.activeElement !== textareaRef.current) setEditing(false);
-          })
-        }
+          });
+        }}
         rows={rows}
       />
+      {autocomplete.list}
       {formatError && <div className="cfg-field-error">{formatError}</div>}
-      {focusWithin ? (
+      {focusWithin && !assist?.readOnly ? (
         <div className="expression-suggestions" aria-label={`${label} suggestions`}>
           {EXPRESSION_SUGGESTIONS.map((item) => (
             <button
@@ -1163,12 +1392,14 @@ function ExpressionField({
           ))}
         </div>
       ) : null}
-      {mode === "template" && editing && (
+      {mode === "template" && editing && !assist?.readOnly && (
         <div className="cfg-tip" data-testid="template-scope-tip">
           <code>{"{{field}}"}</code> reads the steps connected straight into this one. For an earlier step, use{" "}
-          <code>{"{{results.<nodeId>.field}}"}</code>.
+          <code>{"{{results.<nodeId>.field}}"}</code>. Type <code>{"{{"}</code> for the fields of the last run, or drag a
+          field from the Input pane.
         </div>
       )}
+      {missingWarning}
       {showPreview && (
         <div className={previewError ? "expression-preview error" : "expression-preview"}>
           <strong>Preview</strong>
@@ -1210,6 +1441,7 @@ export function NodeInspector({
   trace,
   slots,
   onAttach,
+  inputOptions,
   executionResult,
   nodeLabels,
   onNavigateNode,
@@ -1225,7 +1457,8 @@ export function NodeInspector({
   onPinNodeOutput,
   onUnpinNodeOutput,
   controlRef,
-  canSetTriggerTrust = false
+  canSetTriggerTrust = false,
+  readOnlyReason = null
 }: NodeConfigModalProps) {
   const [label, setLabel] = useState(node.data.label);
   const [config, setConfig] = useState<Record<string, unknown>>(asRecord(node.data.config));
@@ -1346,13 +1579,14 @@ export function NodeInspector({
 
   const requestClose = useCallback(
     (next?: () => void) => {
-      if (!isDirtyRef.current) {
+      // A view-only workflow: nothing here can be saved, so there is nothing to confirm.
+      if (!isDirtyRef.current || readOnlyReason) {
         (next ?? closeWithTransition)();
         return;
       }
       setPendingClose({ next });
     },
-    [closeWithTransition]
+    [closeWithTransition, readOnlyReason]
   );
 
   useImperativeHandle(controlRef, () => ({ isDirty: () => isDirtyRef.current, requestClose }), [requestClose]);
@@ -1794,6 +2028,32 @@ export function NodeInspector({
       workflowContext?.vars
     ]
   );
+  // Autocomplete and missing-value warnings for the template fields: the last run's data (or pinned data) by step.
+  const templateAssist = useMemo<TemplateAssist>(() => {
+    const outputs = new Map<string, unknown>();
+    for (const [nodeId, value] of Object.entries(asRecord(pinnedData))) outputs.set(nodeId, value);
+    for (const result of executionResult?.nodeResults ?? []) {
+      if (result.output !== undefined) outputs.set(result.nodeId, result.output);
+    }
+    const stepIds = nodeLabels ? [...nodeLabels.keys()] : [...outputs.keys()];
+    const step = (id: string) => ({ id, label: nodeLabels?.get(id) ?? id, output: outputs.get(id) });
+    return {
+      suggestions: buildTemplateSuggestions({
+        nodeId: node.id,
+        parents: (inputOptions ?? []).map((option) => {
+          const parent = step(option.id);
+          return option.rejectedItems ? { ...parent, output: filterRejectedView(parent.output) } : parent;
+        }),
+        steps: stepIds.map(step),
+        input: currentNodeResult?.input,
+        vars: workflowContext?.vars,
+        isInternalKey
+      }),
+      hasRunInput: currentNodeResult?.input !== undefined,
+      strictTemplates: workflowContext?.strictTemplates === true,
+      readOnly: Boolean(readOnlyReason)
+    };
+  }, [currentNodeResult?.input, executionResult, inputOptions, node.id, nodeLabels, pinnedData, readOnlyReason, workflowContext?.strictTemplates, workflowContext?.vars]);
   const currentNodePinned = hasOwnRecordKey(asRecord(pinnedData), node.id);
   const currentPinnedOutput = currentNodePinned ? asRecord(pinnedData)[node.id] : undefined;
 
@@ -1806,6 +2066,8 @@ export function NodeInspector({
     }
     return undefined;
   }, [executionResult, node.id]);
+  // A Loop body node has one result per pass.
+  const currentPassCount = useMemo(() => loopPassResults(executionResult?.nodeResults ?? [], node.id).length, [executionResult, node.id]);
   // Nodes of a past run that were deleted since cannot be opened, so stepping skips them.
   const nodeExists = useCallback((nodeId: string) => !nodeLabels || nodeLabels.has(nodeId), [nodeLabels]);
   const runSteps = useMemo(() => runStepOrder(executionResult).filter(nodeExists), [executionResult, nodeExists]);
@@ -6341,6 +6603,12 @@ export function NodeInspector({
               step={1}
               onChange={(next) => setConfig((current) => ({ ...current, maxIterations: next }))}
             />
+            <ToggleField
+              label="Collect results"
+              checked={config.collectResults === true}
+              onChange={(next) => setConfig((current) => ({ ...current, collectResults: next }))}
+              help="Adds collected to the Loop's output: one entry per pass, the body node's output (or each body node's output by id when the body has several). Read it after the loop as {{results.<loop id>.collected}}."
+            />
           </>
         );
       case "merge_node":
@@ -6353,9 +6621,16 @@ export function NodeInspector({
               options={[
                 { value: "append", label: "Append (flat merge)" },
                 { value: "combine_by_key", label: "Combine by Key" },
-                { value: "choose_branch", label: "Choose First Success Branch" }
+                { value: "choose_branch", label: "Choose First Success Branch" },
+                { value: "collect_loop_passes", label: "Collect loop passes" }
               ]}
             />
+            {toStringValue(config.mode, "append") === "collect_loop_passes" && (
+              <div className="cfg-tip" data-testid="merge-collect-tip">
+                Connect a Loop body node into this Merge: its output is <code>items</code>, every pass of that node in order,
+                and <code>count</code>. A node outside a loop body adds its output once.
+              </div>
+            )}
             {toStringValue(config.mode, "append") === "combine_by_key" && (
               <TextField
                 label="Combine Key"
@@ -6693,8 +6968,10 @@ export function NodeInspector({
                       }
                       placeholder="customerId"
                     />
-                    <TextAreaField
+                    <ExpressionField
                       label="Value Template"
+                      mode="template"
+                      previewContext={expressionPreviewContext}
                       value={toStringValue(assignment.valueTemplate)}
                       onChange={(next) =>
                         setConfig((current) => {
@@ -6714,6 +6991,27 @@ export function NodeInspector({
                       rows={3}
                     />
                   </div>
+                  <SelectField
+                    label="Type"
+                    value={typeof assignment.type === "string" ? assignment.type : ""}
+                    onChange={(next) =>
+                      setConfig((current) => {
+                        const currentAssignments = Array.isArray(current.assignments)
+                          ? current.assignments.map((item) => asRecord(item))
+                          : [];
+                        currentAssignments[index] = {
+                          ...asRecord(currentAssignments[index]),
+                          type: next
+                        };
+                        return {
+                          ...current,
+                          assignments: currentAssignments
+                        };
+                      })
+                    }
+                    options={setValueTypeOptions(assignment.type)}
+                    help="Auto keeps the type of a value that is one {{ }} (a number, true or false, a list or an object); other values are text. String, Number, Boolean and JSON convert the value, and a value that cannot be converted fails the node. A field saved before types existed is Text (as before): its value becomes text, and text that is a JSON object or list is parsed."
+                  />
                   <div className="cfg-inline-actions">
                     <button
                       type="button"
@@ -6747,7 +7045,8 @@ export function NodeInspector({
                         : [];
                       currentAssignments.push({
                         key: "",
-                        valueTemplate: ""
+                        valueTemplate: "",
+                        type: "auto"
                       });
                       return {
                         ...current,
@@ -7584,8 +7883,35 @@ export function NodeInspector({
           { value: "is_not_empty", label: "Is Not Empty" },
           { value: "regex", label: "Matches Regex" }
         ];
+        const filterMode = filterModeOf(config);
         return (
           <>
+            <SelectField
+              label="Mode"
+              value={filterMode}
+              onChange={(next) => setConfig((current) => ({ ...current, mode: next }))}
+              options={[
+                { value: "items", label: "Keep matching items of a list" },
+                { value: "gate", label: "Pass or stop (judge the whole input)" }
+              ]}
+              help="Keep matching items: each item of a list is checked; the Kept output runs with the matches and the Rejected output with the others. Pass or stop: the whole input is checked once and goes to the Pass or the Stopped output; a Filter saved before modes existed works this way."
+            />
+            {filterMode === "items" && (
+              <>
+                <TextField
+                  label="Items from"
+                  value={toStringValue(config.itemsFrom)}
+                  onChange={(next) => setConfig((current) => ({ ...current, itemsFrom: next }))}
+                  placeholder="first list in the input"
+                  help="The list to filter, as a path such as body.items or products. Empty: the first list in the input (an input without a list is filtered as one item)."
+                />
+                <div className="cfg-tip" data-testid="filter-items-tip">
+                  A condition's field is read from each item (<code>price</code>, or <code>item.price</code>), and a value can
+                  use <code>{"{{item.field}}"}</code>. The Kept output runs with the matching items (<code>items</code>), and the
+                  Rejected output, when connected, with the others as its <code>items</code>.
+                </div>
+              </>
+            )}
             <SelectField
               label="Combine With"
               value={toStringValue(config.combineWith, "AND").toUpperCase()}
@@ -10019,6 +10345,7 @@ export function NodeInspector({
         hasOwnTestData={hasTestData(node.data.config)}
         onOpenNode={onNavigateNode}
         nodeExists={nodeExists}
+        draggableFields={!readOnlyReason}
         before={
           resolvedThisRun ? (
             <details className="run-data-context insp-resolved">
@@ -10259,7 +10586,7 @@ export function NodeInspector({
   // The node's run status shows once, in the header. Attached nodes do not run as a step of their own.
   const headerStatus =
     showRuntimeInspection && currentRunResult && !attachmentUse(currentRunResult) ? (
-      <RunStatusLine result={currentRunResult} title={runLabel} />
+      <RunStatusLine result={currentRunResult} title={runLabel} passCount={currentPassCount} />
     ) : null;
 
   const tabBar = (
@@ -10385,7 +10712,7 @@ export function NodeInspector({
   ].join(" ");
 
   return (
-    <>
+    <TemplateAssistContext.Provider value={templateAssist}>
     {/* The dimmed page behind the panel: a click closes the inspector (unsaved edits are confirmed first). */}
     <div className={closing ? "insp-scrim closing" : "insp-scrim"} aria-hidden="true" data-testid="insp-scrim" onClick={() => requestClose()} />
     <aside
@@ -10446,9 +10773,12 @@ export function NodeInspector({
             <path d="M6 3v10M10 3v10" stroke="currentColor" />
           </svg>
         </button>
-        <button className="insp-btn accent insp-run" type="button" onClick={onExecuteStep} title="Run this node with the data it received">
-          Run node
-        </button>
+        {/* Running one node is an editor option (builders and admins); a read-only inspector does not offer it. */}
+        {readOnlyReason ? null : (
+          <button className="insp-btn accent insp-run" type="button" onClick={onExecuteStep} title="Run this node with the data it received">
+            Run node
+          </button>
+        )}
         <button type="button" className="insp-close" aria-label="Close inspector" onClick={() => requestClose()}>
           ×
         </button>
@@ -10504,7 +10834,14 @@ export function NodeInspector({
         <button type="button" className="insp-btn" onClick={() => requestClose()}>
           Cancel
         </button>
-        <button type="button" className="insp-btn primary" onClick={handleSave} data-dirty={isDirty ? "true" : undefined}>
+        <button
+          type="button"
+          className="insp-btn primary"
+          onClick={readOnlyReason ? undefined : handleSave}
+          aria-disabled={readOnlyReason ? true : undefined}
+          title={readOnlyReason ?? undefined}
+          data-dirty={isDirty && !readOnlyReason ? "true" : undefined}
+        >
           Save changes
           {isDirty ? <span className="insp-dirty" aria-hidden="true" /> : null}
         </button>
@@ -10538,7 +10875,7 @@ export function NodeInspector({
         </div>
       ) : null}
     </aside>
-    </>
+    </TemplateAssistContext.Provider>
   );
 }
 
