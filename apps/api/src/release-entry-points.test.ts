@@ -311,7 +311,8 @@ describe("every run names its release channel", () => {
     // Eval run, executions replay (for those who may edit), replay sandbox.
     expect(channels.filter((value) => value === '"draft"').length).toBe(3);
     const computed = [...new Set(channels.filter((value) => value !== '"draft"' && value !== '"production"'))].sort();
-    expect(computed).toEqual(['executeChannel.channel', 'isTestRoute ? "draft" : "production"', 'mayEdit ? "draft" : "production"', 'retryChannel', 'state.releaseChannel === "production" ? "production" : "draft"'].sort());
+    // `channel`: an error workflow's run takes the failed run's channel.
+    expect(computed).toEqual(['channel', 'executeChannel.channel', 'isTestRoute ? "draft" : "production"', 'mayEdit ? "draft" : "production"', 'retryChannel', 'state.releaseChannel === "production" ? "production" : "draft"'].sort());
   });
 });
 

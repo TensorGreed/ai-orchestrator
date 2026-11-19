@@ -3010,7 +3010,8 @@ export async function createApp(
                     ...(sameProject && input.policyActor ? { policyActor: input.policyActor } : {}),
                     ...(input.sessionOwner ? { sessionOwner: input.sessionOwner } : {}),
                     ...(payload.executionId ? { errorSourceExecutionId: payload.executionId } : {}),
-                    channel,
+                    // As the failed run ran: a production failure runs the error workflow's published version.
+                    channel: channel,
                     executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS,
                     // v74 — the failed run was sensitive work: its error is that run's content.
                     ...(payload.sensitive === true ? { sensitiveInput: true } : {})

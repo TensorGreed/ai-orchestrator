@@ -219,7 +219,7 @@ describe("run and node spans", () => {
     expect(t.spans().filter((span) => t.parentOf(span) === llm.spanContext().spanId)).toHaveLength(0);
   });
 
-  it("records a node that continues on error as ERROR while the run is partial", async () => {
+  it("records a node that continues on error as ERROR while the run, which handled it, succeeds", async () => {
     const t = tracing();
     const wf = workflow(
       "cont",
@@ -227,7 +227,7 @@ describe("run and node spans", () => {
       [edge("in", "stop"), edge("stop", "out")]
     );
     const result = await t.run(wf, () => finalAnswer("x"));
-    expect(result.status).toBe("partial");
+    expect(result.status).toBe("success");
     expect(t.one("l2m.node stop_and_error").status.code).toBe(SPAN_STATUS_ERROR);
     expect(t.one("l2m.node output").attributes["l2m.node.status"]).toBe("success");
     expect(t.one("invoke_workflow Flow cont").status.code).toBe(SPAN_STATUS_UNSET);
