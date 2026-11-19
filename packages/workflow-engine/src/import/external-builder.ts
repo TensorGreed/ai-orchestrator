@@ -1182,6 +1182,12 @@ const setNode: NodeHandler = (source, ctx, scope) => {
   const params = source.parameters;
   const reasons: string[] = [];
   const assignments: Array<{ key: string; valueTemplate: string; type: SetValueType }> = [];
+  // With the source's "ignore conversion errors", a value that does not fit its type is kept rather than failing.
+  const lenient = toRecord(params.options).ignoreConversionErrors === true;
+  const typeFor = (sourceType: unknown): SetValueType => {
+    const type = setValueTypeFor(sourceType);
+    return lenient && (type === "number" || type === "boolean" || type === "json") ? "auto" : type;
+  };
 
   const mode = asString(params.mode, "manual");
   if (mode === "raw") {
@@ -1217,7 +1223,7 @@ const setNode: NodeHandler = (source, ctx, scope) => {
           : value === undefined || value === null
             ? ""
             : JSON.stringify(value);
-      assignments.push({ key, valueTemplate, type: setValueTypeFor(assignment.type) });
+      assignments.push({ key, valueTemplate, type: typeFor(assignment.type) });
     }
 
     const legacy = toRecord(params.values);
@@ -1226,7 +1232,7 @@ const setNode: NodeHandler = (source, ctx, scope) => {
         const assignment = toRecord(entry);
         const key = asString(assignment.name).trim();
         if (!key) continue;
-        assignments.push({ key, valueTemplate: tpl(assignment.value, ctx, scope, `values.${type}[${index}].value`), type: setValueTypeFor(type) });
+        assignments.push({ key, valueTemplate: tpl(assignment.value, ctx, scope, `values.${type}[${index}].value`), type: typeFor(type) });
       }
     }
   }
@@ -1495,10 +1501,11 @@ const filterNode: NodeHandler = (source, ctx, scope) => {
     reasons.push("The filter had no conditions; it passes everything through.");
   }
 
-  // The source filters items: keep the matching items of the first list in the input (Items from is left empty).
+  // An imported node's output is one source item (`$json.x` became `results.<previous node>.x`), so the source's
+  // per-item filter is the pass-or-stop mode on that item: kept items reach the pass output with their fields, as
+  // later nodes' translated references expect. Items mode would filter a list inside the item instead.
   const node = baseNode(source, scope, "filter_node", {
-    mode: "items",
-    itemsFrom: "",
+    mode: "gate",
     conditions,
     combineWith: parsed?.combinator === "or" ? "OR" : "AND",
     passMode: "pass"
@@ -1917,7 +1924,7 @@ const REGISTRATIONS: readonly HandlerRegistration[] = [
   { sourceType: `${BASE}splitOut`, targetType: "split_out_node", category: "core", notes: "Only the first field to split out is kept.", handler: splitOutNode },
   { sourceType: `${BASE}itemLists`, targetType: "split_out_node", category: "core", notes: "Legacy item list node treated as split out.", handler: splitOutNode },
   { sourceType: `${BASE}aggregate`, targetType: "aggregate_node", category: "core", notes: "Collecting values into an array is approximated with the concatenate operation.", handler: aggregateNode },
-  { sourceType: `${BASE}filter`, targetType: "filter_node", category: "core", notes: "Keeps the matching items of the first list in its input (set Items from to pick another list). Field-path conditions map directly; expression conditions need review.", handler: filterNode },
+  { sourceType: `${BASE}filter`, targetType: "filter_node", category: "core", notes: "Maps to Pass or stop mode: an imported node's output is one item, which passes or is filtered out. Field-path conditions map directly; expression conditions need review.", handler: filterNode },
   { sourceType: `${BASE}sort`, targetType: "sort_node", category: "core", notes: "Only the first sort field is kept; custom sort code needs review.", handler: sortNode },
   { sourceType: `${BASE}limit`, targetType: "limit_node", category: "core", notes: "", handler: limitNode },
   { sourceType: `${BASE}wait`, targetType: "wait_node", category: "core", notes: "Timer, webhook and specific-time resumes are supported; form resume is approximated as a timer.", handler: waitNode },

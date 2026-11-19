@@ -233,6 +233,14 @@ export function runStepOrder(result: WorkflowExecutionResult | null | undefined)
     .filter((nodeId, index, all) => all.indexOf(nodeId) === index);
 }
 
+/**
+ * A Loop body node's passes: its results whose input carries the pass's `_loop_index` (the engine records one result
+ * per pass). Results of the same node from anything else (a run that went on after a resume) are not passes.
+ */
+export function loopPassResults(results: readonly NodeExecutionResult[], nodeId: string): NodeExecutionResult[] {
+  return results.filter((entry) => entry.nodeId === nodeId && isRecord(entry.input) && typeof entry.input._loop_index === "number");
+}
+
 export interface CanvasRunPreview {
   /** "success · 1 item · 28 ms" style summary. */
   meta?: string;

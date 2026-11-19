@@ -2113,6 +2113,22 @@ function mergeParentOutputs(parentOutputs: Record<string, unknown>): Record<stri
   return merged;
 }
 
+/** Template roots a Filter item never shadows, and the only paths a Filter condition in items mode reads outside its item. */
+const FILTER_ITEM_RESERVED_ROOTS: ReadonlySet<string> = new Set([
+  "results",
+  "parent_outputs",
+  "vars",
+  "$vars",
+  "webhook",
+  "workflow",
+  "$workflow",
+  "execution",
+  "$execution",
+  "item",
+  "_item_index",
+  "_loop_index"
+]);
+
 function looksLikeJson(input: string): boolean {
   const trimmed = input.trim();
   return (
@@ -5008,11 +5024,15 @@ async function executeNodeHandler(
 
         let actual: unknown;
         if (item) {
-          // An item's field (`price`), or a path from the item (`item.price`, `$json.price`); else the node's input.
-          const itemPath = field.trim().replace(/^(?:item|\$json)(?:\.|$)/, "");
-          if (!itemPath && /^(?:item|\$json)$/.test(field.trim())) actual = item.value;
-          else if (isRecordValue(item.value)) actual = getValueByPath(item.value, itemPath);
-          if (actual === undefined) actual = getValueByPath(scope, field);
+          // An item's field (`price`), or a path from the item (`item.price`, `$json.price`). Only a path that starts at
+          // a template root (`results.`, `vars.`, `webhook.`…) or a run value (a Loop's item variable) reads outside the
+          // item: a field the item lacks is missing, never a same-named field of an upstream node's output.
+          const trimmedField = field.trim();
+          const head = trimmedField.split(".")[0] ?? "";
+          if (/^(?:item|\$json)$/.test(trimmedField)) actual = item.value;
+          else if (/^(?:item|\$json)\./.test(trimmedField)) actual = isRecordValue(item.value) ? getValueByPath(item.value, trimmedField.replace(/^(?:item|\$json)\./, "")) : undefined;
+          else if (isRecordValue(item.value) && Object.prototype.hasOwnProperty.call(item.value, head)) actual = getValueByPath(item.value, trimmedField);
+          else if (FILTER_ITEM_RESERVED_ROOTS.has(head) || Object.prototype.hasOwnProperty.call(context.globals, head)) actual = getValueByPath(scope, trimmedField);
         } else {
           actual = readData(templateData, field);
           if (actual === undefined) actual = getValueByPath(templateData, field);
@@ -5077,7 +5097,9 @@ async function executeNodeHandler(
       const kept: unknown[] = [];
       const rejected: unknown[] = [];
       for (const [index, value] of list.entries()) {
-        const scope = { ...templateData, ...(isRecordValue(value) ? value : {}), item: value, _item_index: index };
+        // The item's fields are in scope for condition values, without replacing a template root (`results`, `vars`…).
+        const itemFields = isRecordValue(value) ? Object.fromEntries(Object.entries(value).filter(([key]) => !FILTER_ITEM_RESERVED_ROOTS.has(key))) : {};
+        const scope = { ...templateData, ...itemFields, item: value, _item_index: index };
         (matches(scope, { value }) ? kept : rejected).push(value);
       }
       return {
@@ -10500,9 +10522,9 @@ async function executeWorkflowRun(
           items: loopItems,
           count: loopItems.length
         };
-        // Collect results: one entry per pass (the body node's output, or the pass's outputs by body node id).
+        // Collect results: `collected`, one entry per pass (the body node's output, or the pass's outputs by body node id).
         if (loopCollectsResults(nodeConfig)) {
-          output.results = loopItems.map((pass) => loopPassResult(pass.outputs, downstreamNodeIds));
+          output.collected = loopItems.map((pass) => loopPassResult(pass.outputs, downstreamNodeIds));
         }
 
         nodeOutputs.set(node.id, output);

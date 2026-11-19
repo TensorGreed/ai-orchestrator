@@ -939,6 +939,20 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
         });
       }
 
+      if (config.mode === "collect_loop_passes") {
+        const parentIds = workflow.edges.filter((edge) => edge.target === node.id && isExecutionEdge(edge)).map((edge) => edge.source);
+        const isLoopBody = (id: string) =>
+          workflow.edges.some((edge) => edge.target === id && isExecutionEdge(edge) && workflow.nodes.find((entry) => entry.id === edge.source)?.type === "loop_node");
+        if (!parentIds.some(isLoopBody)) {
+          issues.push({
+            code: "merge_collect_without_loop_body",
+            message: "This Merge collects loop passes, but no node connected into it runs inside a Loop, so it collects each input once. Connect a node that follows a Loop / ForEach node directly.",
+            nodeId: node.id,
+            severity: "warning"
+          });
+        }
+      }
+
       // Collecting a loop body's passes needs only that body node connected in.
       if (config.mode !== "collect_loop_passes" && (incomingExecutionCount.get(node.id) ?? 0) < 2) {
         issues.push({

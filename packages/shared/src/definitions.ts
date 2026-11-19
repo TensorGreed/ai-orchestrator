@@ -107,7 +107,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
         inputKey: { type: "string" },
         itemVariable: { type: "string" },
         maxIterations: { type: "number" },
-        // Adds `results` to the output: one entry per pass (absent on Loops saved before it existed: off).
+        // Adds `collected` to the output: one entry per pass (absent on Loops saved before it existed: off).
         collectResults: { type: "boolean" }
       },
       required: ["inputKey", "itemVariable"]

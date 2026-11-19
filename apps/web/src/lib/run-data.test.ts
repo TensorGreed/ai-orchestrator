@@ -6,6 +6,7 @@ import {
   compactOutputPreview,
   formatRunDuration,
   hasTestData,
+  loopPassResults,
   outputItemCount,
   runPromptInput,
   runStepOrder,
@@ -157,7 +158,14 @@ describe("a Loop body node's passes on the canvas", () => {
     status,
     startedAt: T0,
     durationMs: 10,
+    input: { _loop_index: n - 1 },
     output
+  });
+
+  it("counts as passes only results recorded inside a loop", () => {
+    const passes = [pass(1, {}), pass(2, {})];
+    const other = { nodeId: "body", status: "success" as const, startedAt: T0, input: {}, output: {} };
+    expect(loopPassResults([...passes, other, { ...passes[0]!, nodeId: "x" }], "body")).toEqual(passes);
   });
 
   it("counts every pass and the items of all of them, not only the last pass", () => {

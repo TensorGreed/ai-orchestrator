@@ -92,8 +92,11 @@ items, and four nodes work on such lists.
   `rejected_count`, `total` and `items_from` (the list's path). **Items from** names the list (`body.items`, or
   <span v-pre>`{{ body.items }}`</span>); empty means the first list in the input, top-level fields before nested
   ones, up to three levels deep. An input without a list is filtered as one item. A condition's field is read from
-  the item (`price`, `item.price` or `$json.price`; a field the item does not have is read from the node's input),
-  and a condition's value can use <span v-pre>`{{item.field}}`</span>. The editor draws a Filter with one output,
+  the item (`price`, `item.price` or `$json.price`). A field the item does not have is missing; it is not read from
+  the node's input, except a path that starts at a template root (`results.<id>.…`, `vars.…`, `webhook.…`) or at a
+  run value such as a Loop's item variable. A condition's value can use <span v-pre>`{{item.field}}`</span> and the
+  item's fields, which never replace `results`, `vars` and the other roots. Inside a loop body, `item` is the
+  Filter's item: give the Loop another **Item variable** (`product`) to read the loop's item there. The editor draws a Filter with one output,
   which always runs. In workflow JSON (and in imported workflows), an edge from the `pass` handle runs when at least
   one item matches and one from the `filtered` handle when none does.
 - **Pass or stop** (`mode: "gate"`). The conditions judge the whole input once: the output is the input plus
@@ -109,7 +112,7 @@ Each field has a **Type** (`type`):
 | `string` | Text. An object or list is written as JSON text. |
 | `number` | A number. Text that is not a number fails the node. |
 | `boolean` | `true` or `false` (also from `yes`/`no`, `1`/`0`, `on`/`off`). Other text fails the node. |
-| `json` | Parsed JSON, or the value of one <span v-pre>`{{ }}`</span> as it is. Text that is not JSON fails the node. |
+| `json` | Text is parsed as JSON; a value of one <span v-pre>`{{ }}`</span> that is not text (a number, list or object) is kept as it is. Text that is not JSON fails the node. |
 
 An empty value is `null` for `number`, `boolean` and `json`. A field saved before types existed has no type and is
 shown as **Text (as before)**: its value becomes text, and text that is a JSON object or list is parsed, so
@@ -117,7 +120,7 @@ shown as **Text (as before)**: its value becomes text, and text that is a JSON o
 
 ### Loop and Merge
 
-See [Loops](/runtime/templates-and-expressions#loops): **Collect results** on a Loop adds `results` (one entry per
+See [Loops](/runtime/templates-and-expressions#loops): **Collect results** on a Loop adds `collected` (one entry per
 pass), and a Merge in **Collect loop passes** mode (`collect_loop_passes`) gathers every pass of the loop body node
 connected into it. That Merge needs only the one incoming edge.
 

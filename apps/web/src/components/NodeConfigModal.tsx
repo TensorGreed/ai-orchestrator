@@ -43,7 +43,7 @@ import { NodeRunInput, NodeRunOutput, RunDataView, RunStatusLine, RunStepBar, ty
 import { DataPane, PaneSeparator, type PaneMenuItem } from "./InspectorPane";
 import { AdvancedFields, HelpHint, countSet } from "./InspectorDisclosure";
 import { runAfterPointerRelease } from "../lib/pointer-release";
-import { attachmentUse, hasTestData, runStepOrder } from "../lib/run-data";
+import { attachmentUse, hasTestData, loopPassResults, runStepOrder } from "../lib/run-data";
 import type { EditorNode, EditorNodeData, NodeTelemetry } from "../lib/workflow";
 import { NodeTypeIcon } from "./node-icons";
 import { GuardNodeFields, GuardProtectionFields, GuardRevealFields } from "./GuardNodeConfigFields";
@@ -1825,7 +1825,7 @@ export function NodeInspector({
     return undefined;
   }, [executionResult, node.id]);
   // A Loop body node has one result per pass.
-  const currentPassCount = useMemo(() => (executionResult?.nodeResults ?? []).filter((entry) => entry.nodeId === node.id).length, [executionResult, node.id]);
+  const currentPassCount = useMemo(() => loopPassResults(executionResult?.nodeResults ?? [], node.id).length, [executionResult, node.id]);
   // Nodes of a past run that were deleted since cannot be opened, so stepping skips them.
   const nodeExists = useCallback((nodeId: string) => !nodeLabels || nodeLabels.has(nodeId), [nodeLabels]);
   const runSteps = useMemo(() => runStepOrder(executionResult).filter(nodeExists), [executionResult, nodeExists]);
@@ -6365,7 +6365,7 @@ export function NodeInspector({
               label="Collect results"
               checked={config.collectResults === true}
               onChange={(next) => setConfig((current) => ({ ...current, collectResults: next }))}
-              help="Adds results to the Loop's output: one entry per pass, the body node's output (or each body node's output by id when the body has several). Read it after the loop as {{results.<loop id>.results}}."
+              help="Adds collected to the Loop's output: one entry per pass, the body node's output (or each body node's output by id when the body has several). Read it after the loop as {{results.<loop id>.collected}}."
             />
           </>
         );

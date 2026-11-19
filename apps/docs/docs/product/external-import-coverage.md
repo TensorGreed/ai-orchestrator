@@ -30,7 +30,7 @@
 | `splitOut` | `split_out_node` | Only the first field to split out is kept. |
 | `itemLists` | `split_out_node` | Legacy item list node treated as split out. |
 | `aggregate` | `aggregate_node` | Collecting values into an array is approximated with the concatenate operation. |
-| `filter` | `filter_node` | Keeps the matching items of the first list in its input (set Items from to pick another list). Field-path conditions map directly; expression conditions need review. |
+| `filter` | `filter_node` | Maps to Pass or stop mode: an imported node's output is one item, which passes or is filtered out. Field-path conditions map directly; expression conditions need review. |
 | `sort` | `sort_node` | Only the first sort field is kept; custom sort code needs review. |
 | `limit` | `limit_node` | Direct mapping. |
 | `wait` | `wait_node` | Timer, webhook and specific-time resumes are supported; form resume is approximated as a timer. |

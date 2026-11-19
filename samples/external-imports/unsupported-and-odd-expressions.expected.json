@@ -293,8 +293,7 @@
           "y": 0
         },
         "config": {
-          "mode": "items",
-          "itemsFrom": "",
+          "mode": "gate",
           "conditions": [
             {
               "field": "results.summarise.Rating",

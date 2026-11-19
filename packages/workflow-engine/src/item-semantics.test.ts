@@ -137,6 +137,15 @@ describe("Set node value types", () => {
     });
   });
 
+  it("json parses text from one {{ }} and keeps other values as they are", async () => {
+    const result = await runSet([
+      { key: "fromText", valueTemplate: "{{label}}", type: "json" },
+      { key: "obj", valueTemplate: "{{customer}}", type: "json" }
+    ]);
+    expect(result.status).toBe("error");
+    expect(errorOf(result, "set")).toMatch(/'fromText'.*JSON/);
+  });
+
   it("fails the node when a value cannot be converted, naming the field", async () => {
     const notNumber = await runSet([{ key: "total", valueTemplate: "{{label}}", type: "number" }]);
     expect(notNumber.status).toBe("error");
@@ -229,6 +238,45 @@ describe("Filter node items mode", () => {
     expect(outputOf(result, "filter").items).toEqual([items[1]]);
   });
 
+  it("does not read a field the item lacks from the node's input", async () => {
+    // The input's own `status` (like an HTTP response's) is not the item's.
+    const result = await executeWorkflow(
+      {
+        workflow: chain([
+          source({ status: 200, body: { items: [{ status: "active" }, { name: "b" }] } }),
+          node("filter", "filter_node", { mode: "items", conditions: [{ field: "status", operator: "eq", value: "200" }] })
+        ])
+      },
+      deps()
+    );
+    expect(outputOf(result, "filter")).toMatchObject({ items: [], rejected_count: 2 });
+  });
+
+  it("an item's fields never replace results or vars in a condition value", async () => {
+    const items = [{ id: 1, results: "shadow", vars: "shadow" }, { id: 2, results: "shadow" }];
+    const result = await executeWorkflow(
+      {
+        workflow: chain([
+          source({ want: 2 }, "cfg"),
+          source({ items }),
+          node("filter", "filter_node", { mode: "items", conditions: [{ field: "id", operator: "eq", value: "{{results.cfg.want}}" }] })
+        ])
+      },
+      deps()
+    );
+    expect(outputOf(result, "filter").items).toEqual([items[1]]);
+  });
+
+  it("inside a loop body, reads the loop's item variable outside the Filter's item", async () => {
+    const workflow = loopWorkflow({ collectResults: true }, [
+      node("bodyFilter", "filter_node", { mode: "items", itemsFrom: "product.tags", conditions: [{ field: "item", operator: "eq", value: "{{product.name}}" }] })
+    ]);
+    workflow.nodes[0] = source({ products: [{ name: "a", tags: ["a", "b"] }, { name: "c", tags: ["x"] }] });
+    const result = await executeWorkflow({ workflow }, deps());
+    expect(result.status).toBe("success");
+    expect((outputOf(result, "loop").collected as Array<Record<string, unknown>>).map((pass) => pass.items)).toEqual([["a"], []]);
+  });
+
   it("takes the filtered branch when no item matches", async () => {
     const workflow = chain([source({ products: PRODUCTS }), node("filter", "filter_node", { mode: "items", conditions: priceAbove("500") })]);
     workflow.nodes.push(node("kept", "noop_node", {}), node("none", "noop_node", {}));
@@ -295,12 +343,12 @@ function loopWorkflow(loopConfig: Record<string, unknown>, bodies: WorkflowNode[
 }
 
 describe("Loop collect results", () => {
-  it("adds results, one body output per pass", async () => {
+  it("adds collected, one body output per pass", async () => {
     const result = await executeWorkflow({ workflow: loopWorkflow({ collectResults: true }) }, deps());
     expect(result.status).toBe("success");
     const output = outputOf(result, "loop");
     expect(output.count).toBe(3);
-    expect(output.results).toEqual([
+    expect(output.collected).toEqual([
       { name: "pen", pricey: false },
       { name: "lamp", pricey: true },
       { name: "desk", pricey: true }
@@ -313,7 +361,7 @@ describe("Loop collect results", () => {
       node("b", "set_node", { assignments: [{ key: "p", valueTemplate: "{{product.price}}", type: "auto" }] })
     ];
     const result = await executeWorkflow({ workflow: loopWorkflow({ collectResults: true }, bodies) }, deps());
-    expect((outputOf(result, "loop").results as unknown[])[1]).toEqual({ a: { n: "lamp" }, b: { p: 30 } });
+    expect((outputOf(result, "loop").collected as unknown[])[1]).toEqual({ a: { n: "lamp" }, b: { p: 30 } });
   });
 
   it("a Loop without collectResults keeps its old output", async () => {
@@ -360,5 +408,12 @@ describe("Merge collect loop passes", () => {
     const codes = validateWorkflowGraph(collectWorkflow()).issues.map((issue) => issue.code);
     expect(codes).not.toContain("merge_requires_multiple_parents");
     expect(codes).not.toContain("invalid_merge_mode");
+    expect(codes).not.toContain("merge_collect_without_loop_body");
+  });
+
+  it("warns when no node connected into it runs inside a loop", () => {
+    const workflow = chain([source({ a: 1 }), node("merge", "merge_node", { mode: "collect_loop_passes" })]);
+    const issue = validateWorkflowGraph(workflow).issues.find((entry) => entry.code === "merge_collect_without_loop_body");
+    expect(issue?.severity).toBe("warning");
   });
 });

@@ -139,7 +139,7 @@ test.describe("lists of items", () => {
         { name: "lamp", expensive: false },
         { name: "desk", expensive: true }
       ];
-      expect(outputOf("loop")).toMatchObject({ count: 2, results: rows });
+      expect(outputOf("loop")).toMatchObject({ count: 2, collected: rows });
       expect(outputOf("merge")).toEqual({ items: rows, count: 2 });
 
       // The body node's Run data says it shows the last pass.

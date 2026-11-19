@@ -48,7 +48,7 @@ export function isMergeMode(value: unknown): value is MergeMode {
   return typeof value === "string" && (MERGE_MODES as readonly string[]).includes(value);
 }
 
-/** True when a Loop node adds `results` (one entry per pass) to its output. Off for Loops saved before it existed. */
+/** True when a Loop node adds `collected` (one entry per pass) to its output. Off for Loops saved before it existed. */
 export function loopCollectsResults(config: Record<string, unknown>): boolean {
   return config.collectResults === true;
 }
