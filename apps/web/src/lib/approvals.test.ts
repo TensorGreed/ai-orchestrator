@@ -8,7 +8,8 @@ import {
   decisionOutcome,
   initialFieldDrafts,
   matchesApprovalFilter,
-  relativeTime
+  relativeTime,
+  waitForNextRunRequest
 } from "./approvals";
 
 const fields: ApprovalEditableField[] = [
@@ -99,5 +100,38 @@ describe("approvals helpers", () => {
     expect(matchesApprovalFilter(tool, "DELETE")).toBe(true);
     expect(matchesApprovalFilter(tool, "refunds")).toBe(true);
     expect(matchesApprovalFilter(tool, "nothing")).toBe(false);
+  });
+});
+
+describe("waitForNextRunRequest", () => {
+  const base = { executionId: "ex-1", decidedRequestId: "req-1", stopped: () => false, sleep: async () => undefined, delays: [1, 1, 1, 1] };
+
+  it("stops as soon as the run asks again", async () => {
+    let checks = 0;
+    const outcome = await waitForNextRunRequest({ ...base, hasOtherPendingRequest: async () => ++checks === 2, runStatus: async () => "waiting_approval" });
+    expect(outcome).toBe("request");
+    expect(checks).toBe(2);
+  });
+
+  it("stops when the run ended, and gives up after the last delay or when stopped", async () => {
+    expect(await waitForNextRunRequest({ ...base, hasOtherPendingRequest: async () => false, runStatus: async () => "partial" })).toBe("ended");
+    let statusChecks = 0;
+    expect(await waitForNextRunRequest({ ...base, hasOtherPendingRequest: async () => false, runStatus: async () => (statusChecks++, "running") })).toBe("gave_up");
+    expect(statusChecks).toBe(4);
+    expect(await waitForNextRunRequest({ ...base, stopped: () => true, hasOtherPendingRequest: async () => true, runStatus: async () => null })).toBe("gave_up");
+  });
+
+  it("retries after a failed check", async () => {
+    let calls = 0;
+    const outcome = await waitForNextRunRequest({
+      ...base,
+      hasOtherPendingRequest: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("offline");
+        return true;
+      },
+      runStatus: async () => null
+    });
+    expect(outcome).toBe("request");
   });
 });

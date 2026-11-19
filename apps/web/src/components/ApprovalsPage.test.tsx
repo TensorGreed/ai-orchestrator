@@ -7,7 +7,7 @@ import { ApprovalsPage, loopPassLabel } from "./ApprovalsPage";
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
-  return { ...actual, listApprovals: vi.fn(), approveApproval: vi.fn(), rejectApproval: vi.fn() };
+  return { ...actual, listApprovals: vi.fn(), approveApproval: vi.fn(), rejectApproval: vi.fn(), fetchExecutionById: vi.fn() };
 });
 
 function view(overrides: Partial<ApprovalRequestView> = {}): ApprovalRequestView {
@@ -181,5 +181,23 @@ describe("ApprovalsPage", () => {
     expect(await screen.findByText("Pass 2 of 3 (loop)")).toBeInTheDocument();
     expect(loopPassLabel(undefined)).toBeNull();
     expect(loopPassLabel({ pass: "2" })).toBeNull();
+  });
+
+  it("shows the run's next request after a queued decision without a Refresh (a Loop asks on the next pass)", async () => {
+    const pass = (n: number) =>
+      view({ requestId: `req-${n}`, kind: "human_approval", nodeId: "ask", nodeType: "human_approval", editableFields: [], requireRejectReason: false, message: `Order item ${n}?`, details: { loopPass: { loopNodeId: "loop", pass: n, of: 3 } } });
+    let asked = 1;
+    vi.mocked(api.listApprovals).mockImplementation(async () => ({ items: [pass(asked)] }) as never);
+    vi.mocked(api.fetchExecutionById).mockResolvedValue({ status: "running" } as never);
+    vi.mocked(api.approveApproval).mockImplementation(async () => {
+      // The queued resume asks for pass 2 a moment after the decision.
+      setTimeout(() => (asked = 2), 600);
+      return { queued: true, executionId: "ex-1", requestId: "req-1", decision: "approve" } as never;
+    });
+    render(<ApprovalsPage />);
+    await screen.findByText("Order item 1?");
+    await userEvent.click(screen.getByRole("button", { name: "Approve" }));
+    expect(await screen.findByText("Order item 2?", undefined, { timeout: 5_000 })).toBeInTheDocument();
+    expect(screen.getByText("Pass 2 of 3 (loop)")).toBeInTheDocument();
   });
 });

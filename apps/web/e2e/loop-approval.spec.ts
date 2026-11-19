@@ -94,16 +94,9 @@ test.describe("Human Approval in a Loop body", () => {
       ];
       for (const [index, step] of decisions.entries()) {
         const card = page.locator("article.approval-card.is-pending").filter({ hasText: workflowName }).filter({ hasText: `Order a ${step.product}?` });
-        // A decision resumes the run on the queue (WORKER_MODE=all): the next pass's request comes in a moment later.
-        await expect
-          .poll(
-            async () => {
-              if ((await card.count()) === 0) await page.getByRole("button", { name: "Refresh", exact: true }).click();
-              return card.count();
-            },
-            { timeout: 30_000 }
-          )
-          .toBe(1);
+        // A decision resumes the run on the queue (WORKER_MODE=all); the page shows the next pass's request when it comes
+        // in, without a Refresh.
+        await expect(card).toHaveCount(1, { timeout: 15_000 });
         await expect(card).toContainText(`Pass ${index + 1} of 3 (loop)`);
         if (index === 1) await page.screenshot({ path: path.join(SHOT_DIR, "after-01-approval-pass-2.png") });
         if (step.decision === "Reject") await card.getByLabel(/Reason/).fill("Not this month");
