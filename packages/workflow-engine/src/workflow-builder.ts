@@ -19,6 +19,7 @@ import {
   WORKFLOW_BUILDER_MAX_EDGES,
   WORKFLOW_BUILDER_MAX_NODES,
   WORKFLOW_SCHEMA_VERSION,
+  LIVE_ENTRY_NODE_TYPES,
   isReservedNodeId,
   legacyBehaviours,
   newNodeBaseConfig,
@@ -105,6 +106,24 @@ const CREDENTIAL_KEY_PATTERN =
 
 /** Config keys only an admin may set (a trigger's input trust and its binding, a node's sensitive-output mark). */
 const ADMIN_ONLY_KEYS = new Set([TRIGGER_TRUST_CONFIG_KEY, TRIGGER_TRUST_BINDING_KEY, SENSITIVE_OUTPUT_CONFIG_KEY]);
+
+/** A config key as a person reads it: `secretRef` → "Secret", `baseUrl` → "Base URL", `connection.apiKey` → "API Key". */
+export function settingLabel(path: string): string {
+  const last = path.split(".").filter((part) => part && !/^\d+$/.test(part)).pop() ?? path;
+  const words = last
+    .replace(/Refs?$/, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => {
+      const lower = word.toLowerCase();
+      if (lower === "url" || lower === "api" || lower === "id" || lower === "mcp" || lower === "llm") return lower.toUpperCase();
+      return `${word.charAt(0).toUpperCase()}${word.slice(1)}`;
+    });
+  return words.length > 0 ? words.join(" ") : last;
+}
 
 /** Where a dedicated chat model node sends its calls: the builder leaves these at the node's placeholder. */
 const MODEL_ADDRESS_KEYS: Readonly<Record<string, readonly string[]>> = {
@@ -365,7 +384,8 @@ export function checkBuilderDraft(raw: unknown, options: BuilderDraftOptions): B
   const givenKeys = new Map<string, Set<string>>();
   const removedCredentials: string[] = [];
   const removedAdminKeys: string[] = [];
-  const scheduleIds: string[] = [];
+  /** Live triggers (webhook, form, chat, MCP tool, schedule): each starts off, as a starter's does. */
+  const liveTriggerIds: string[] = [];
   const removedAddresses: string[] = [];
   let modelChanged = false;
   rawNodes!.forEach((entry, index) => {
@@ -406,11 +426,14 @@ export function checkBuilderDraft(raw: unknown, options: BuilderDraftOptions): B
       if (key in given) removedAdminKeys.push(`${id}.${key}`);
       delete config[key];
     }
-    if (definition.type === "schedule_trigger") {
-      // A described schedule starts off, as one added in the editor does: nothing fires before the person turns it on.
+    if (LIVE_ENTRY_NODE_TYPES.has(definition.type)) {
+      // A described trigger starts off, as a starter's does: nothing takes calls or fires before the person reviews the
+      // workflow and turns it on.
       config.active = false;
-      scheduleIds.push(id);
-      if (!(typeof given.timezone === "string" && given.timezone.trim()) && options.timeZone) config.timezone = options.timeZone;
+      liveTriggerIds.push(id);
+    }
+    if (definition.type === "schedule_trigger" && !(typeof given.timezone === "string" && given.timezone.trim()) && options.timeZone) {
+      config.timezone = options.timeZone;
     }
     if (PROVIDER_CONFIG_NODE_TYPES.has(definition.type)) {
       const asked = isRecord(given.provider) ? given.provider : undefined;
@@ -532,15 +555,36 @@ export function checkBuilderDraft(raw: unknown, options: BuilderDraftOptions): B
   });
   issues.push(...pathIssues);
 
-  if (removedCredentials.length > 0) notes.push(`Left out credential values the model wrote (${removedCredentials.join(", ")}): pick saved credentials on those nodes.`);
-  if (removedAdminKeys.length > 0) notes.push(`Left out settings only an admin sets (${removedAdminKeys.join(", ")}).`);
-  if (removedAddresses.length > 0) notes.push(`Left the model server address at its placeholder on ${removedAddresses.join(", ")}: set your server on those nodes.`);
-  // A trigger the draft leaves open to anyone is said in the preview, before it is inserted (the save says it again).
-  for (const node of nodes) {
-    const open = publicEntryMessage(node);
-    if (open) notes.push(`${node.name} (${node.id}): ${open}`);
+  // Nodes are named by their label; the id is added only where two share a label.
+  const labelCounts = new Map<string, number>();
+  for (const node of nodes) labelCounts.set(node.name, (labelCounts.get(node.name) ?? 0) + 1);
+  const nameOf = (node: WorkflowNode) => ((labelCounts.get(node.name) ?? 0) > 1 ? `${node.name} (${node.id})` : node.name);
+  if (liveTriggerIds.length > 0) {
+    const names = liveTriggerIds.map((id) => (byId.get(id) ? nameOf(byId.get(id)!) : id));
+    notes.push(`${names.length === 1 ? "The trigger starts" : "Triggers start"} off: ${names.join(", ")}. Review the workflow, then open ${names.length === 1 ? "it" : "each one"} and choose Turn on.`);
   }
-  if (scheduleIds.length > 0) notes.push(`The schedule starts off (${scheduleIds.join(", ")}): open it and choose Turn on when the workflow is ready.`);
+  // A trigger the draft would leave open to anyone once turned on is said in the preview, before it is inserted (the
+  // save says it again).
+  for (const node of nodes) {
+    const { active: _off, ...onConfig } = node.config as Record<string, unknown>;
+    const open = publicEntryMessage({ ...node, config: onConfig });
+    if (open) notes.push(`${nameOf(node)}: once turned on, ${open}`);
+  }
+  // Settings named per node as the editor labels them ("HTTP Request: Secret, API Key"), never by internal key.
+  const bySettingNode = (paths: readonly string[]): string => {
+    const grouped = new Map<string, string[]>();
+    for (const path of paths) {
+      const [nodeId, ...rest] = path.split(".");
+      const labels = grouped.get(nodeId!) ?? [];
+      const label = settingLabel(rest.join("."));
+      if (!labels.includes(label)) labels.push(label);
+      grouped.set(nodeId!, labels);
+    }
+    return [...grouped].map(([nodeId, labels]) => `${byId.get(nodeId) ? nameOf(byId.get(nodeId)!) : nodeId}: ${labels.join(", ")}`).join("; ");
+  };
+  if (removedCredentials.length > 0) notes.push(`Left out credential values the model wrote (${bySettingNode(removedCredentials)}): pick saved credentials on those nodes.`);
+  if (removedAdminKeys.length > 0) notes.push(`Left out settings only an admin sets (${bySettingNode(removedAdminKeys)}).`);
+  if (removedAddresses.length > 0) notes.push(`Left the model server address at its placeholder (${bySettingNode(removedAddresses)}): set your server on those nodes.`);
   if (modelChanged) notes.push("Model nodes use the model the builder used; change it on each node if you want another one.");
   return { workflow, issues, unfinished, pathIssues, notes };
 }
@@ -583,7 +627,13 @@ function addressesIn(value: unknown, found: Set<string>): void {
 
 /** What the person sees before inserting: the nodes, the credentials to pick, unfinished settings and addresses called. */
 export function builderPreview(workflow: Workflow, check: Pick<BuilderDraftCheck, "unfinished" | "notes">): WorkflowBuilderPreview {
-  const preview: WorkflowBuilderPreview = { nodes: [], credentials: [], unfinished: check.unfinished, addresses: [], notes: check.notes };
+  // Each unfinished setting names its node by the label the canvas shows, when the message does not already.
+  const labelOf = new Map(workflow.nodes.map((node) => [node.id, node.name]));
+  const unfinished = check.unfinished.map((issue) => {
+    const label = issue.nodeId ? labelOf.get(issue.nodeId) : undefined;
+    return label && !issue.message.startsWith(label) ? { ...issue, message: `${label}: ${issue.message}` } : issue;
+  });
+  const preview: WorkflowBuilderPreview = { nodes: [], credentials: [], unfinished, addresses: [], notes: check.notes };
   for (const node of workflow.nodes) {
     const definition = definitionOf(node.type);
     preview.nodes.push({ id: node.id, label: node.name, type: node.type, typeLabel: definition?.label ?? node.type });

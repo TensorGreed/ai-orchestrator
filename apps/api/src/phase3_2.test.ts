@@ -491,6 +491,34 @@ describe("Phase 3.2 — Telegram webhook secret-token validation", () => {
     });
     expect(bad.statusCode).toBe(401);
   });
+
+  it("refuses every call while no secret token is set, as Slack, GitHub, Stripe and Discord do", async () => {
+    const ctx = await createTestContext();
+    const cookie = await loginAdmin(ctx);
+    const saved = await ctx.app.inject({
+      method: "POST",
+      url: "/api/workflows",
+      headers: { cookie },
+      payload: {
+        id: "wf-tg-open",
+        name: "Telegram without a token",
+        schemaVersion: "1.0.0",
+        workflowVersion: 1,
+        nodes: [
+          { id: "trigger", type: "telegram_trigger", name: "TG", position: { x: 0, y: 0 }, config: { path: "telegram-open" } },
+          { id: "out", type: "output", name: "out", position: { x: 200, y: 0 }, config: { outputKey: "result" } }
+        ],
+        edges: [{ id: "e1", source: "trigger", target: "out" }]
+      }
+    });
+    expect(saved.statusCode, saved.body).toBe(200);
+    for (const headers of [{ "content-type": "application/json" }, { "content-type": "application/json", "x-telegram-bot-api-secret-token": "anything" }]) {
+      const response = await ctx.app.inject({ method: "POST", url: "/api/webhooks/telegram/wf-tg-open", headers, payload: { update_id: 1, message: { text: "hi" } } });
+      expect(response.statusCode).toBe(500);
+      expect(response.json()).toEqual({ error: "Telegram secret token not configured" });
+    }
+    expect((await ctx.store.listExecutionHistory({ page: 1, pageSize: 10 })).total).toBe(0);
+  });
 });
 
 describe("Phase 3.2 — Discord Ed25519 signature validation", () => {

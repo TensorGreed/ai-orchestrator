@@ -514,6 +514,15 @@ body {
   box-shadow: 0 0 10px var(--err);
 }
 
+.hud-run-status.is-waiting {
+  color: var(--warn);
+}
+
+.hud-run-status.is-waiting .hud-dot {
+  background: var(--warn);
+  box-shadow: 0 0 10px var(--warn);
+}
+
 .hud-run-status.is-running {
   color: var(--fg);
   border-color: var(--accent-line);

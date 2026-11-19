@@ -26,7 +26,7 @@ describe("apiErrorText", () => {
 
 describe("DraftWarnings", () => {
   const issues = [
-    { code: "missing_http_request_url_template", message: "HTTP Request node requires a non-empty urlTemplate.", nodeId: "http-1" },
+    { code: "missing_http_request_url_template", message: "HTTP Request needs a URL.", nodeId: "http-1" },
     { code: "missing_output_node", message: "No Output node: the run's result is the output of the last node that runs.", severity: "warning" as const }
   ];
 
@@ -47,7 +47,7 @@ describe("DraftWarnings", () => {
     render(<DraftWarnings issues={issues} nodeLabel={(id) => (id === "http-1" ? "Post order" : undefined)} onSelectNode={onSelectNode} onDismiss={onDismiss} />);
     const banner = screen.getByTestId("draft-warnings");
     expect(banner).toHaveTextContent("Unfinished draft. One setting needs finishing before this workflow can run or be published");
-    expect(banner).toHaveTextContent("HTTP Request node requires a non-empty urlTemplate.");
+    expect(banner).toHaveTextContent("HTTP Request needs a URL.");
     expect(banner).toHaveTextContent("No Output node");
     await userEvent.click(screen.getByRole("button", { name: "Post order" }));
     expect(onSelectNode).toHaveBeenCalledWith("http-1");

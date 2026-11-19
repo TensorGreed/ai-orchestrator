@@ -173,7 +173,7 @@ describe("saving a draft", () => {
     expect(body.valid).toBe(false);
     expect(body.issues.map((issue) => issue.code)).toContain("missing_http_request_url_template");
     const run = await context.app.inject({ method: "POST", url: "/api/workflows/wf-hook-draft/execute", headers: { cookie }, payload: {} });
-    expect(JSON.stringify(run.json())).toContain("requires a non-empty urlTemplate");
+    expect(JSON.stringify(run.json())).toContain("HTTP Request needs a URL");
   });
 
   it("does not publish an unfinished draft, and publishes it once finished", async () => {
@@ -338,8 +338,9 @@ describe("live triggers of an unfinished draft", () => {
     expect(await pausedNotes(context, "wf-hook-draft")).toHaveLength(2);
 
     // The editor's test route still runs the draft (and reports what is missing).
-    const tested = await context.app.inject({ method: "POST", url: "/webhook-test/draft-orders", payload: { customer: "Ana" } });
+    const tested = await context.app.inject({ method: "POST", url: "/webhook-test/draft-orders", headers: { cookie }, payload: { customer: "Ana" } });
     expect(tested.statusCode).not.toBe(409);
+    expect(tested.statusCode).not.toBe(404);
 
     // Finished: production serves it again.
     expect((await context.app.inject({ method: "PUT", url: "/api/workflows/wf-hook-draft", headers: { cookie }, payload: hookFlow() })).statusCode).toBe(200);

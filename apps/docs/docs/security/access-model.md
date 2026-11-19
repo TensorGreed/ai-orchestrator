@@ -44,8 +44,8 @@ workflow. It decides who runs the draft (on `/execute`, the manual trigger route
 run options, who may replay a run with its recorded MCP calls, who may replay golden runs, start replay jobs and eval runs (they
 run the draft or a candidate), whose runs use the workflow's session memory, and who sees the editor's edit controls
 (and, on the Runs page, Replay from here, Replay with the recorded MCP calls and the golden run controls). An operator with an editor membership may not edit: the role caps it.
-A builder who may only run a workflow (through an execute share to their project, say) is treated like an operator
-for it.
+A builder who may only run a workflow (through an execute share to their project, or a person share that is all they
+have on it) is treated like an operator for it.
 
 ## Roles
 
@@ -118,9 +118,13 @@ are not a member of a project it is shared to, and are not an admin.
 
 It holds under both `PROJECT_ISOLATION` settings. Under `role`, the global role that opens every project to a
 non-member does not count for a workflow shared with them: the person share decides, and they see their own runs.
-Workflows that are not shared with them keep the view their role gives. A builder in that position can still edit and
-publish the shared workflow through their role, but sees none of what is built from other people's runs: golden sets,
-evals, release-gate reasons and replay captures. Add them to the project to give them those.
+Workflows that are not shared with them keep the view their role gives.
+
+The share also caps what they may do with it, under both settings: a builder whose access to a workflow comes only
+from a person share gets the share's level, as anyone else would. **Can view** reads it; **Can view and run** also runs
+the released version. They cannot save, publish, delete, duplicate or re-share it (the API answers `403`, and the
+editor and Home hide those controls), and they see none of what is built from other people's runs: golden sets,
+evals, release-gate reasons and replay captures. Add them to the project to give them more.
 
 Details: [Own runs only](./auth-rbac.md#own-runs-only).
 

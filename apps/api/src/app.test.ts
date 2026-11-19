@@ -1479,6 +1479,7 @@ describe("execution resilience and lifecycle", () => {
     const runResponse = await context.app.inject({
       method: "POST",
       url: `/webhook-test/secure-${workflowId}`,
+      headers: { cookie: builderCookie },
       payload: {
         user_prompt: "terminal run"
       }

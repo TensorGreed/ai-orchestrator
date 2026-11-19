@@ -3,6 +3,7 @@ import { workflowPickerLabels } from "../lib/workflow-names";
 import { fetchMcpElicitations, inBackground, type ExecutionHistoryDetail, type ExecutionHistorySummary, type ExecutionRunLink, type McpReplayMode } from "../lib/api";
 import type { McpElicitationView, WorkflowListItem } from "@ai-orchestrator/shared";
 import { displayNodeStatus } from "../lib/run-data";
+import { WAITING_FOR_APPROVAL_LABEL } from "./studio-layout-types";
 import { McpCassetteViewer } from "./McpCassetteViewer";
 import { McpElicitationForm } from "./McpElicitationForm";
 import { DataLabelChips, EndorsementNote } from "./DataLabelChips";
@@ -209,7 +210,7 @@ function StatusPill({ status, statusColors }: { status: string; statusColors: Re
       data-status={known ? status : "unknown"}
       style={!known && statusColors[status] ? { color: statusColors[status] } : undefined}
     >
-      {status.replace(/_/g, " ")}
+      {status === "waiting_approval" ? WAITING_FOR_APPROVAL_LABEL : status.replace(/_/g, " ")}
     </span>
   );
 }
@@ -289,7 +290,7 @@ export function ExecutionHistoryPanel({
             <option value="success">Success</option>
             <option value="error">Error</option>
             <option value="partial">Partial</option>
-            <option value="waiting_approval">Waiting approval</option>
+            <option value="waiting_approval">Waiting for approval</option>
             <option value="canceled">Canceled</option>
           </select>
         </label>

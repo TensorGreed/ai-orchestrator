@@ -366,7 +366,7 @@ Trigger and webhook entry points:
 - `GET /api/mcp-server/:path/manifest`
 - `POST /api/mcp-server/:path/invoke`
 - `ANY /webhook/:path` (configured production webhook URL)
-- `ANY /webhook-test/:path` (configured test webhook URL)
+- `ANY /webhook-test/:path` (configured test webhook URL; runs the draft for a signed-in editor or an API key)
 
 Queue and services:
 - `GET /api/queue/depth`
@@ -476,7 +476,7 @@ Configure the `Webhook Input` node with:
 - `path` (example: `agent-demo`)
 
 Then call the generated URL from Postman:
-- Test URL: `http://localhost:4000/webhook-test/<path>`
+- Test URL: `http://localhost:4000/webhook-test/<path>` (send an API key: `X-API-Key: <key>`)
 - Production URL: `http://localhost:4000/webhook/<path>`
 
 Webhook payload (minimum):

@@ -231,6 +231,13 @@ describe("ExecutionHistoryPanel", () => {
     expect(onReplayFromNode).toHaveBeenCalledWith("ex-1", "llm");
   });
 
+  it("labels a run waiting for approval in words (amber pill)", () => {
+    render(<ExecutionHistoryPanel {...makeProps({ executionHistoryTotal: 1, executionHistoryItems: [makeSummary({ status: "waiting_approval" })] })} />);
+    const pill = document.querySelector(".status-pill") as HTMLElement;
+    expect(pill).toHaveAttribute("data-status", "waiting_approval");
+    expect(pill).toHaveTextContent(/^Waiting for approval$/);
+  });
+
   it("uses the legacy colour map only for statuses outside the token set", () => {
     render(
       <ExecutionHistoryPanel

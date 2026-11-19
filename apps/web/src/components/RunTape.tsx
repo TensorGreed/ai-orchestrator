@@ -4,6 +4,7 @@ import { formatLatency, LiveElapsed } from "./WorkflowCanvasNode";
 import { guardMarkerFor, type GuardMarker } from "../lib/guard-trace";
 import { currentActivity, describeActivity, type LiveNodeResult } from "../lib/run-trace";
 import { displayNodeStatus } from "../lib/run-data";
+import { WAITING_FOR_APPROVAL_LABEL } from "./studio-layout-types";
 
 export interface RunTapeProps {
   executionResult: WorkflowExecutionResult | null;
@@ -129,7 +130,9 @@ export function RunTape({ executionResult, nodeMetaById, onSelectNode }: RunTape
 
   const denominator = Math.max(totalMs, 1);
   // While a node is still running, the head ticks from the run's start instead of showing the frozen total.
-  const isRunning = lanes.some((lane) => lane.status === "running");
+  // A run paused on a Human Approval is waiting, not running: its gate's lane stays open until someone decides.
+  const isWaiting = executionResult.status === "waiting_approval";
+  const isRunning = !isWaiting && lanes.some((lane) => lane.status === "running");
   const firstLane = lanes.reduce((first, lane) => (lane.startMs < first.startMs ? lane : first), lanes[0]!);
   const runStart = { startedAt: executionResult.startedAt, liveStartedAtMs: firstLane.liveStartedAtMs };
   const llmTotal = lanes.reduce((acc, lane) => acc + (lane.llmMs ?? 0), 0);
@@ -140,7 +143,11 @@ export function RunTape({ executionResult, nodeMetaById, onSelectNode }: RunTape
     <div className="run-tape" role="table" aria-label="Run tape">
       <div className="run-tape-head">
         <span>
-          {isRunning ? (
+          {isWaiting ? (
+            <>
+              paused <b>{formatLatency(totalMs)}</b>
+            </>
+          ) : isRunning ? (
             <>
               running <b><LiveElapsed result={runStart} /></b>
             </>
@@ -150,7 +157,9 @@ export function RunTape({ executionResult, nodeMetaById, onSelectNode }: RunTape
             </>
           )}{" "}
           · {nodeCount} node{nodeCount === 1 ? "" : "s"} · status{" "}
-          <b className={`run-tape-status run-tape-status-${isRunning ? "running" : executionResult.status}`}>{isRunning ? "running" : executionResult.status}</b>
+          <b className={`run-tape-status run-tape-status-${isRunning ? "running" : executionResult.status}`}>
+            {isRunning ? "running" : isWaiting ? WAITING_FOR_APPROVAL_LABEL : executionResult.status}
+          </b>
         </span>
         <span className="run-tape-key">
           <i className="run-tape-key-swatch run-tape-key-node" /> node

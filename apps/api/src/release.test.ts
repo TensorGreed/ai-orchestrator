@@ -27,6 +27,7 @@ import { SecretService } from "./services/secret-service.js";
 import { goldenSetSnapshots } from "./services/release-snapshot.js";
 import { productionRoutingKeys, withUniqueTriggerPaths } from "./services/release-service.js";
 import { WorkflowVersionService } from "./services/workflow-version-service.js";
+import { webhookTestCookie } from "./test-support/webhook-test-caller.js";
 
 const SAMPLES_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../samples");
 
@@ -205,7 +206,7 @@ const prodHook = async (context: TestContext, hookPath: string) => {
   return { status: response.statusCode, output: response.json<{ output?: unknown }>().output };
 };
 const testHook = async (context: TestContext, hookPath: string) => {
-  const response = await context.app.inject({ method: "POST", url: `/webhook-test/${hookPath}`, payload: {} });
+  const response = await context.app.inject({ method: "POST", url: `/webhook-test/${hookPath}`, headers: { cookie: await webhookTestCookie(context) }, payload: {} });
   return { status: response.statusCode, output: response.json<{ output?: unknown }>().output };
 };
 

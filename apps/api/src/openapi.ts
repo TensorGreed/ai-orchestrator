@@ -1181,7 +1181,7 @@ export const openApiSpec = {
       get: {
         tags: ["RBAC"],
         summary: "The workflows shared with you, in any project, with the access each one gives you",
-        responses: { "200": { description: "{ workflows: [{ id, name, projectId, updatedAt, accessLevel, effectiveAccess }] }" } }
+        responses: { "200": { description: "{ workflows: [{ id, name, projectId, updatedAt, accessLevel, effectiveAccess, shareOnly }] }" } }
       }
     },
     "/api/projects/{id}/shared-workflows": {
@@ -3596,8 +3596,8 @@ export const openApiSpec = {
       post: { tags: ["Triggers"], summary: "Production webhook (any method)", parameters: [{ name: "path", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Workflow execution result" } } }
     },
     "/webhook-test/{path}": {
-      get: { tags: ["Triggers"], summary: "Test webhook (any method)", parameters: [{ name: "path", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Workflow execution result" } } },
-      post: { tags: ["Triggers"], summary: "Test webhook (any method)", parameters: [{ name: "path", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Workflow execution result" } } }
+      get: { tags: ["Triggers"], summary: "Test webhook (any method)", description: "Runs the draft. Needs a signed-in session or an API key (Authorization: Bearer, or X-API-Key) with edit access to the workflow; anyone else gets a plain 404. An operator who may only run the workflow gets 403. A webhook switched off answers 404 with code trigger_off.", parameters: [{ name: "path", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Workflow execution result" } } },
+      post: { tags: ["Triggers"], summary: "Test webhook (any method)", description: "Runs the draft. Needs a signed-in session or an API key (Authorization: Bearer, or X-API-Key) with edit access to the workflow; anyone else gets a plain 404. An operator who may only run the workflow gets 403. A webhook switched off answers 404 with code trigger_off.", parameters: [{ name: "path", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Workflow execution result" } } }
     },
 
     // ── MCP Server (exposed) ────────────────────────────────────────────────

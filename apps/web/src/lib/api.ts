@@ -1989,6 +1989,8 @@ export interface SharedWorkflowItem {
   updatedAt: string | null;
   accessLevel: "read" | "execute";
   effectiveAccess: "read" | "execute";
+  /** The share is all you have: you may read (or run) it, not change, delete, publish or share it. */
+  shareOnly?: boolean;
 }
 
 export async function fetchWorkflowsSharedWithMe() {

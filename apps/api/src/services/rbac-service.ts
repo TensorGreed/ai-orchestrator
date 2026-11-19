@@ -373,8 +373,10 @@ export class RbacService {
    * invite members to its owning project (`project:invite`). Admins have it; an API key limited to other projects
    * does not, whatever its role.
    */
-  async mayManageWorkflowShares(user: SafeUser, workflow: { projectId?: string | null }): Promise<boolean> {
-    return this.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite");
+  async mayManageWorkflowShares(user: SafeUser, workflow: { id?: string; projectId?: string | null }): Promise<boolean> {
+    if (!await this.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite")) return false;
+    // Someone who has the workflow only through a share with them does not share it on (see canAccessWorkflow).
+    return !(workflow.id && await this.onlyThroughUserShare(user, { id: workflow.id, projectId: workflow.projectId }, "workflow:read"));
   }
 
   /**
@@ -415,6 +417,12 @@ export class RbacService {
 
   async canAccessWorkflow(user: SafeUser, workflow: { id: string; projectId?: string }, permission: Permission): Promise<boolean> {
     const owningProject = workflow.projectId ?? DEFAULT_PROJECT_ID;
+    // Someone who has the workflow only through a share with them gets what the share gives (read, or run), in every
+    // isolation mode: the global role `role` isolation lends a non-member does not add edit, delete, publish or
+    // anything else on it. Project members (also through a share to their project) and admins are not capped.
+    if (permission !== "workflow:read" && await this.onlyThroughUserShare(user, workflow, "workflow:read")) {
+      return permission === "workflow:execute" && (await this.userShareAccess(user, workflow)) === "execute";
+    }
     if (await this.can(user, owningProject, permission)) return true;
 
     // v78 — shared with this person: read, or run when the share and their role allow it. Never write.

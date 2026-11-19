@@ -298,7 +298,7 @@ import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { registerUserInviteRoutes } from "./user-invite-routes.js";
 import { WORKFLOW_BUILDER_TRIGGER_TYPE, WORKFLOW_BUILDER_USAGE_LABEL, WORKFLOW_BUILDER_USAGE_WORKFLOW_ID, registerWorkflowBuilderRoutes } from "./workflow-builder-routes.js";
 import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
-import { LIVE_ENTRY_OFF_CODE, isLiveEntryOff, liveEntryOffMessage, publicEntryWarnings } from "@ai-orchestrator/shared";
+import { LIVE_ENTRY_OFF_CODE, isLiveEntryOff, liveEntryOffMessage, publicEntryWarnings, UNKNOWN_AUTH_MODE_CODE, unknownAuthMode, unknownAuthModeMessage } from "@ai-orchestrator/shared";
 import { envModelProviders } from "@ai-orchestrator/shared";
 import {
   CONTENT_FILTER_CODE,
@@ -1175,6 +1175,17 @@ function extractNodeOutputsFromResults(nodeResults: unknown): Record<string, unk
     outputs[nodeId] = result.output;
   }
   return outputs;
+}
+
+/**
+ * The Webhook Input's Response Status Code: the status of a reply the webhook builds itself (On Received's
+ * acknowledgement, a run's output when no Webhook Response node ran). Undefined when unset or not a code from 200 to
+ * 599: the reply keeps its default (202 for On Received, 200 otherwise). A Webhook Response node's own status wins, and
+ * a failed run answers 400.
+ */
+function webhookReplyStatus(config: Record<string, unknown>): number | undefined {
+  const value = typeof config.responseCode === "string" && config.responseCode.trim() ? Number(config.responseCode) : config.responseCode;
+  return typeof value === "number" && Number.isInteger(value) && value >= 200 && value <= 599 ? value : undefined;
 }
 
 function normalizeWebhookPath(value: unknown, fallback: string): string {
@@ -6617,40 +6628,35 @@ export async function createApp(
     reply.code(code).send({ error: message });
   };
 
-  const requireRole = async (
-    request: {
-      cookies: Record<string, string | undefined>;
-      headers: Record<string, unknown>;
-      method?: string;
-      routeOptions?: { url?: string };
-    },
-    reply: FastifyReply,
-    allowedRoles: UserRole[]
-  ): Promise<SafeUser | null> => {
+  type CallerRequest = {
+    cookies: Record<string, string | undefined>;
+    headers: Record<string, unknown>;
+    method?: string;
+    routeOptions?: { url?: string };
+  };
+  type CallerCheck = { ok: true; user: SafeUser } | { ok: false; status: 401 | 403; body: Record<string, unknown>; clearCookie?: boolean };
+
+  /** requireRole's checks, answering instead of replying (a route that must not say why, such as /webhook-test/, uses it). */
+  const checkCaller = async (request: CallerRequest, allowedRoles: UserRole[]): Promise<CallerCheck> => {
     // An API key (Phase 5.1) or the session cookie; 13.2: resolved once per request through resolveRequestAuth.
     const credential = await resolveRequestCredential(request);
     const auth = credential.auth;
     if (!auth) {
       if (getSessionIdFromRequest(request)) {
-        clearSessionCookie(reply);
         // 13.2 — say why (idle, expired, evicted, admin, ...) so the studio can tell the user; nothing for an unknown ID.
         const reason = credential.auth === null ? credential.reason : undefined;
-        reply.code(401).send(!reason || reason === "invalid" ? { error: "Session expired or invalid" } : { error: "Session expired or invalid", reason });
-      } else {
-        deny(reply, 401, "Authentication required");
+        return { ok: false, status: 401, clearCookie: true, body: !reason || reason === "invalid" ? { error: "Session expired or invalid" } : { error: "Session expired or invalid", reason } };
       }
-      return null;
+      return { ok: false, status: 401, body: { error: "Authentication required" } };
     }
 
     // 13.2 — a key limited to projects calls only the routes that check projects (key-scopes.ts); the rest fail closed.
     if (auth.credential === "api_key" && !keyMayCallRoute(auth.keyScope, request.method, request.routeOptions?.url)) {
-      deny(reply, 403, "This API key is limited to projects and cannot call this route");
-      return null;
+      return { ok: false, status: 403, body: { error: "This API key is limited to projects and cannot call this route" } };
     }
     // 13.2 — a scoped key cannot change its owner's account security (MFA): that needs a session or an unscoped key.
     if (auth.credential === "api_key" && !keyMayManageAccount(auth.keyScope, request.method, request.routeOptions?.url)) {
-      deny(reply, 403, "A scoped API key cannot change its owner's account security; sign in, or use an unscoped key");
-      return null;
+      return { ok: false, status: 403, body: { error: "A scoped API key cannot change its owner's account security; sign in, or use an unscoped key" } };
     }
 
     // 13.2 — a personal key of an owner whose role requires MFA works only while the owner has MFA set up (the owner's
@@ -6659,11 +6665,14 @@ export async function createApp(
       const owner = await store.getUserById(auth.user.id);
       const ownerRole = owner ? safeUserRole(owner.role) : auth.user.role;
       if (mfaRequiredFor(mfaPolicy, ownerRole) && !(await mfaService.status(auth.user.id)).enabled) {
-        reply.code(403).send({
-          code: "mfa_enrollment_required",
-          error: "Your role requires multi-factor authentication: your API keys work again once you set up an authenticator app."
-        });
-        return null;
+        return {
+          ok: false,
+          status: 403,
+          body: {
+            code: "mfa_enrollment_required",
+            error: "Your role requires multi-factor authentication: your API keys work again once you set up an authenticator app."
+          }
+        };
       }
     }
 
@@ -6672,17 +6681,23 @@ export async function createApp(
     if (auth.credential === "session") {
       const gate = await sessionMfaGateFor(auth.user, auth.session);
       if (gate !== "none" && !mfaGateAllows(gate, requestMethodOf(request), requestRouteOf(request))) {
-        reply.code(403).send(MFA_GATE_ERRORS[gate]);
-        return null;
+        return { ok: false, status: 403, body: MFA_GATE_ERRORS[gate] as Record<string, unknown> };
       }
     }
 
     if (!hasRequiredRole(auth.user, allowedRoles)) {
-      deny(reply, 403, "Insufficient permissions");
-      return null;
+      return { ok: false, status: 403, body: { error: "Insufficient permissions" } };
     }
 
-    return auth.user;
+    return { ok: true, user: auth.user };
+  };
+
+  const requireRole = async (request: CallerRequest, reply: FastifyReply, allowedRoles: UserRole[]): Promise<SafeUser | null> => {
+    const checked = await checkCaller(request, allowedRoles);
+    if (checked.ok) return checked.user;
+    if (checked.clearCookie) clearSessionCookie(reply);
+    reply.code(checked.status).send(checked.body);
+    return null;
   };
 
   /**
@@ -11077,17 +11092,19 @@ export async function createApp(
     if (!user) return;
     // One query with the workflow summaries; the same rules as rbacService.userShareAccess, without a read per row.
     const shared = await store.listWorkflowsSharedToUser(user.id);
-    const items = shared
-      .filter((share) => !user.projectScope || user.projectScope.includes(share.projectId))
-      .map((share) => ({
+    const visible = shared.filter((share) => !user.projectScope || user.projectScope.includes(share.projectId));
+    const items = (
+      await mapAsync(visible, async (share) => ({
         id: share.workflowId,
         name: share.name,
         projectId: share.projectId,
         updatedAt: share.updatedAt,
         accessLevel: share.accessLevel,
-        effectiveAccess: share.accessLevel === "execute" && roleMayRunWorkflows(user.role) ? ("execute" as const) : ("read" as const)
+        effectiveAccess: share.accessLevel === "execute" && roleMayRunWorkflows(user.role) ? ("execute" as const) : ("read" as const),
+        // The share is all they have: read (or run), never change, delete, publish or share it (rbacService.canAccessWorkflow).
+        shareOnly: await rbacService.onlyThroughUserShare(user, { id: share.workflowId, projectId: share.projectId }, "workflow:read")
       }))
-      .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+    ).sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
     return { workflows: items };
   });
 
@@ -13140,7 +13157,8 @@ export async function createApp(
     }
   );
 
-  // Phase 3.2 — Telegram webhook. Bot API sends X-Telegram-Bot-Api-Secret-Token if configured on setWebhook.
+  // Phase 3.2 — Telegram webhook. The Bot API sends X-Telegram-Bot-Api-Secret-Token when setWebhook was given one; the
+  // trigger needs that token set and refuses every call without it (as Slack, GitHub, Stripe and Discord do).
   app.post<{ Params: { workflowId: string }; Body: unknown }>(
     "/api/webhooks/telegram/:workflowId",
     { config: { rawBody: true } },
@@ -13154,12 +13172,14 @@ export async function createApp(
       }
       const secretRef = toSecretReference((tgNode.config as Record<string, unknown>).signingSecretRef);
       const configuredSecret = await secretService.resolveSecret(secretRef);
-      if (configuredSecret) {
-        const headerValue = getHeaderValue(request.headers, "x-telegram-bot-api-secret-token");
-        if (!headerValue || !safeEqualSecret(configuredSecret, headerValue)) {
-          reply.code(401);
-          return { error: "Telegram secret token mismatch" };
-        }
+      if (!configuredSecret) {
+        reply.code(500);
+        return { error: "Telegram secret token not configured" };
+      }
+      const headerValue = getHeaderValue(request.headers, "x-telegram-bot-api-secret-token");
+      if (!headerValue || !safeEqualSecret(configuredSecret, headerValue)) {
+        reply.code(401);
+        return { error: "Telegram secret token mismatch" };
       }
 
       const body = request.body as Record<string, unknown> | undefined;
@@ -13394,6 +13414,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         reply.type("text/html");
         return `<h1>${escapeHtml(liveEntryOffMessage("form_trigger"))}</h1>`;
       }
+      const unknownFormMode = unknownAuthMode(found.node);
+      if (unknownFormMode !== null) {
+        reply.code(500);
+        reply.type("text/html");
+        return `<h1>${escapeHtml(unknownAuthModeMessage(unknownFormMode))}</h1>`;
+      }
       if (cfg.authMode === "session") {
         const user = await requireRole(request, reply, ["viewer"]);
         if (!user) return;
@@ -13423,6 +13449,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       if (isLiveEntryOff(found.node)) {
         reply.code(404);
         return { error: liveEntryOffMessage("form_trigger"), code: LIVE_ENTRY_OFF_CODE };
+      }
+      const unknownFormMode = unknownAuthMode(found.node);
+      if (unknownFormMode !== null) {
+        reply.code(500);
+        return { error: unknownAuthModeMessage(unknownFormMode), code: UNKNOWN_AUTH_MODE_CODE };
       }
       // A signed-in submission is the submitter's own run, kept to their sessions where theirs are kept apart.
       let submitter: { triggeredByUserId?: string; sessionOwner?: string } = {};
@@ -13491,6 +13522,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         return { error: liveEntryOffMessage("chat_trigger"), code: LIVE_ENTRY_OFF_CODE };
       }
       const cfg = asRecord(chatNode.config);
+      const unknownChatMode = unknownAuthMode(chatNode);
+      if (unknownChatMode !== null) {
+        reply.code(500);
+        return { error: unknownAuthModeMessage(unknownChatMode), code: UNKNOWN_AUTH_MODE_CODE };
+      }
       const authMode = typeof cfg.authMode === "string" ? cfg.authMode : "public";
       // A signed-in chat by a viewer, an operator or a share-only reader keeps its session memory to that person.
       let chatSessionOwner: { sessionOwner?: string; triggeredByUserId?: string } = {};
@@ -13609,7 +13645,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     if (isLiveEntryOff(found.node)) return mcpServerOff(reply);
     const cfg = asRecord(found.node.config);
     return {
-      name: cfg.toolName ?? "",
+      // A tool left unnamed is named by its node id, as the MCP gateway names it.
+      name: typeof cfg.toolName === "string" && cfg.toolName.trim() ? cfg.toolName.trim() : found.node.id,
       description: cfg.toolDescription ?? "",
       inputSchema: cfg.inputSchema ?? { type: "object" }
     };
@@ -13622,6 +13659,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       if (!found) return await mcpServerMissing(reply, request.params.path);
       if (isLiveEntryOff(found.node)) return mcpServerOff(reply);
       const cfg = asRecord(found.node.config);
+      const unknownToolMode = unknownAuthMode(found.node);
+      if (unknownToolMode !== null) {
+        reply.code(500);
+        return { error: unknownAuthModeMessage(unknownToolMode), code: UNKNOWN_AUTH_MODE_CODE };
+      }
       if (cfg.authMode === "bearer") {
         // A new trigger asks for a token before its secret is picked: every call is refused, as an unauthorised one.
         if (typeof asRecord(cfg.secretRef).secretId !== "string" || !String(asRecord(cfg.secretRef).secretId).trim()) {
@@ -14060,6 +14102,28 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }
   });
 
+  const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and method";
+  const WEBHOOK_TEST_DRAFT_MESSAGE =
+    "The test URL runs the draft, which needs a builder role and edit access to the workflow. Call the webhook's own URL to run the released version.";
+  /**
+   * Who calls /webhook-test/: a signed-in session, or an API key in `Authorization: Bearer` or in `X-API-Key` (for a
+   * webhook whose own bearer token takes the Authorization header). Null for anyone else, for a key limited to
+   * projects, and for a session call another site started (`Sec-Fetch-Site: cross-site`), so a link elsewhere cannot run
+   * a draft as the person who clicks it.
+   */
+  const webhookTestCaller = async (request: FastifyRequest): Promise<SafeUser | null> => {
+    const headers = request.headers as Record<string, unknown>;
+    const headerKey = getHeaderValue(headers, "x-api-key");
+    const caller: CallerRequest = headerKey
+      ? { cookies: {}, headers: { authorization: `Bearer ${headerKey}` }, method: request.method, routeOptions: { url: request.routeOptions?.url } }
+      : (request as unknown as CallerRequest);
+    const checked = await checkCaller(caller, ["operator"]);
+    if (!checked.ok) return null;
+    const viaSession = sessionService.getRequestAuth(caller)?.credential === "session";
+    if (viaSession && getHeaderValue(headers, "sec-fetch-site") === "cross-site") return null;
+    return checked.user;
+  };
+
   const registerConfiguredWebhookRoute = (routePath: "/webhook/:path" | "/webhook-test/:path") => {
     const isTestRoute = routePath.startsWith("/webhook-test");
     // Phase 15.4 — /webhook/ is production traffic (the published version when there is one); /webhook-test/ runs the draft.
@@ -14076,7 +14140,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         reply.header("Access-Control-Allow-Methods", "DELETE, GET, OPTIONS, PATCH, POST, PUT");
         reply.header(
           "Access-Control-Allow-Headers",
-          "content-type,authorization,x-webhook-signature,x-webhook-timestamp,idempotency-key"
+          `content-type,authorization,x-webhook-signature,x-webhook-timestamp,idempotency-key${isTestRoute ? ",x-api-key" : ""}`
         );
 
         if (request.method === "OPTIONS") {
@@ -14084,7 +14148,17 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           return null;
         }
 
-        const match = await selectWebhookByPath(store, request.params.path, request.method, () => true, loadForRoute);
+        // The test URL runs the draft: only for a signed-in person or an API key that may run the workflow (and edit it,
+        // below). Anyone else gets the answer a missing path gets, which lists nothing.
+        const testCaller = isTestRoute ? await webhookTestCaller(request) : null;
+        if (isTestRoute && !testCaller) {
+          reply.code(404);
+          return { error: NO_WEBHOOK_MATCH_MESSAGE };
+        }
+        const callerMayRun = async (workflow: Workflow) =>
+          !testCaller || (await runAccess.workflow(testCaller, workflow.id, "workflow:execute")).ok;
+
+        const match = await selectWebhookByPath(store, request.params.path, request.method, callerMayRun, loadForRoute);
         if (!match) {
           // Phase 15.4 — a deactivated gated workflow on this path: say so rather than "not found".
           if (!isTestRoute) {
@@ -14095,7 +14169,10 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
               return { error: DEACTIVATED_MESSAGE, path: request.params.path };
             }
           }
-          const pathMatches = await listWebhookEndpointMatchesByPath(store, request.params.path, loadForRoute, !isTestRoute);
+          const pathMatches = await filterAsync(
+            await listWebhookEndpointMatchesByPath(store, request.params.path, loadForRoute, !isTestRoute),
+            async (entry) => !testCaller || (await runAccess.workflow(testCaller, entry.workflowId, "workflow:execute")).ok
+          );
           if (pathMatches.length > 0) {
             const allowedMethods = [...new Set(pathMatches.map((entry) => entry.method))];
             reply.code(405);
@@ -14108,11 +14185,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
               matches: pathMatches
             };
           }
-          const allEndpoints = await listAllWebhookEndpoints(store, loadForRoute, !isTestRoute);
-          const methodMatches = allEndpoints.filter((entry) => entry.method === request.method).slice(0, 20);
           reply.code(404);
+          if (isTestRoute) return { error: NO_WEBHOOK_MATCH_MESSAGE };
+          const allEndpoints = await listAllWebhookEndpoints(store, loadForRoute, true);
+          const methodMatches = allEndpoints.filter((entry) => entry.method === request.method).slice(0, 20);
           return {
-            error: "No webhook endpoint matches this path and method",
+            error: NO_WEBHOOK_MATCH_MESSAGE,
             path: request.params.path,
             method: request.method,
             hint: "Ensure workflow is saved and webhook node path/method match this request.",
@@ -14120,11 +14198,23 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           };
         }
 
-        // A webhook switched off (a starter's, until its owner turns it on) takes no production calls; /webhook-test/ and
-        // the editor's runs still work.
-        if (!isTestRoute && match.endpoint.config.active === false) {
+        // A webhook switched off (a starter's, until its owner turns it on) takes no calls on its URL or its test URL;
+        // the editor's Run and Webhook run still work.
+        if (match.endpoint.config.active === false) {
           reply.code(404);
           return { error: liveEntryOffMessage("webhook_input"), code: LIVE_ENTRY_OFF_CODE, path: request.params.path };
+        }
+        // An Auth Mode the webhook does not know is refused, never read as "none".
+        const unknownMode = unknownAuthMode({ id: match.endpoint.nodeId ?? "webhook", type: "webhook_input", config: match.endpoint.config });
+        if (unknownMode !== null) {
+          reply.code(500);
+          return { error: unknownAuthModeMessage(unknownMode), code: UNKNOWN_AUTH_MODE_CODE };
+        }
+
+        // The test URL runs the draft, which only someone who may edit the workflow runs (as on /execute).
+        if (testCaller && !(await runAccess.mayEdit(testCaller, match.workflow))) {
+          reply.code(403);
+          return { error: WEBHOOK_TEST_DRAFT_MESSAGE };
         }
 
         // Phase 13.2 — the trigger's own address list (optional), checked before its auth.
@@ -14385,6 +14475,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             });
           };
           const acknowledgement = { executionId, status: "accepted" as const };
+          const ackStatus = webhookReplyStatus(match.endpoint.config) ?? 202;
           let ackBody: unknown = acknowledgement;
           let started: Awaited<ReturnType<typeof runDispatcher.start>>;
           try {
@@ -14466,13 +14557,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
                 endpointKey,
                 idempotencyKey,
                 status: "success",
-                result: { __webhookHttpResponse: { statusCode: 202, headers: {}, body: ackBody } }
+                result: { __webhookHttpResponse: { statusCode: ackStatus, headers: {}, body: ackBody } }
               })
               .catch((error: unknown) => {
                 app.log.warn({ executionId, err: secretService.redact(error instanceof Error ? error.message : String(error)) }, "Could not save a webhook idempotency result");
               });
           }
-          reply.code(202);
+          reply.code(ackStatus);
           return ackBody;
         }
 
@@ -14543,6 +14634,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           ? webhookOverride.body
           : defaultResponsePayload;
 
+        // The Webhook Input's Response Status Code applies to a successful reply it builds itself.
+        const configuredStatus = !webhookOverride && result.status !== "error" ? webhookReplyStatus(match.endpoint.config) : undefined;
         if (webhookOverride) {
           reply.code(webhookOverride.statusCode);
           for (const [headerName, headerValue] of Object.entries(webhookOverride.headers)) {
@@ -14550,6 +14643,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           }
         } else if (result.status === "error") {
           reply.code(400);
+        } else if (configuredStatus !== undefined) {
+          reply.code(configuredStatus);
         }
 
         if (security.idempotencyEnabled && idempotencyKey) {
@@ -14565,7 +14660,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
                     body: webhookOverride.body
                   }
                 }
-              : responsePayload
+              : configuredStatus !== undefined && configuredStatus !== 200
+                ? { __webhookHttpResponse: { statusCode: configuredStatus, headers: {}, body: responsePayload } }
+                : responsePayload
           });
         }
 

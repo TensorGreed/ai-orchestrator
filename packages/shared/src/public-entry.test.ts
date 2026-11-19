@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PUBLIC_ENTRY_WARNING_CODE, getNodeDefinition, publicEntryMessage, publicEntryWarnings } from "./index";
+import { PUBLIC_ENTRY_WARNING_CODE, getNodeDefinition, publicEntryMessage, publicEntryWarnings, unknownAuthMode } from "./index";
 
 const node = (type: string, config: Record<string, unknown> = {}) => ({ id: `${type}_1`, type, config });
 
@@ -13,19 +13,24 @@ describe("public live triggers", () => {
     expect(publicEntryMessage(node("mcp_server_trigger", { authMode: "public" }))).toMatch(/^Public MCP tool/);
   });
 
-  it("reads unknown modes as the routes do: open", () => {
-    expect(publicEntryMessage(node("webhook_input", { authMode: "bearer" }))).toMatch(/^Public webhook/);
-    expect(publicEntryMessage(node("form_trigger", { authMode: "bearer" }))).toMatch(/^Public form/);
-    expect(publicEntryMessage(node("mcp_server_trigger", { authMode: "session" }))).toMatch(/^Public MCP tool/);
+  it("reads unknown modes as the routes do: refused, and says so", () => {
+    expect(publicEntryMessage(node("webhook_input", { authMode: "bearer" }))).toMatch(/^Auth Mode 'bearer' is not one this trigger knows/);
+    expect(publicEntryMessage(node("form_trigger", { authMode: "bearer" }))).toMatch(/refuses every call/);
+    expect(publicEntryMessage(node("mcp_server_trigger", { authMode: "session" }))).toMatch(/refuses every call/);
     expect(publicEntryMessage(node("chat_trigger", { authMode: "public" }))).toMatch(/^Public chat/);
     expect(publicEntryMessage(node("chat_trigger"))).toMatch(/^Public chat/);
   });
 
-  it("compares the mode exactly, as the routes do, and flags a Telegram trigger without a secret token (on or off)", () => {
-    expect(publicEntryMessage(node("mcp_server_trigger", { authMode: "bearer " }))).toMatch(/^Public MCP tool/);
-    expect(publicEntryMessage(node("webhook_input", { authMode: " bearer_token" }))).toMatch(/^Public webhook/);
-    expect(publicEntryMessage(node("telegram_trigger", {}))).toMatch(/^Public Telegram trigger/);
-    expect(publicEntryMessage(node("telegram_trigger", { active: false }))).toMatch(/^Public Telegram trigger/);
+  it("compares the mode exactly, as the routes do; a Telegram trigger is never open (it refuses calls without its token)", () => {
+    // A padded or unknown mode is not a protected mode, and not an open one either: the routes refuse every call.
+    expect(publicEntryMessage(node("mcp_server_trigger", { authMode: "bearer " }))).toMatch(/^Auth Mode 'bearer ' is not one this trigger knows/);
+    expect(publicEntryMessage(node("webhook_input", { authMode: " bearer_token" }))).toMatch(/refuses every call/);
+    expect(unknownAuthMode(node("webhook_input", { authMode: " bearer_token" }))).toBe(" bearer_token");
+    expect(unknownAuthMode(node("chat_trigger", { authMode: "public" }))).toBeNull();
+    expect(unknownAuthMode(node("form_trigger", { authMode: "none" }))).toBeNull();
+    expect(unknownAuthMode(node("form_trigger", {}))).toBeNull();
+    expect(unknownAuthMode(node("telegram_trigger", { authMode: "x" }))).toBeNull();
+    expect(publicEntryMessage(node("telegram_trigger", {}))).toBeNull();
     expect(publicEntryMessage(node("telegram_trigger", { signingSecretRef: { secretId: "sec_1" } }))).toBeNull();
   });
 

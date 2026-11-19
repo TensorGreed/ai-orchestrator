@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { NodeExecutionResult, WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import {
   attachmentUse,
+  nodeCardResults,
   canvasRunPreview,
   compactOutputPreview,
   formatRunDuration,
@@ -179,3 +180,30 @@ describe("a Loop body node's passes on the canvas", () => {
     expect(canvasRunPreview(only, (id) => id, { passes: [only] }).meta).toBe("success · 1 item · 10 ms");
   });
 });
+
+describe("the result a node's card shows", () => {
+  const at = "2026-01-01T00:00:00.000Z";
+  it("a Loop body node that failed a pass shows failed, though the run walk marked it skipped after the Loop failed", () => {
+    const shown = nodeCardResults([
+      { nodeId: "loop", status: "error", startedAt: at, error: "Loop node 'loop' failed at iteration 0 on child 'line_total'" },
+      { nodeId: "line_total", status: "error", startedAt: at, input: { _loop_index: 0 }, error: "Template {{item.nope}} has no value" },
+      { nodeId: "line_total", status: "skipped", startedAt: at },
+      { nodeId: "after", status: "skipped", startedAt: at }
+    ]);
+    expect(shown.get("line_total")).toMatchObject({ status: "error", error: "Template {{item.nope}} has no value" });
+    expect(shown.get("after")?.status).toBe("skipped");
+    expect(shown.get("loop")?.status).toBe("error");
+  });
+
+  it("keeps the last pass otherwise, and a handled failure over a later success", () => {
+    const shown = nodeCardResults([
+      { nodeId: "body", status: "success", startedAt: at, output: { n: 1 } },
+      { nodeId: "body", status: "success", startedAt: at, output: { n: 2 } },
+      { nodeId: "guarded", status: "error", handled: true, startedAt: at },
+      { nodeId: "guarded", status: "success", startedAt: at }
+    ]);
+    expect(shown.get("body")?.output).toEqual({ n: 2 });
+    expect(shown.get("guarded")).toMatchObject({ status: "error", handled: true });
+  });
+});
+

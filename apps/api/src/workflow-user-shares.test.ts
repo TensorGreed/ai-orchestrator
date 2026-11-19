@@ -127,7 +127,7 @@ describe("workflow shares with people", () => {
     expect((await call(context, "POST", "/api/workflows/wf-team/execute", viewer.cookie, {})).statusCode).toBe(403);
     const mine = await call(context, "GET", "/api/workflows/shared-with-me", viewer.cookie);
     expect(mine.json()).toEqual({
-      workflows: [{ id: "wf-team", name: "Flow wf-team", projectId: "team", updatedAt: expect.any(String), accessLevel: "read", effectiveAccess: "read" }]
+      workflows: [{ id: "wf-team", name: "Flow wf-team", projectId: "team", updatedAt: expect.any(String), accessLevel: "read", effectiveAccess: "read", shareOnly: true }]
     });
     expect((await call(context, "GET", "/api/workflows/shared-with-me", owner.cookie)).json()).toEqual({ workflows: [] });
   });

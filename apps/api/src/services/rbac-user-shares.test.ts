@@ -75,6 +75,35 @@ describe("user shares in RBAC", () => {
   });
 });
 
+describe("a person share caps the person at the share under role isolation", () => {
+  const rbac = new RbacService(store, "role");
+
+  it("gives a share-only builder read (and run with an execute share), never write, delete, publish or re-sharing", async () => {
+    // Gus-like builder with a read share: reads, does not run, edit, delete, publish or share on.
+    expect(await rbac.canAccessWorkflow(user("builder"), wf, "workflow:read")).toBe(true);
+    for (const permission of ["workflow:execute", "workflow:write", "workflow:delete", "workflow:publish"] as const) {
+      expect(await rbac.canAccessWorkflow(user("builder"), wf, permission)).toBe(false);
+    }
+    expect(await rbac.mayManageWorkflowShares(user("builder"), wf)).toBe(false);
+    // An operator with an execute share runs it.
+    expect(await rbac.canAccessWorkflow(user("operator"), wf, "workflow:execute")).toBe(true);
+    // A workflow not shared with the builder keeps the role's permissions (role isolation).
+    const other = { id: "other", projectId: "team" };
+    expect(await rbac.canAccessWorkflow(user("builder"), other, "workflow:write")).toBe(true);
+    expect(await rbac.mayManageWorkflowShares(user("builder"), other)).toBe(true);
+    // Admins are never capped.
+    expect(await rbac.canAccessWorkflow(user("admin"), wf, "workflow:write")).toBe(true);
+  });
+
+  it("does not cap a project member", async () => {
+    const member = new RbacService(
+      { ...store, getProjectRole: async (userId: string, projectId: string) => (userId === "u-builder" && projectId === "team" ? { userId, projectId, role: "editor", customRoleId: null } : null) } as unknown as Store,
+      "role"
+    );
+    expect(await member.canAccessWorkflow(user("builder"), wf, "workflow:write")).toBe(true);
+  });
+});
+
 describe("permissions", () => {
   it("lists only permissions something checks (no role:manage)", () => {
     expect(ALL_PERMISSIONS).not.toContain("role:manage");

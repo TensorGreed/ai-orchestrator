@@ -15,6 +15,23 @@ function runResult(overrides: Partial<WorkflowExecutionResult["nodeResults"][num
   };
 }
 
+describe("RunTape waiting for approval", () => {
+  it("says the run waits for approval instead of running", () => {
+    const result: WorkflowExecutionResult = {
+      workflowId: "wf",
+      status: "waiting_approval",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      completedAt: "2026-01-01T00:00:00.000Z",
+      nodeResults: [{ nodeId: "llm", status: "running", startedAt: "2026-01-01T00:00:00.000Z" }]
+    };
+    render(<RunTape executionResult={result} nodeMetaById={meta} />);
+    const head = document.querySelector(".run-tape-head > span")!;
+    expect(head).toHaveTextContent("Waiting for approval");
+    expect(head).not.toHaveTextContent("running");
+    expect(document.querySelector(".run-tape-status")).toHaveClass("run-tape-status-waiting_approval");
+  });
+});
+
 describe("RunTape", () => {
   beforeEach(() => {
     vi.useFakeTimers();

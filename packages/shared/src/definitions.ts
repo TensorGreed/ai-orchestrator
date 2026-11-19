@@ -48,6 +48,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
         idempotencyHeaderName: { type: "string" },
         // Unset or "auto": the reply of the last Webhook Response that ran, else the last node's output.
         responseMode: { type: "string", enum: ["auto", "onReceived", "lastNode", "responseNode"] },
+        // The status of a reply the webhook builds itself (unset: 202 for On Received, else 200). A Webhook Response
+        // node's own status wins; a failed run answers 400.
         responseCode: { type: "number" },
         responseHeaders: { type: "object" },
         responseBody: { type: "string" },
@@ -68,8 +70,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
       timestampHeaderName: "x-webhook-timestamp",
       replayToleranceSeconds: 300,
       idempotencyEnabled: false,
-      idempotencyHeaderName: "idempotency-key",
-      responseCode: 200
+      idempotencyHeaderName: "idempotency-key"
     }
   },
   {
@@ -3310,7 +3311,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     label: "Telegram Trigger",
     category: "Input",
     effectFreeEntry: true,
-    description: "Webhook-based trigger validated by X-Telegram-Bot-Api-Secret-Token. Point setWebhook at /api/webhooks/telegram/:workflowId.",
+    description: "Webhook-based trigger validated by X-Telegram-Bot-Api-Secret-Token; refuses every call until its secret token is set. Point setWebhook at /api/webhooks/telegram/:workflowId with that secret_token.",
     configSchema: {
       type: "object",
       properties: {
@@ -3480,8 +3481,8 @@ export function isEntryNodeType(type: string): boolean {
  * schedules. Each can be switched off with `config.active: false`; for a webhook, form, chat or MCP trigger unset means
  * on, as nodes saved before it had no such setting (a schedule's `active` is required, and fires only when true):
  * production calls to an off webhook, form, chat or MCP trigger answer "not found", the MCP gateway
- * leaves an off trigger's tool out, and an off schedule never fires. Runs from the editor (Run, Webhook run, the
- * `/webhook-test/` URL) work either way. Starter templates ship with theirs off.
+ * leaves an off trigger's tool out, and an off schedule never fires; the `/webhook-test/` URL answers "not found" too.
+ * Runs from the editor (Run, Webhook run) work either way. Starter templates and Describe it drafts ship with theirs off.
  */
 export const LIVE_ENTRY_NODE_TYPES: ReadonlySet<string> = new Set(["webhook_input", "form_trigger", "chat_trigger", "mcp_server_trigger", "schedule_trigger"]);
 

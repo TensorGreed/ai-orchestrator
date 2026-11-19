@@ -632,7 +632,7 @@ describe("a block budget refuses runs from every trigger", () => {
     const runsBefore = (await runs(store)).length;
     const refusedResponses = [
       await app.inject({ method: "POST", url: "/webhook/hook-wf-hook", payload: { a: 1 } }),
-      await app.inject({ method: "POST", url: "/webhook-test/hook-wf-hook", payload: { a: 1 } }),
+      await app.inject({ method: "POST", url: "/webhook-test/hook-wf-hook", headers: { cookie: fixture.admin }, payload: { a: 1 } }),
       await caller(fixture.context)(fixture.admin, "POST", "/api/webhooks/execute", { workflow_id: "wf-hook", user_prompt: "hi" }),
       await caller(fixture.context)(fixture.admin, "POST", "/api/webhooks/execute/stream", { workflow_id: "wf-hook", user_prompt: "hi" }),
       await app.inject({ method: "POST", url: "/api/chat/wf-chat", payload: { message: "hi" } }),
@@ -646,8 +646,9 @@ describe("a block budget refuses runs from every trigger", () => {
       expect(response.json()).toMatchObject({ error: "budget_exceeded", budgetId, message: 'Budget "Deployment cap" exceeded for the current month.' });
       expect(Number(response.headers["retry-after"])).toBeGreaterThan(0);
     }
-    // N2-M1: the webhook, chat and form callers are anonymous and see no amounts; the admin API callers do.
-    const anonymous = new Set([0, 1, 4, 5]);
+    // N2-M1: the webhook, chat and form callers are anonymous and see no amounts; the admin API callers (and the test
+    // webhook URL, which only a signed-in person may call) do.
+    const anonymous = new Set([0, 4, 5]);
     refusedResponses.forEach((response, index) => {
       const body = response.json<Record<string, unknown>>();
       if (anonymous.has(index)) {

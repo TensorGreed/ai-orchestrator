@@ -701,7 +701,7 @@ describe("sampling and limits", () => {
     await save(context, hookWorkflow("wf-manual"));
     await enableCapture(context, builder.cookie, "wf-manual");
     expect((await call(context, "POST", "/api/workflows/wf-manual/execute", builder.cookie, {})).statusCode).toBe(200);
-    expect((await context.app.inject({ method: "POST", url: "/webhook-test/hook-wf-manual", payload: {} })).statusCode).toBe(200);
+    expect((await context.app.inject({ method: "POST", url: "/webhook-test/hook-wf-manual", headers: { cookie: builder.cookie }, payload: {} })).statusCode).toBe(200);
     // A golden run saved by hand, then replayed.
     const run = await call(context, "POST", "/api/workflows/wf-manual/execute", builder.cookie, { record: true });
     const saved = await call(context, "POST", "/api/replay/recordings", builder.cookie, { executionId: run.json<{ executionId: string }>().executionId, name: "Hand" });
