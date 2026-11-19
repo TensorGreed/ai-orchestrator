@@ -73,6 +73,7 @@ import {
   importExternalWorkflow,
   importWorkflow,
   previewWorkflowImport,
+  fetchWorkflowAccess,
   type WorkflowImportPreview,
   listApprovals,
   validateStoredWorkflow,
@@ -177,6 +178,7 @@ import { WorkflowCardMenu } from "./components/WorkflowCardMenu";
 import { WorkflowCanvasArea, type ImportPanelBinding } from "./components/WorkflowCanvasArea";
 import { ExternalImportDialog, type ExternalImportSource } from "./components/ExternalImportDialog";
 import { ImportConflictDialog, type ImportConflictChoice } from "./components/ImportConflictDialog";
+import { editorAccess, type WorkflowAccessView } from "./lib/editor-access";
 import { SecretSaveWarnings } from "./components/SecretSaveWarnings";
 import { DraftWarnings } from "./components/DraftWarnings";
 import { WebhookTestPayloadDialog } from "./components/WebhookTestPayloadDialog";
@@ -1470,6 +1472,30 @@ function StudioApp() {
   const currentWorkflowExists = workflowList.some((item) => item.id === currentWorkflow.id);
   const canManageWorkflows = authUser?.role === "admin" || authUser?.role === "builder";
   const canManageSecrets = authUser?.role === "admin" || authUser?.role === "builder";
+  // What you may do with the open workflow: viewers and operators open it read-only; a builder may only view a
+  // workflow shared with them (or in a project where their role is view-only). Asked for each saved workflow.
+  const [workflowAccess, setWorkflowAccess] = useState<WorkflowAccessView | null>(null);
+  useEffect(() => {
+    if (!authUser || !currentWorkflowExists || (authUser.role !== "admin" && authUser.role !== "builder")) {
+      setWorkflowAccess(null);
+      return;
+    }
+    let cancelled = false;
+    fetchWorkflowAccess(currentWorkflow.id)
+      .then((access) => {
+        if (!cancelled) setWorkflowAccess(access);
+      })
+      .catch(() => {
+        if (!cancelled) setWorkflowAccess(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authUser, currentWorkflow.id, currentWorkflowExists]);
+  const { editDisabledReason, runDisabledReason } = editorAccess(
+    authUser?.role,
+    workflowAccess && workflowAccess.workflowId === currentWorkflow.id ? workflowAccess : null
+  );
   // Phase 11.2 — pending approvals the user can decide, for the sidebar badge.
   const [pendingApprovalCount, setPendingApprovalCount] = useState(0);
   const [approvalFocusExecutionId, setApprovalFocusExecutionId] = useState<string | null>(null);
@@ -3157,12 +3183,22 @@ function StudioApp() {
     }
   }, [buildCurrentWorkflow]);
 
+  /** Before a run: save the editor's changes, or, when you may run but not change the workflow, run it as saved. */
+  const persistForRun = useCallback(
+    async (adjust?: (workflow: Workflow) => Workflow) => (editDisabledReason && currentWorkflowExists ? currentWorkflow : await persistWorkflow(adjust)),
+    [currentWorkflow, currentWorkflowExists, editDisabledReason, persistWorkflow]
+  );
+
   // The pill opens Evaluations on Release gates once; the next visit starts on Golden sets.
   useEffect(() => {
     if (activeMode !== "evaluations") setEvaluationsTab("sets");
   }, [activeMode]);
 
   const handleSave = useCallback(async () => {
+    if (editDisabledReason) {
+      setError(editDisabledReason);
+      return;
+    }
     try {
       setBusy(true);
       setError(null);
@@ -3172,7 +3208,7 @@ function StudioApp() {
     } finally {
       setBusy(false);
     }
-  }, [handleApiError, persistWorkflow]);
+  }, [editDisabledReason, handleApiError, persistWorkflow]);
 
   // The import checklist follows the workflow it belongs to, including across reloads.
   useEffect(() => {
@@ -3477,7 +3513,7 @@ function StudioApp() {
       setBusy(true);
       setRunningExecutionId(null);
       setError(null);
-      const saved = await persistWorkflow();
+      const saved = await persistForRun();
       trace = createRunTraceHandlers(saved.id);
       const result = await executeWorkflowStream(saved.id, buildEditorExecutionPayload(options?.startNodeId, options?.runMode), {
         ...traceStreamCallbacks(trace, (event) => setError((current) => current ?? event.message)),
@@ -3518,7 +3554,7 @@ function StudioApp() {
     handleStreamExecutionStarted,
     reportStreamFailure,
     isDebugMode,
-    persistWorkflow,
+    persistForRun,
     refreshExecutionHistory,
   ]);
 
@@ -3530,7 +3566,7 @@ function StudioApp() {
       setError(null);
       startVisualRun();
       // The payload is kept in the workflow's settings, so the next "Webhook run" starts from it.
-      const saved = await persistWorkflow((workflow) => withTestWebhookPayload(workflow, testPayload));
+      const saved = await persistForRun((workflow) => withTestWebhookPayload(workflow, testPayload));
       trace = createRunTraceHandlers(saved.id);
       const result = await runWebhookStream({
         workflow_id: saved.id,
@@ -3574,7 +3610,7 @@ function StudioApp() {
     handleStreamExecutionStarted,
     reportStreamFailure,
     isDebugMode,
-    persistWorkflow,
+    persistForRun,
     refreshExecutionHistory,
     runWebhookStream,
     startVisualRun,
@@ -3599,7 +3635,7 @@ function StudioApp() {
     let streamedAnyDelta = false;
 
     try {
-      const savedWorkflow = await persistWorkflow();
+      const savedWorkflow = await persistForRun();
       const workflowId = savedWorkflow.id;
       activeWorkflowId = workflowId;
       const sessionForWorkflow = chatSessionsByWorkflow[workflowId] ?? createChatSessionId(workflowId);
@@ -3766,7 +3802,7 @@ function StudioApp() {
     createRunTraceHandlers,
     reportStreamFailure,
     isDebugMode,
-    persistWorkflow,
+    persistForRun,
     editorPrompts.sendSystemPrompt,
     refreshExecutionHistory,
     setChatMessageStatus,
@@ -5107,6 +5143,8 @@ function StudioApp() {
           }}
           onModeChange={setActiveMode}
           onSave={handleSave}
+          saveDisabledReason={editDisabledReason}
+          runDisabledReason={runDisabledReason}
           onExport={handleExport}
           onImportClick={() => importFileRef.current?.click()}
           onImportFileChange={handleImportFile}
@@ -5473,11 +5511,13 @@ function StudioApp() {
                 setPaletteInsertSource(null);
               }}
               onOpenNodeDrawer={() => {
+                if (editDisabledReason) return;
                 setNodeDrawerContext(null);
                 setPaletteInsertSource(null);
                 setShowNodeDrawer(true);
               }}
               onInsertFromHandle={(nodeId, handle, position) => {
+                if (editDisabledReason) return;
                 setNodeDrawerContext(null);
                 setPaletteInsertSource({ nodeId, handle, position });
                 setShowNodeDrawer(true);
@@ -5505,7 +5545,10 @@ function StudioApp() {
               onInit={setReactFlowInstance}
               onOpenNodeConfig={openNodeConfig}
               reactFlowInstance={reactFlowInstance}
+              editDisabledReason={editDisabledReason}
+              runDisabledReason={runDisabledReason}
               onClearCanvas={() => {
+                if (editDisabledReason) return;
                 if (nodes.length === 0 && edges.length === 0) return;
                 const count = nodes.length;
                 const confirmed = window.confirm(

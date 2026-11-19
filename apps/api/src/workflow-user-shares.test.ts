@@ -235,3 +235,19 @@ describe("project members by email", () => {
     expect((await call(context, "POST", "/api/projects/team/members", admin.cookie, { userId: viewer.id, email: viewer.email, role: "viewer" })).statusCode).toBe(400);
   });
 });
+
+describe("what the editor may show", () => {
+  it("answers canEdit, canRun and canShare per user and workflow", async () => {
+    const { context, owner, operator, viewer, outsider } = await seed();
+    const access = async (cookie: string) => (await call(context, "GET", "/api/workflows/wf-team/access", cookie)).json<Record<string, unknown>>();
+    expect(await access(owner.cookie)).toMatchObject({ canEdit: true, canRun: true, canShare: true });
+    expect((await call(context, "GET", "/api/workflows/wf-team/access", viewer.cookie)).statusCode).toBe(404);
+    await call(context, "POST", "/api/workflows/wf-team/user-shares", owner.cookie, { email: viewer.email, accessLevel: "execute" });
+    await call(context, "POST", "/api/workflows/wf-team/user-shares", owner.cookie, { email: operator.email, accessLevel: "execute" });
+    await call(context, "POST", "/api/workflows/wf-team/user-shares", owner.cookie, { email: outsider.email, accessLevel: "execute" });
+    expect(await access(viewer.cookie)).toMatchObject({ role: "viewer", canEdit: false, canRun: false, canShare: false });
+    // Running from the editor is a builder's route.
+    expect(await access(operator.cookie)).toMatchObject({ role: "operator", canEdit: false, canRun: false, canShare: false });
+    expect(await access(outsider.cookie)).toMatchObject({ role: "builder", canEdit: false, canRun: true, canShare: false });
+  });
+});

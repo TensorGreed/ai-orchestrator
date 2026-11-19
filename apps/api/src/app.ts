@@ -11092,6 +11092,21 @@ export async function createApp(
     return access.workflow;
   });
 
+  // What the signed-in user may do with a workflow, so the editor shows only the controls that work: edit (save,
+  // add or remove nodes), run (from the editor: a builder's route, with workflow:execute), and manage its shares.
+  app.get<{ Params: { id: string } }>("/api/workflows/:id/access", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const access = await runAccess.workflow(user, request.params.id, "workflow:read");
+    if (!access.ok) return denyRunAccess(reply, access);
+    const workflow = access.workflow;
+    const isBuilder = hasRequiredRole(user, ["builder"]);
+    const canWrite = isBuilder && (await runAccess.workflow(user, workflow.id, "workflow:write")).ok;
+    const canExecute = isBuilder && (await runAccess.workflow(user, workflow.id, "workflow:execute")).ok;
+    const canShare = user.role === "admin" || (await rbacService.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "workflow:write"));
+    return { workflowId: workflow.id, role: user.role, canRead: true, canEdit: canWrite, canRun: canExecute, canShare };
+  });
+
   app.get<{ Params: { id: string } }>("/api/workflows/:id/variables", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) {

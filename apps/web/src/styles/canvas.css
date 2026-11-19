@@ -1231,12 +1231,13 @@
   transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 
-.canvas-tool:hover:not(:disabled) {
+.canvas-tool:hover:not(:disabled):not([aria-disabled="true"]) {
   border-color: var(--accent-line);
   background: var(--accent-soft);
 }
 
-.canvas-tool:disabled {
+.canvas-tool:disabled,
+.canvas-tool[aria-disabled="true"] {
   opacity: 0.5;
   cursor: not-allowed;
 }

@@ -1126,6 +1126,14 @@ export const openApiSpec = {
         responses: { "200": { description: "Shared" } }
       }
     },
+    "/api/workflows/{id}/access": {
+      get: {
+        tags: ["RBAC"],
+        summary: "What you may do with a workflow: canEdit (save it), canRun (run it from the editor), canShare (manage its shares)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ workflowId, role, canRead, canEdit, canRun, canShare }" }, "404": { description: "Not found or not readable" } }
+      }
+    },
     "/api/workflows/{id}/user-shares": {
       get: {
         tags: ["RBAC"],

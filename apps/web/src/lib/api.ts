@@ -1830,6 +1830,8 @@ export async function deleteSsoMapping(id: string) {
 
 export interface ProjectMembership {
   userId: string;
+  /** The email the member signs in with (null when the user is gone). */
+  email?: string | null;
   projectId: string;
   role: "project_admin" | "editor" | "viewer" | "custom";
   customRoleId: string | null;
@@ -1844,7 +1846,7 @@ export async function fetchProjectMembers(projectId: string) {
 
 export async function addProjectMember(
   projectId: string,
-  payload: { userId: string; role: string; customRoleId?: string | null }
+  payload: ({ userId: string; email?: never } | { email: string; userId?: never }) & { role: string; customRoleId?: string | null }
 ) {
   return apiRequest<{ ok: boolean; membership: ProjectMembership }>(
     `/api/projects/${encodeURIComponent(projectId)}/members`,
@@ -1932,8 +1934,43 @@ export interface WorkflowShareRecord {
   createdAt: string;
 }
 
+/** What you may do with a workflow (the editor shows only the controls that work). */
+export async function fetchWorkflowAccess(workflowId: string) {
+  return apiRequest<{ workflowId: string; role: string; canRead: boolean; canEdit: boolean; canRun: boolean; canShare: boolean }>(
+    `/api/workflows/${encodeURIComponent(workflowId)}/access`
+  );
+}
+
+/** v78 — a workflow shared with a person. `effectiveAccess` is what they get: their role caps it, null while disabled. */
+export interface WorkflowUserShareRecord {
+  workflowId: string;
+  userId: string;
+  email: string | null;
+  role: string | null;
+  disabled: boolean;
+  accessLevel: "read" | "execute";
+  effectiveAccess: "read" | "execute" | null;
+  sharedBy: string | null;
+  createdAt: string;
+}
+
+export async function fetchWorkflowUserShares(workflowId: string) {
+  return apiRequest<{ userShares: WorkflowUserShareRecord[] }>(`/api/workflows/${encodeURIComponent(workflowId)}/user-shares`);
+}
+
+export async function shareWorkflowWithUser(workflowId: string, payload: { email: string; accessLevel: "read" | "execute" }) {
+  return apiRequest<{ ok: boolean; share: { userId: string; email: string; role: string; accessLevel: "read" | "execute"; effectiveAccess: "read" | "execute" } }>(
+    `/api/workflows/${encodeURIComponent(workflowId)}/user-shares`,
+    { method: "POST", body: JSON.stringify(payload) }
+  );
+}
+
+export async function unshareWorkflowWithUser(workflowId: string, userId: string) {
+  return apiRequest<{ ok: boolean }>(`/api/workflows/${encodeURIComponent(workflowId)}/user-shares/${encodeURIComponent(userId)}`, { method: "DELETE" });
+}
+
 export async function fetchWorkflowShares(workflowId: string) {
-  return apiRequest<{ shares: WorkflowShareRecord[] }>(
+  return apiRequest<{ shares: WorkflowShareRecord[]; userShares?: WorkflowUserShareRecord[] }>(
     `/api/workflows/${encodeURIComponent(workflowId)}/shares`
   );
 }
@@ -5049,6 +5086,19 @@ export interface InviteLookup {
   email: string;
   role: AuthUser["role"];
   expiresAt: string;
+}
+
+export interface UserInviteResult {
+  user: { id: string; email: string; role: string; pending: true };
+  invite: { id: string; expiresAt: string };
+  /** True when the server emailed the link; otherwise `inviteUrl` is the link to pass on (shown this once). */
+  emailed: boolean;
+  inviteUrl?: string;
+}
+
+/** Admin: invites a person by email with a role (the studio passes the link on when no mail server is set). */
+export async function inviteUser(payload: { email: string; role: "admin" | "builder" | "operator" | "viewer" }) {
+  return apiRequest<UserInviteResult>("/api/users/invite", { method: "POST", body: JSON.stringify(payload) });
 }
 
 /** The email and role an invite link is for; throws (404) when it is used, expired or unknown. */

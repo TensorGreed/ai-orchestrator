@@ -218,6 +218,10 @@ interface WorkflowCanvasAreaProps {
   onOpenNodeConfig: (nodeId: string) => void;
   reactFlowInstance: ReactFlowInstance | null;
   onClearCanvas: () => void;
+  /** Why you cannot change this workflow (your role or your access): Add node and Clear are disabled with it as tooltip. */
+  editDisabledReason?: string | null;
+  /** Why you cannot run it: Webhook run is disabled with it as tooltip. */
+  runDisabledReason?: string | null;
   debugMode: boolean;
   onDebugModeChange: (next: boolean) => void;
   /** Kept for API compatibility; the primary Run action lives in the HUD. */
@@ -302,6 +306,8 @@ export function WorkflowCanvasArea({
   onOpenNodeConfig,
   reactFlowInstance,
   onClearCanvas,
+  editDisabledReason,
+  runDisabledReason,
   debugMode,
   onDebugModeChange,
   onExecuteWebhook,
@@ -753,7 +759,13 @@ export function WorkflowCanvasArea({
 
             <div className="canvas-toolbar" role="toolbar" aria-label="Canvas tools">
               {!showNodeDrawer && (
-                <button type="button" className="canvas-tool canvas-tool-primary node-drawer-open-btn" onClick={onOpenNodeDrawer} title="Add node (double-click the canvas)">
+                <button
+                  type="button"
+                  className="canvas-tool canvas-tool-primary node-drawer-open-btn"
+                  onClick={editDisabledReason ? undefined : onOpenNodeDrawer}
+                  aria-disabled={editDisabledReason ? true : undefined}
+                  title={editDisabledReason ?? "Add node (double-click the canvas)"}
+                >
                   <span aria-hidden="true">+</span> Add node
                 </button>
               )}
@@ -763,11 +775,25 @@ export function WorkflowCanvasArea({
               <button type="button" className="canvas-tool" onClick={() => reactFlowInstance?.fitView({ padding: 0.18, duration: 240 })} title="Fit to view">
                 Fit
               </button>
-              <button type="button" className="canvas-tool canvas-tool-danger" onClick={onClearCanvas} disabled={nodes.length === 0} title="Remove every node and edge">
+              <button
+                type="button"
+                className="canvas-tool canvas-tool-danger"
+                onClick={editDisabledReason ? undefined : onClearCanvas}
+                disabled={nodes.length === 0}
+                aria-disabled={editDisabledReason ? true : undefined}
+                title={editDisabledReason ?? "Remove every node and edge"}
+              >
                 Clear
               </button>
               <span className="canvas-toolbar-sep" aria-hidden="true" />
-              <button type="button" className="canvas-tool canvas-tool-ghost" onClick={onExecuteWebhook} disabled={busy} title="Run through the webhook entry point">
+              <button
+                type="button"
+                className="canvas-tool canvas-tool-ghost"
+                onClick={runDisabledReason ? undefined : onExecuteWebhook}
+                disabled={busy}
+                aria-disabled={runDisabledReason ? true : undefined}
+                title={runDisabledReason ?? "Run through the webhook entry point"}
+              >
                 Webhook run
               </button>
               {canCancelRun && (

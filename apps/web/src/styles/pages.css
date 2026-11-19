@@ -5865,3 +5865,82 @@ img.mcp-pg-block {
   border-top: 1px solid var(--line);
   padding-top: 12px;
 }
+
+/* Settings > Users header with Invite user, and the invite link row. */
+.settings-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.invite-link-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 8px 0 4px;
+}
+
+.invite-link-row .cfg-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+
+/* Import: the file has the id of a workflow you can see. */
+.import-conflict-choices {
+  border: 0;
+  margin: 0 0 12px;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.import-conflict-choice {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.import-conflict-choice:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.import-conflict-choice > span {
+  display: grid;
+  gap: 2px;
+}
+
+.import-conflict-diff {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+
+.import-conflict-diff h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+
+.import-conflict-diff ul {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 2px;
+  font-size: 13px;
+}
+
+.share-person-row {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 10px;
+}
