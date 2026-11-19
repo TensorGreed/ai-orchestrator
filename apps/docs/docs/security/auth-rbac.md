@@ -278,7 +278,8 @@ project member keeps the full view, and so does anyone who also has the workflow
 **Opening shared workflows.** A link to a workflow (`?workflowId=`) opens it for anyone who can read it, through their
 project, a share to a project or a share with them, whichever project is active. A workflow they cannot read answers
 "Workflow not found", as one that does not exist. A workflow opened from a link or from **Shared with you** stays open
-until the person switches project in the project picker; then that project's workflow opens. Someone who is a member of no project (with
+until the person switches project in the project picker; then that project's workflow opens (when the project has
+none, the open workflow stays). Someone who is a member of no project (with
 `PROJECT_ISOLATION=strict`) lands on Home with the workflows shared with them. Only people who may create projects
 (builders and admins) are offered **New project**.
 

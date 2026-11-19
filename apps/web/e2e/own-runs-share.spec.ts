@@ -289,7 +289,7 @@ test.describe("opening shared workflows (strict isolation)", () => {
   });
 });
 
-test.describe("switching project after opening a shared workflow (strict isolation)", () => {
+test.describe("switching project after opening a shared workflow (either isolation mode)", () => {
   test.setTimeout(240_000);
 
   test("an explicit project switch opens that project's workflow, also while a link's access check is pending", async ({ page, browser }) => {
@@ -316,8 +316,7 @@ test.describe("switching project after opening a shared workflow (strict isolati
 
       const as = await pageAs(browser, operator.email, operator.password);
       try {
-        const access = (await (await as.page.request.get(`/api/workflows/${shared}/access`)).json()) as { ownRunsOnly?: boolean };
-        test.skip(access.ownRunsOnly !== true, "Needs a server with PROJECT_ISOLATION=strict");
+        // Runs in either isolation mode: the person reads the shared workflow through the share (strict) or their role.
         const name = as.page.getByLabel("Workflow name");
         const projectPicker = as.page.getByLabel("Project", { exact: true });
 
@@ -358,6 +357,19 @@ test.describe("switching project after opening a shared workflow (strict isolati
         await expect(name).toHaveValue("E2E Switch own B");
         await expect(as.page.getByText("Workflow not found")).toHaveCount(0);
         await as.page.unroute(`**/api/workflows/${shared}/access`);
+
+        // 4. A switch made on the Runs page, then Debug on a run of the shared workflow: the run's workflow stays open.
+        const ran = await as.page.request.post(`/api/workflows/${shared}/execute`, { data: { input: {} } });
+        expect(ran.ok(), await ran.text()).toBeTruthy();
+        await as.page.goto(`/?projectId=${encodeURIComponent(homeA)}&mode=executions`);
+        await expect(projectPicker).toBeVisible({ timeout: 60_000 });
+        await projectPicker.selectOption(homeB);
+        const debug = as.page.getByRole("button", { name: "Debug", exact: true }).first();
+        await expect(debug).toBeVisible({ timeout: 30_000 });
+        await debug.click();
+        await expect(name).toHaveValue("E2E Switch shared", { timeout: 30_000 });
+        await as.page.waitForTimeout(2_000);
+        await expect(name).toHaveValue("E2E Switch shared");
         expect(as.ollama).toEqual([]);
       } finally {
         await as.context.close();
@@ -391,8 +403,7 @@ test.describe("switching project after opening a shared workflow (strict isolati
 
       const as = await pageAs(browser, operator.email, operator.password);
       try {
-        const access = (await (await as.page.request.get(`/api/workflows/${shared}/access`)).json()) as { ownRunsOnly?: boolean };
-        test.skip(access.ownRunsOnly !== true, "Needs a server with PROJECT_ISOLATION=strict");
+        // Runs in either isolation mode.
         let releaseAccess: () => void = () => undefined;
         const accessHeld = new Promise<void>((resolve) => (releaseAccess = resolve));
         let accessSeen = false;

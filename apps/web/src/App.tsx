@@ -29,6 +29,7 @@ import {
   type NodeExecutionResult,
   type Workflow,
   type WorkflowExecutionResult,
+  type WorkflowListItem,
   type WorkflowValidationIssue
 } from "@ai-orchestrator/shared";
 import {
@@ -1539,6 +1540,12 @@ function StudioApp() {
     explicitProjectSwitchRef.current = { projectId: id, seq: workflowLoadSeqRef.current };
     setActiveProjectId(id);
   }, []);
+  /** Shows a project's workflow list unless the person has switched to another project since it was asked for. */
+  const applyProjectWorkflowList = useCallback((projectId: string, workflows: WorkflowListItem[]) => {
+    if (activeProjectIdRef.current !== null && activeProjectIdRef.current !== projectId) return;
+    setWorkflowList(workflows);
+    setListsProjectId(projectId);
+  }, [setWorkflowList]);
   const currentWorkflowExists =
     workflowList.some((item) => item.id === currentWorkflow.id) ||
     sharedWithMe.some((item) => item.id === currentWorkflow.id) ||
@@ -2406,6 +2413,8 @@ function StudioApp() {
 
   const hydrateWorkflow = useCallback(
     (workflow: Workflow) => {
+      // Whatever opens a workflow (a run's Debug or Re-run, an import, a duplicate, a load) ends a pending project switch.
+      explicitProjectSwitchRef.current = null;
       const editor = workflowToEditor(workflow);
       const decoratedEdges = editor.edges.map((edge) => decorateEdge(edge, editor.nodes as EditorNode[]));
 
@@ -2433,6 +2442,8 @@ function StudioApp() {
         fetchWorkflowsSharedWithMe().catch(() => ({ workflows: [] })),
         fetchProjectSharedWorkflows(activeProjectId).catch(() => ({ workflows: [] }))
       ]);
+      // A slower answer for a project the person has already left must not replace the lists of the one they chose.
+      if (activeProjectIdRef.current !== null && activeProjectIdRef.current !== activeProjectId) return;
 
       const noProject = Boolean(projectPayload) && (projectPayload?.projects ?? []).length === 0;
       // Someone in no project has no project's workflows: what they can read is what is shared with them.
@@ -3249,7 +3260,7 @@ function StudioApp() {
 
     if (afterProjectSwitch) {
       // Only one of the project's own workflows stays open; one shared with you or opened from a link gives way.
-      if (workflowList.some((item) => item.id === currentWorkflow.id)) {
+      if (workflowList.some((item) => item.id === currentWorkflow.id) || sharedWithProject.some((item) => item.id === currentWorkflow.id)) {
         explicitProjectSwitchRef.current = null;
         return;
       }
@@ -3295,7 +3306,7 @@ function StudioApp() {
           : workflowList[0]!.id;
     explicitProjectSwitchRef.current = null;
     void loadWorkflowById(chosenWorkflowId);
-  }, [activeMode, activeProjectId, authUser, currentWorkflow.id, currentWorkflowExists, deepLinkResolved, hydrateWorkflow, listsProjectId, loadWorkflowById, loading, readWipWorkflow, workflowList]);
+  }, [activeMode, activeProjectId, authUser, currentWorkflow.id, currentWorkflowExists, deepLinkResolved, hydrateWorkflow, listsProjectId, loadWorkflowById, loading, readWipWorkflow, sharedWithProject, workflowList]);
 
   /**
    * A deep link (`?workflowId=`) to a workflow outside the active project's list opens it when you can read it in any
@@ -3360,7 +3371,7 @@ function StudioApp() {
       if (previous) await previous.promise.catch(() => undefined);
       const saved = await saveWorkflow(workflow);
       const workflows = await fetchWorkflows({ projectId: activeProjectId });
-      setWorkflowList(workflows);
+      applyProjectWorkflowList(activeProjectId, workflows);
       setCurrentWorkflow(saved);
       storeLocalWipWorkflow(saved);
       // Phase 15.4 — a save is a new version: the version pill reloads.
@@ -4061,12 +4072,12 @@ function StudioApp() {
     async (content: string, mode: "new" | "replace") => {
       const imported = await importWorkflow({ json: content, mode });
       const workflows = await fetchWorkflows({ projectId: activeProjectId });
-      setWorkflowList(workflows);
+      applyProjectWorkflowList(activeProjectId, workflows);
       hydrateWorkflow(imported);
       storeLocalWipWorkflow(imported);
       setActiveMode("editor");
     },
-    [activeProjectId, hydrateWorkflow, setActiveMode, setWorkflowList]
+    [activeProjectId, applyProjectWorkflowList, hydrateWorkflow, setActiveMode]
   );
 
   const importNativeText = useCallback(
@@ -4153,7 +4164,7 @@ function StudioApp() {
     async (sourceText: string, name: string) => {
       const { workflow, report } = await importExternalWorkflow({ sourceText, name, projectId: activeProjectId || undefined });
       const workflows = await fetchWorkflows({ projectId: activeProjectId });
-      setWorkflowList(workflows);
+      applyProjectWorkflowList(activeProjectId, workflows);
       hydrateWorkflow(workflow);
       storeLocalWipWorkflow(workflow);
       rememberImportReport(workflow.id, report);
@@ -4162,7 +4173,7 @@ function StudioApp() {
       setExternalImportSource(null);
       setActiveMode("editor");
     },
-    [activeProjectId, hydrateWorkflow, setActiveMode, setWorkflowList]
+    [activeProjectId, applyProjectWorkflowList, hydrateWorkflow, setActiveMode]
   );
 
   const closeExternalImport = useCallback(() => {
@@ -4296,7 +4307,7 @@ function StudioApp() {
         setError(null);
         const duplicated = await duplicateWorkflow(workflowId, { name: duplicateName });
         const workflows = await fetchWorkflows({ projectId: activeProjectId });
-        setWorkflowList(workflows);
+        applyProjectWorkflowList(activeProjectId, workflows);
         hydrateWorkflow(duplicated);
         setActiveMode("editor");
         storeLocalWipWorkflow(duplicated);
@@ -4339,7 +4350,7 @@ function StudioApp() {
         await deleteWorkflow(workflowId);
         deleteTabWipWorkflow(workflowId);
         const workflows = await fetchWorkflows({ projectId: activeProjectId });
-        setWorkflowList(workflows);
+        applyProjectWorkflowList(activeProjectId, workflows);
 
         if (currentWorkflow.id === workflowId) {
           const fallback = workflows[0];
@@ -4439,7 +4450,7 @@ function StudioApp() {
           fetchWorkflows({ projectId: activeProjectId })
         ]);
         setFolders(folderPayload.folders);
-        setWorkflowList(workflows);
+        applyProjectWorkflowList(activeProjectId, workflows);
         if (activeFolderFilter === folderId) setActiveFolderFilter(undefined);
       } catch (error) {
         handleApiError(error, "Failed to delete folder");
@@ -4459,7 +4470,7 @@ function StudioApp() {
         setBusy(true);
         await moveWorkflow(workflowId, patch);
         const workflows = await fetchWorkflows({ projectId: activeProjectId });
-        setWorkflowList(workflows);
+        applyProjectWorkflowList(activeProjectId, workflows);
       } catch (error) {
         handleApiError(error, "Failed to move workflow");
       } finally {
@@ -5142,6 +5153,8 @@ function StudioApp() {
     setAuthUser(null);
     setMfaGate(null);
     setWorkflowList([]);
+    setListsProjectId(null);
+    explicitProjectSwitchRef.current = null;
     setDeepLinkedWorkflowId(null);
     setInNoProject(false);
     setSharedWithMe([]);
