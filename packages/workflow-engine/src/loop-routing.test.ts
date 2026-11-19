@@ -254,9 +254,10 @@ describe("Loop with branch routing", () => {
       [edge("src", "loop"), edge("loop", "num"), edge("num", "fallback", "error"), edge("num", "double")]
     );
     const result = await executeWorkflow({ workflow }, deps());
-    // A handled failure makes the run partial, as at the top level.
-    expect(result.status).toBe("partial");
+    // A handled failure leaves the run a success, as at the top level; the failed pass says it was handled.
+    expect(result.status).toBe("success");
     expect(statuses(result, "num")).toEqual(["success", "error", "success"]);
+    expect(results(result, "num").map((entry) => entry.handled === true)).toEqual([false, true, false]);
     expect(statuses(result, "fallback")).toEqual(["success"]);
     expect(String(outputOf(result, "fallback").fixed)).toMatch(/^bad: /);
     expect(results(result, "double").map((entry) => (entry.output as Record<string, unknown>).d)).toEqual([2, 6]);
@@ -273,7 +274,7 @@ describe("Loop with branch routing", () => {
       [edge("src", "loop"), edge("loop", "num")]
     );
     const result = await executeWorkflow({ workflow }, deps());
-    expect(result.status).toBe("partial");
+    expect(result.status).toBe("success");
     expect(statuses(result, "num")).toEqual(["error", "success"]);
     const passes = outputOf(result, "loop").items as Array<{ outputs: Record<string, Record<string, unknown>> }>;
     expect(passes[0].outputs.num.error).toBeTruthy();

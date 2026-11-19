@@ -113,16 +113,19 @@ export function deriveRunStatus(busy: boolean, result: WorkflowExecutionResult |
   }
   const skipped = result.nodeResults.filter((node) => node.status === "skipped").length;
   const total = result.nodeResults.length - skipped;
-  const ok = result.nodeResults.filter((node) => node.status === "success").length;
+  // A failure the run handled (routed to its Error output, caught, continued past) counts as ok, and is named.
+  const handled = result.nodeResults.filter((node) => node.status === "error" && node.handled === true).length;
+  const ok = result.nodeResults.filter((node) => node.status === "success").length + handled;
   const started = Date.parse(result.startedAt);
   const completed = Date.parse(result.completedAt);
   const duration = Number.isFinite(started) && Number.isFinite(completed) ? formatDuration(completed - started) : null;
-  const errors = result.nodeResults.filter((node) => node.status === "error").length;
+  const errors = result.nodeResults.filter((node) => node.status === "error").length - handled;
+  const handledNote = handled > 0 ? ` · ${handled} handled` : "";
   const summary =
     total > 0
-      ? ok === total
+      ? ok === total && handled === 0
         ? `${ok} ok`
-        : `${ok} of ${total} ok${errors > 0 ? ` · ${errors} failed` : ""}`
+        : `${ok} of ${total} ok${errors > 0 ? ` · ${errors} failed` : ""}${handledNote}`
       : result.status;
   const label = duration ? `last run ${duration} · ${summary}` : `last run · ${summary}`;
   const failed = result.status === "error" || Boolean(result.error);

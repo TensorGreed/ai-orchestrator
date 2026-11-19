@@ -130,7 +130,7 @@ import {
 } from "./lib/run-trace";
 import { ORBIT, attachedNodeIds, computeAttachmentSlots, orbitPositions } from "./lib/stages";
 import { chooseSourceHandle, findFreePosition, insertPositionAfter, planInsertConnection } from "./lib/canvas-insert";
-import { canvasRunPreview, hasTestData, loopPassResults } from "./lib/run-data";
+import { canvasRunPreview, displayNodeStatus, hasTestData, loopPassResults } from "./lib/run-data";
 import { newNodeConfig } from "./lib/trigger-paths";
 import {
   deleteTabWipWorkflow,
@@ -816,7 +816,7 @@ function getNodeStatusMap(result: WorkflowExecutionResult | null) {
   }
 
   for (const nodeResult of result.nodeResults) {
-    map.set(nodeResult.nodeId, nodeResult.status);
+    map.set(nodeResult.nodeId, displayNodeStatus(nodeResult));
   }
   return map;
 }
@@ -846,6 +846,7 @@ function normalizeEditorExecutionStatus(value: unknown): EditorNodeData["executi
     value === "running" ||
     value === "success" ||
     value === "error" ||
+    value === "handled" ||
     value === "skipped" ||
     value === "canceled"
   ) {

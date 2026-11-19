@@ -596,6 +596,8 @@ export interface WorkflowExecutionDependencies {
     errorCategory?: string;
     errorRemediation?: string;
     retryable?: boolean;
+    /** The failure was handled (NodeExecutionResult.handled). */
+    handled?: boolean;
   }) => Promise<void> | void;
   onLLMDelta?: (event: {
     nodeId: string;
@@ -10285,7 +10287,7 @@ async function executeWorkflowRun(
             input: childInput,
             ...(rejection ? { output: rejection.decisionPayload } : {}),
             error: childErrorMessage,
-            ...(handledOnError ? { errorCategory } : {}),
+            ...(handledOnError ? { errorCategory, handled: true } : {}),
             ...(childNode.type === "human_approval" ? { loopPass } : {})
           });
           if (!decided) {
@@ -10296,7 +10298,8 @@ async function executeWorkflowRun(
               completedAt: nowIso(),
               durationMs: Date.now() - childStarted,
               input: childInput,
-              error: childErrorMessage
+              error: childErrorMessage,
+              ...(handledOnError ? { handled: true } : {})
             });
           }
           if (handledOnError) {
@@ -10553,7 +10556,7 @@ async function executeWorkflowRun(
     } else {
       const rejectionError = request.approvalDecision.reason?.trim() || (timedOut ? "Human approval timed out" : "Human approval rejected");
       labelState.set(waitingNode.id, unionLabels([labelState.get(waitingNode.id), labelsOf(["user"])]));
-      nodeResults.push({
+      const rejectionResult: NodeExecutionResult = {
         nodeId: waitingNode.id,
         status: "error",
         startedAt: decidedAt,
@@ -10562,7 +10565,8 @@ async function executeWorkflowRun(
         input: decisionInput,
         output: decisionPayload,
         error: rejectionError
-      });
+      };
+      nodeResults.push(rejectionResult);
 
       let caughtByTryCatch = false;
       for (const [tryCatchId, scope] of tryCatchScopes.entries()) {
@@ -10587,6 +10591,7 @@ async function executeWorkflowRun(
           });
           labelState.set(tryCatchId, unionLabels([labelState.get(tryCatchId), labelState.get(waitingNode.id)]));
           hadContinuedErrors = true;
+          rejectionResult.handled = true;
           caughtByTryCatch = true;
           break;
         }
@@ -10602,6 +10607,7 @@ async function executeWorkflowRun(
             error: rejectionError
           });
           hadContinuedErrors = true;
+          rejectionResult.handled = true;
         } else if (onError === "branch" && branchTargets.has(waitingNode.id)) {
           if (routeFailureToErrorOutput(waitingNode.id, { clearSkips: true })) {
             nodeOutputs.set(waitingNode.id, {
@@ -10609,6 +10615,7 @@ async function executeWorkflowRun(
               error: rejectionError
             });
             hadContinuedErrors = true;
+            rejectionResult.handled = true;
           } else {
             appendSkippedNodes(nodeOrder, startIndex, nodeResults);
             return {
@@ -11313,6 +11320,16 @@ async function executeWorkflowRun(
         ...(nodeCheckUsage.length > 0 ? { output: withRecordedCheckUsage({}, nodeCheckUsage) } : {})
       };
 
+      // A failure that is caught, continued past or routed to the Error output was handled (NodeExecutionResult.handled).
+      // An HTTP status failure's hint no longer says to connect the Error output.
+      const handledErrorFields = {
+        ...errorFields,
+        ...(errorCategoryName === ErrorCategory.HTTP_STATUS
+          ? { errorRemediation: remediationForCategory(ErrorCategory.HTTP_STATUS, { ...(error instanceof WorkflowError ? error.metadata : {}), handled: true }) }
+          : {}),
+        handled: true
+      };
+
       // Check if this node is inside a try_catch scope (a node's own connected Error output wins over an enclosing Try/Catch)
       let caughtByTryCatch = false;
       const ownErrorOutput = onError === "branch" && (branchTargets.get(node.id)?.get(ERROR_OUTPUT_HANDLE)?.length ?? 0) > 0;
@@ -11350,7 +11367,7 @@ async function executeWorkflowRun(
             completedAt: nowIso(),
             durationMs: Date.now() - started,
             input: nodeInput,
-            ...errorFields
+            ...handledErrorFields
           });
           await dependencies.onNodeComplete?.({
             nodeId: node.id,
@@ -11359,7 +11376,7 @@ async function executeWorkflowRun(
             completedAt: nowIso(),
             durationMs: Date.now() - started,
             input: nodeInput,
-            ...errorFields
+            ...handledErrorFields
           });
           hadContinuedErrors = true;
           break;
@@ -11377,7 +11394,7 @@ async function executeWorkflowRun(
             completedAt: nowIso(),
             durationMs: Date.now() - started,
             input: nodeInput,
-            ...errorFields
+            ...handledErrorFields
           });
           await dependencies.onNodeComplete?.({
             nodeId: node.id,
@@ -11386,7 +11403,7 @@ async function executeWorkflowRun(
             completedAt: nowIso(),
             durationMs: Date.now() - started,
             input: nodeInput,
-            ...errorFields
+            ...handledErrorFields
           });
           hadContinuedErrors = true;
           continue;
@@ -11412,7 +11429,7 @@ async function executeWorkflowRun(
               completedAt: nowIso(),
               durationMs: Date.now() - started,
               input: nodeInput,
-              ...errorFields
+              ...handledErrorFields
             });
             await dependencies.onNodeComplete?.({
               nodeId: node.id,
@@ -11421,7 +11438,7 @@ async function executeWorkflowRun(
               completedAt: nowIso(),
               durationMs: Date.now() - started,
               input: nodeInput,
-              ...errorFields
+              ...handledErrorFields
             });
             hadContinuedErrors = true;
             continue;
@@ -11534,7 +11551,9 @@ async function executeWorkflowRun(
 
   const completedResult: WorkflowExecutionResult = {
     workflowId: workflow.id,
-    status: hadContinuedErrors ? "partial" : "success",
+    // Every failure the run went on past was handled (caught, continued or routed to an Error output), so the run
+    // succeeded; the handled nodes say so on their results (`handled`). Runs before this change ended "partial".
+    status: "success",
     startedAt,
     completedAt: nowIso(),
     executionId: request.executionId,

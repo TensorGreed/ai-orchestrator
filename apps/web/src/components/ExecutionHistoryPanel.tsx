@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from "react";
 import { fetchMcpElicitations, inBackground, type ExecutionHistoryDetail, type ExecutionHistorySummary, type ExecutionRunLink, type McpReplayMode } from "../lib/api";
 import type { McpElicitationView, WorkflowListItem } from "@ai-orchestrator/shared";
+import { displayNodeStatus } from "../lib/run-data";
 import { McpCassetteViewer } from "./McpCassetteViewer";
 import { McpElicitationForm } from "./McpElicitationForm";
 import { DataLabelChips, EndorsementNote } from "./DataLabelChips";
@@ -130,6 +131,7 @@ const TOKENISED_STATUSES = new Set([
   "success",
   "error",
   "partial",
+  "handled",
   "running",
   "pending",
   "waiting_approval",
@@ -546,7 +548,7 @@ export function ExecutionHistoryPanel({
                               {nodeResults.map((entry, index) => {
                                 const trace = asRecord(entry);
                                 const nodeId = typeof trace?.nodeId === "string" ? trace.nodeId : `node-${index + 1}`;
-                                const status = typeof trace?.status === "string" ? trace.status : "unknown";
+                                const status = typeof trace?.status === "string" ? displayNodeStatus({ status: trace.status, handled: trace.handled === true }) : "unknown";
                                 const durationMs = typeof trace?.durationMs === "number" ? trace.durationMs : null;
                                 const errorMessage = typeof trace?.error === "string" ? trace.error : "";
                                 const errorRemediation =

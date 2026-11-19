@@ -710,7 +710,8 @@ describe("a Human Approval inside a Loop body", () => {
       const entry = await context.store.getExecutionHistory(executionId);
       return entry && entry.status !== "waiting_approval" && entry.status !== "running" ? entry : null;
     });
-    expect(history.status).toBe("partial");
+    // The rejection went to the Error output: handled, so the run succeeded.
+    expect(history.status).toBe("success");
     const results = history.nodeResults as Array<{ nodeId: string; status: string; output?: Record<string, unknown>; loopPass?: { pass: number } }>;
     const ran = (nodeId: string, key: string) => results.filter((entry) => entry.nodeId === nodeId && entry.status === "success").map((entry) => entry.output?.[key]);
     expect(ran("pay", "paid")).toEqual([1, 3]);

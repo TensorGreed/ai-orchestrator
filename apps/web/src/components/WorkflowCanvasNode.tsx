@@ -49,6 +49,8 @@ function statusTitle(status: EditorNodeData["executionStatus"]): string {
       return "Completed";
     case "error":
       return "Failed";
+    case "handled":
+      return "Failed, handled by its Error output";
     case "skipped":
       return "Skipped";
     case "canceled":

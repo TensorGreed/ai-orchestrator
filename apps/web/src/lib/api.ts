@@ -751,6 +751,8 @@ export interface StreamNodeCompleteEvent {
   errorCategory?: string;
   errorRemediation?: string;
   retryable?: boolean;
+  /** The failure was handled (routed to the Error output, caught or continued past). */
+  handled?: boolean;
 }
 
 export interface StreamLlmDeltaEvent {

@@ -311,7 +311,19 @@ describe("error output (On Error = branch)", () => {
     expect(JSON.stringify(fallbackInput)).toContain("HTTP 500");
     expect(resultOf(result, "fallback").output).toMatchObject({ path: "fallback acme 500" });
     expect(fallbackInput).toMatchObject({ failedNodeId: "http", failedNodeType: "http_request", errorCategory: "http_status", status: 500, customer: "acme" });
-    expect(result.status).not.toBe("error");
+    // The failure was handled: the node says so and the run succeeded (the validation saw "partial" and a red node).
+    expect(resultOf(result, "http").handled).toBe(true);
+    expect(result.status).toBe("success");
+  });
+
+  it("a failure with no Error output connected is not handled: the run fails", async () => {
+    stubStatuses([500]);
+    const unrouted = branching({ failOnHttpError: true });
+    unrouted.edges = unrouted.edges.filter((entry) => entry.sourceHandle !== "error");
+    const result = await executeWorkflow({ workflow: unrouted }, deps());
+    expect(result.status).toBe("error");
+    expect(resultOf(result, "http").status).toBe("error");
+    expect(resultOf(result, "http").handled).toBeUndefined();
   });
 
   it("skips the error output when the node succeeds", async () => {
@@ -490,8 +502,8 @@ describe("a stored errorConfig with invalid values", () => {
       { workflow: single({ urlTemplate: "https://api.example.com/x", failOnHttpError: true, retryCount: 0 }, { continueOnFail: true, maxRetries: "x" } as unknown as NodeErrorConfig) },
       deps()
     );
-    // A continued failure makes the run partial, not failed.
-    expect(result.status).toBe("partial");
+    // A continued failure was handled: the run succeeds.
+    expect(result.status).toBe("success");
     expect(resultOf(result, "http").status).toBe("error");
   });
 });

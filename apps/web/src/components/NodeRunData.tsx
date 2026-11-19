@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import type { NodeExecutionResult } from "@ai-orchestrator/shared";
 import {
   attachmentUse,
+  displayNodeStatus,
   formatItemCount,
   formatRunDuration,
   outputItemCount,
@@ -441,10 +442,11 @@ export function RunStatusLine({ result, title, passCount }: { result: RunNodeRes
   }
   const duration = result.status === "running" || result.status === "skipped" ? undefined : formatRunDuration(result.durationMs);
   if (duration) parts.push(duration);
+  const shown = displayNodeStatus(result);
   return (
-    <div className={`run-data-status run-data-status-${result.status}`} data-testid="run-data-status" title={title}>
+    <div className={`run-data-status run-data-status-${shown}`} data-testid="run-data-status" title={title}>
       <span className="run-data-status-dot" aria-hidden="true" />
-      <strong>{result.status}</strong>
+      <strong>{shown}</strong>
       {parts.map((part) => (
         <span key={part}> · {part}</span>
       ))}

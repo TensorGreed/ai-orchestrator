@@ -466,6 +466,7 @@
 }
 
 .status-pill[data-status="partial"],
+.status-pill[data-status="handled"],
 .status-pill[data-status="waiting_approval"] {
   color: var(--warn);
   background: var(--warn-soft);

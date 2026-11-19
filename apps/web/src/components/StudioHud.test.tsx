@@ -352,6 +352,24 @@ describe("deriveRunStatus", () => {
     expect(status).toEqual({ state: "ok", label: "last run 42 s · 1 of 2 ok · 1 failed" });
   });
 
+  it("counts a handled failure as ok and names it (the Retry starter: 4 of 4 ok · 1 handled)", () => {
+    const at = "2026-01-01T00:00:00.000Z";
+    const status = deriveRunStatus(false, {
+      workflowId: "wf-1",
+      status: "success",
+      startedAt: at,
+      completedAt: "2026-01-01T00:00:01.000Z",
+      nodeResults: [
+        { nodeId: "trigger", status: "success", startedAt: at },
+        { nodeId: "call", status: "error", handled: true, startedAt: at },
+        { nodeId: "fallback", status: "success", startedAt: at },
+        { nodeId: "out", status: "success", startedAt: at },
+        { nodeId: "ok", status: "skipped", startedAt: at }
+      ]
+    });
+    expect(status).toEqual({ state: "ok", label: "last run 1.0 s · 4 of 4 ok · 1 handled" });
+  });
+
   it("ignores skipped attachment nodes in the summary", () => {
     const status = deriveRunStatus(false, {
       workflowId: "wf-1",
