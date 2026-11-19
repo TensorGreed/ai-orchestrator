@@ -155,8 +155,10 @@ import { redactSensitiveUrl } from "./services/url-redaction.js";
 import { SecretService } from "./services/secret-service";
 import { McpCatalogService } from "./services/mcp-catalog.js";
 import { computeTemplateDependencies } from "./services/template-dependencies";
+import { registerSampleDataRoutes } from "./sample-data-routes.js";
+import { templateCompanions, withRemappedWorkflowReferences } from "./services/template-companions.js";
 import { buildTemplateThumbnail } from "./services/template-thumbnail";
-import { FEATURED_TEMPLATE_IDS } from "./services/seed-service";
+import { FEATURED_TEMPLATE_IDS, STARTER_TEMPLATE_CATEGORY } from "./services/seed-service";
 import { CommunityPackageLoader } from "./services/community-package-loader";
 import { EVAL_RUN_STALE_MS, EvalService, REPLAY_JOB_MAX_EXECUTIONS_DEFAULT, type EvalLlmJudge, type EvalWorkflowExecutor } from "./services/eval-service";
 import { JUDGE_PROMPT_MAX_CHARS } from "./services/eval-scorers";
@@ -317,7 +319,7 @@ import { registerDataDestinationRoutes } from "./data-destination-routes.js";
 import { DataDestinationService } from "./services/data-destination-service.js";
 import { ModelAllowlistService, type ModelAllowlistScope } from "./services/model-allowlist-service.js";
 import { registerModelAllowlistRoutes } from "./model-allowlist-routes.js";
-import { DEACTIVATED_MESSAGE, ReleaseService, productionRefusalBody, withUniqueTriggerPaths } from "./services/release-service.js";
+import { DEACTIVATED_MESSAGE, ReleaseService, productionRefusalBody, productionRoutingKeys, withUniqueTriggerPaths } from "./services/release-service.js";
 import { GateAdmissionService } from "./services/gate-admission-service.js";
 import { STUCK_JOB_MARGIN_MS } from "./db/queue-timeouts.js";
 import { ApprovalResumeRunner, ApprovalService, approvalDecisionOf, approvalPersonCheck, type ApprovalResumeJob } from "./services/approval-service.js";
@@ -17087,6 +17089,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
   // ── Phase 7.4: Workflow Templates & Sharing ───────────────────────────
 
+  // Sample data the starter templates call, so they run without setup.
+  registerSampleDataRoutes(app);
+
   // List templates (any authenticated user)
   app.get("/api/templates", async (request, reply) => {
     const user = await requireRole(request, reply, ["admin", "builder", "operator", "viewer"]);
@@ -17094,25 +17099,18 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     const query = request.query as Record<string, string>;
     const category = query.category || undefined;
     const search = query.search || undefined;
+    // ?setup=none — only templates that run without setup (no model, key, server or service to configure).
+    const withoutSetupOnly = query.setup === "none";
     const pageRequest = pageRequestFromQuery(query);
-    const allTemplates = await store.listTemplates({ category, search });
-    // Paged: only the page is enriched below.
-    // In the gallery's order: featured first, then the store's category and name order.
-    const templatePage = pageRequest
-      ? pageOfById(
-          [...allTemplates].sort((a, b) => Number(FEATURED_TEMPLATE_IDS.has(b.id)) - Number(FEATURED_TEMPLATE_IDS.has(a.id))),
-          pageRequest,
-          (tpl) => `${FEATURED_TEMPLATE_IDS.has(tpl.id)}\u0000${tpl.category}\u0000${tpl.name}`
-        )
-      : null;
-    const templates = templatePage ? templatePage.items : allTemplates;
+    // The gallery's order: featured first, then the starters, then the store's category and name order.
+    const rank = (tpl: { id: string; category: string }) => (FEATURED_TEMPLATE_IDS.has(tpl.id) ? 0 : tpl.category === STARTER_TEMPLATE_CATEGORY ? 1 : 2);
+    const allTemplates = [...(await store.listTemplates({ category, search }))].sort((a, b) => rank(a) - rank(b));
     // Enrich each template with detected external dependencies (OpenAI key,
     // Pinecone, etc.) so the gallery can show "Requires: …" pills before the
     // user clicks Use Template. listTemplates returns metadata only, so we
     // fetch the full row per template to get the workflowJson. Template count
     // is small (~10s) and this read path is cold, so the extra cost is fine.
-    const enriched = [];
-    for (const tpl of templates) {
+    const enrich = async (tpl: (typeof allTemplates)[number]) => {
       const full = await store.getTemplate(tpl.id);
       let dependencies: ReturnType<typeof computeTemplateDependencies> = [];
       let thumbnailSvg = "";
@@ -17126,11 +17124,21 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         }
       }
       const featured = FEATURED_TEMPLATE_IDS.has(tpl.id);
-      enriched.push({ ...tpl, dependencies, thumbnailSvg, featured });
+      return { ...tpl, dependencies, thumbnailSvg, featured };
+    };
+    if (withoutSetupOnly) {
+      // The filter needs every template's dependencies, so all are enriched before the page is cut.
+      const enrichedAll = [];
+      for (const tpl of allTemplates) enrichedAll.push(await enrich(tpl));
+      const runnable = enrichedAll.filter((tpl) => tpl.dependencies.length === 0);
+      if (pageRequest) return pageOfById(runnable, pageRequest, (tpl) => `${rank(tpl)}\u0000${tpl.category}\u0000${tpl.name}`);
+      return { templates: runnable };
     }
-    // Featured templates float to the top of the gallery; everything else
-    // keeps the store's category+name order from listTemplates.
-    enriched.sort((a, b) => Number(b.featured) - Number(a.featured));
+    // Paged: only the page is enriched below.
+    const templatePage = pageRequest ? pageOfById(allTemplates, pageRequest, (tpl) => `${rank(tpl)}\u0000${tpl.category}\u0000${tpl.name}`) : null;
+    const templates = templatePage ? templatePage.items : allTemplates;
+    const enriched = [];
+    for (const tpl of templates) enriched.push(await enrich(tpl));
     if (templatePage) return { ...templatePage, items: enriched };
     return { templates: enriched };
   });
@@ -17220,21 +17228,49 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       .safeParse(request.body ?? {});
     if (!target.success) { reply.code(400); return { error: "Invalid payload", details: target.error.issues }; }
 
-    const imported = importWorkflowFromJson(template.workflowJson);
-    imported.id = crypto.randomUUID();
-    imported.name = `${template.name} (from template)`;
-    // The new workflow lands where the caller asks (default project), never
-    // in whatever project the template's JSON names.
-    imported.projectId = target.data.projectId ?? DEFAULT_PROJECT_ID;
-    imported.folderId = target.data.folderId;
-    delete imported.pinnedData;
-    // Phase 15.4 — like a duplicate, a workflow made from a template gets trigger paths nobody uses.
-    imported.nodes = withUniqueTriggerPaths(imported, await releaseService.usedRoutingKeys()).nodes;
-    // 12.2 — and, made by a builder, its triggers' default trust.
-    if (user.role !== "admin") imported.nodes = withoutTriggerTrust(imported).nodes;
-    const saveDenial = await workflowSaveDenial(user, imported);
-    if (saveDenial) return denyRunAccess(reply, saveDenial);
-    await store.upsertWorkflow(imported, { createdBy: user.id });
+    let companions: Workflow[];
+    try {
+      companions = templateCompanions(template.workflowJson);
+    } catch (error) {
+      reply.code(400);
+      return { error: error instanceof Error ? error.message : "The template's companion workflows are invalid." };
+    }
+    // The new workflow, and each workflow it brings along (a sub-workflow it calls), gets a new id; its references follow.
+    const companionIds = new Map(companions.map((companion) => [companion.id, crypto.randomUUID()] as const));
+    const usedRoutingKeys = await releaseService.usedRoutingKeys();
+    const prepare = (workflow: Workflow, id: string, name: string): Workflow => {
+      const prepared = withRemappedWorkflowReferences({ ...workflow, id, name }, companionIds);
+      // The new workflow lands where the caller asks (default project), never
+      // in whatever project the template's JSON names.
+      prepared.projectId = target.data.projectId ?? DEFAULT_PROJECT_ID;
+      prepared.folderId = target.data.folderId;
+      delete prepared.pinnedData;
+      // Phase 15.4 — like a duplicate, a workflow made from a template gets trigger paths nobody uses.
+      prepared.nodes = withUniqueTriggerPaths(prepared, usedRoutingKeys).nodes;
+      // The paths it takes are not given to the next workflow of this template.
+      for (const entry of productionRoutingKeys(prepared)) usedRoutingKeys.add(entry.key);
+      // 12.2 — and, made by a builder, its triggers' default trust.
+      if (user.role !== "admin") prepared.nodes = withoutTriggerTrust(prepared).nodes;
+      return prepared;
+    };
+    const imported = prepare(importWorkflowFromJson(template.workflowJson), crypto.randomUUID(), `${template.name} (from template)`);
+    const preparedCompanions = companions.map((companion) => prepare(companion, companionIds.get(companion.id)!, companion.name));
+    // Nothing is saved unless every workflow may be.
+    for (const workflow of [...preparedCompanions, imported]) {
+      const saveDenial = await workflowSaveDenial(user, workflow);
+      if (saveDenial) return denyRunAccess(reply, saveDenial);
+    }
+    const saved: string[] = [];
+    try {
+      for (const workflow of [...preparedCompanions, imported]) {
+        await store.upsertWorkflow(workflow, { createdBy: user.id });
+        saved.push(workflow.id);
+      }
+    } catch (error) {
+      // No half-made template: the workflows already written (new ids, nothing else refers to them) are removed.
+      for (const id of saved) await store.deleteWorkflow(id).catch(() => false);
+      throw error;
+    }
 
     await audit(request, user, {
       category: "workflow",
@@ -17242,9 +17278,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       action: "use",
       resourceType: "template",
       resourceId: template.id,
-      metadata: { newWorkflowId: imported.id }
+      metadata: { newWorkflowId: imported.id, ...(preparedCompanions.length > 0 ? { companionWorkflowIds: preparedCompanions.map((companion) => companion.id) } : {}) }
     });
-    return { workflowId: imported.id, name: imported.name };
+    return {
+      workflowId: imported.id,
+      name: imported.name,
+      ...(preparedCompanions.length > 0 ? { companions: preparedCompanions.map((companion) => ({ workflowId: companion.id, name: companion.name })) } : {})
+    };
   });
 
   // Delete template (admin)

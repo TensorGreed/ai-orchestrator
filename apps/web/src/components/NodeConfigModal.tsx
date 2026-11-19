@@ -58,6 +58,8 @@ import type { EditorNode, EditorNodeData, NodeTelemetry } from "../lib/workflow"
 import { NodeTypeIcon } from "./node-icons";
 import { GuardNodeFields, GuardProtectionFields, GuardRevealFields } from "./GuardNodeConfigFields";
 import { OutputGuardrailFields } from "./OutputGuardrailFields";
+import { FormFieldsEditor, MappingEditor, SettingsFields, SwitchCasesEditor } from "./StructuredConfigFields";
+import { ragSettingFields } from "../lib/structured-settings";
 import { ApprovalGateNodeFields } from "./ApprovalGateNodeFields";
 import { McpAnnotationChips, McpOutputSchema } from "./McpToolMeta";
 import { SecretSaveWarnings } from "./SecretSaveWarnings";
@@ -6782,35 +6784,28 @@ export function NodeInspector({
                 { value: "async", label: "Asynchronous (fire and forget)" }
               ]}
             />
-            <TextAreaField
-              label="Input Mapping (JSON object)"
-              value={JSON.stringify(asRecord(config.inputMapping), null, 2)}
-              onChange={(next) => {
-                try {
-                  const parsed = JSON.parse(next) as Record<string, unknown>;
-                  setConfig((current) => ({ ...current, inputMapping: parsed }));
-                } catch {
-                  // ignore typing errors
-                }
-              }}
-              rows={5}
+            <MappingEditor
+              key={`${node.id}:inputMapping`}
+              label="Input Mapping"
+              value={config.inputMapping}
+              fromLabel="From this workflow"
+              toLabel="Sub-workflow input"
+              fromPlaceholder="customer.name"
+              toPlaceholder="name"
+              help="Values this workflow sends: a path in this node's input, and the key the sub-workflow reads it as."
+              onChange={(next) => setConfig((current) => ({ ...current, inputMapping: next }))}
             />
-            <TextAreaField
-              label="Output Mapping (JSON object)"
-              value={JSON.stringify(asRecord(config.outputMapping), null, 2)}
-              onChange={(next) => {
-                try {
-                  const parsed = JSON.parse(next) as Record<string, unknown>;
-                  setConfig((current) => ({ ...current, outputMapping: parsed }));
-                } catch {
-                  // ignore typing errors
-                }
-              }}
-              rows={5}
+            <MappingEditor
+              key={`${node.id}:outputMapping`}
+              label="Output Mapping"
+              value={config.outputMapping}
+              fromLabel="Sub-workflow output"
+              toLabel="Key here"
+              fromPlaceholder="result"
+              toPlaceholder="greeting"
+              help="Leave empty to keep the sub-workflow's whole output. With rows, the node outputs only the mapped keys."
+              onChange={(next) => setConfig((current) => ({ ...current, outputMapping: next }))}
             />
-            <div className="cfg-tip">
-              Map sub-workflow output keys back to parent context. Example: <code>{`{ "child_result": "parent_key" }`}</code>.
-            </div>
           </>
         );
       case "wait_node": {
@@ -7377,20 +7372,13 @@ export function NodeInspector({
                   />
                 </div>
               ) : null}
-              <JsonDraftField<Record<string, unknown> | undefined>
-                key={`${node.id}:vectorStoreConfig`}
-                label="Vector Store Extra Config (JSON)"
-                value={asRecord(config.vectorStoreConfig)}
-                accept={(parsed) =>
-                  parsed && typeof parsed === "object" && !Array.isArray(parsed)
-                    ? Object.keys(parsed).length > 0
-                      ? (parsed as Record<string, unknown>)
-                      : {}
-                    : undefined
-                }
-                invalidMessage="Use a JSON object."
-                onCommit={(next) =>
-                  setConfig((current) => ({ ...current, vectorStoreConfig: next && Object.keys(next).length > 0 ? next : undefined }))
+              <SettingsFields
+                key={`${node.id}:vectorStoreConfig:${embedderId}:${vectorStoreId}`}
+                fields={ragSettingFields(embedderId, vectorStoreId)}
+                settings={asRecord(config.vectorStoreConfig)}
+                otherLabel="Other vector store settings"
+                onChange={(next) =>
+                  setConfig((current) => ({ ...current, vectorStoreConfig: Object.keys(next).length > 0 ? next : undefined }))
                 }
               />
               <JsonDraftField<unknown[]>
@@ -7636,22 +7624,10 @@ export function NodeInspector({
               mode="template"
               previewContext={expressionPreviewContext}
             />
-            <div className="cfg-tip">
-              Cases as a JSON array, for example{" "}
-              <code>[{`{\"value\":\"complete\",\"label\":\"complete\"}`}]</code>. Branch handles use each case <code>label</code>.
-            </div>
-            <TextAreaField
-              label="Cases array (JSON)"
-              value={JSON.stringify(Array.isArray(config.cases) ? config.cases : [], null, 2)}
-              onChange={(next) => {
-                try {
-                  const arr = JSON.parse(next);
-                  if (Array.isArray(arr)) {
-                     setConfig(current => ({ ...current, cases: arr }));
-                  }
-                } catch { /* typing error ignore */ }
-              }}
-              rows={5}
+            <SwitchCasesEditor
+              cases={config.cases}
+              defaultLabel={toStringValue(config.defaultLabel, "default")}
+              onChange={(next) => setConfig((current) => ({ ...current, cases: next }))}
             />
             <AdvancedFields setCount={countSet([[config.defaultLabel, "default", sampleConfig.defaultLabel]])}>
               <TextField
@@ -9697,24 +9673,7 @@ export function NodeInspector({
               onChange={(next) => setConfig((current) => ({ ...current, successMessage: next }))}
               rows={2}
             />
-            <TextAreaField
-              label="Fields (JSON array)"
-              value={toStringValue(
-                typeof config.fields === "string"
-                  ? config.fields
-                  : JSON.stringify(config.fields ?? [], null, 2)
-              )}
-              onChange={(next) => {
-                let parsed: unknown = next;
-                try {
-                  parsed = JSON.parse(next);
-                } catch {
-                  /* keep string */
-                }
-                setConfig((current) => ({ ...current, fields: parsed }));
-              }}
-              rows={8}
-            />
+            <FormFieldsEditor value={config.fields} onChange={(next) => setConfig((current) => ({ ...current, fields: next }))} />
             <div className="cfg-tip">
               Form is served at <code>/api/forms/&lt;path&gt;</code>. POST submissions trigger the workflow with fields as input.
             </div>

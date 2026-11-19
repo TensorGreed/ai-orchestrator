@@ -124,7 +124,7 @@ describe("TemplateGallery", () => {
 
     await screen.findByText("Echo flow");
     const depsContainer = screen.getByTestId("tpl-deps-tpl-zero-deps");
-    expect(depsContainer).toHaveTextContent(/runs out of the box/i);
+    expect(depsContainer).toHaveTextContent(/runs without setup/i);
   });
 
   it("renders no dependency row at all when the field is undefined (back-compat)", async () => {
@@ -171,4 +171,42 @@ describe("TemplateGallery", () => {
     expect(screen.queryByTestId("tpl-thumbnail-tpl-no-thumb-1")).toBeNull();
     expect(screen.queryByTestId("tpl-thumbnail-tpl-no-thumb-2")).toBeNull();
   });
+
+  it("offers a Starters category", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchTemplates).mockResolvedValue({ templates: [makeTemplate()] });
+
+    render(<TemplateGallery onWorkflowCreated={vi.fn()} />);
+    await screen.findByText("Webhook Starter");
+    await user.click(screen.getByRole("button", { name: "Starters" }));
+
+    expect(api.fetchTemplates).toHaveBeenLastCalledWith({ category: "Starters" });
+  });
+
+  it("filters to templates that run without setup", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchTemplates).mockResolvedValue({ templates: [{ ...makeTemplate(), dependencies: [] }] });
+
+    render(<TemplateGallery onWorkflowCreated={vi.fn()} />);
+    await screen.findByText("Webhook Starter");
+    const filter = screen.getByRole("button", { name: "Runs without setup" });
+    expect(filter).toHaveAttribute("aria-pressed", "false");
+    await user.click(filter);
+
+    expect(filter).toHaveAttribute("aria-pressed", "true");
+    expect(api.fetchTemplates).toHaveBeenLastCalledWith({ withoutSetupOnly: true });
+    expect(screen.getByTestId("tpl-deps-tpl-1")).toHaveTextContent("Runs without setup");
+  });
+
+  it("says when no template runs without setup in a category", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.fetchTemplates).mockResolvedValueOnce({ templates: [makeTemplate()] }).mockResolvedValue({ templates: [] });
+
+    render(<TemplateGallery onWorkflowCreated={vi.fn()} />);
+    await screen.findByText("Webhook Starter");
+    await user.click(screen.getByRole("button", { name: "Runs without setup" }));
+
+    expect(await screen.findByText("No templates here run without setup.")).toBeInTheDocument();
+  });
 });
+

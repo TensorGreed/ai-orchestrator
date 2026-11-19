@@ -1,0 +1,108 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "starter-webhook-reshape-reply",
+    "name": "Webhook: reshape and reply",
+    "description": "Receives a JSON request, reshapes it with a Set node and answers the caller with a Webhook Response. Click Webhook run to try it with the sample request, or call its webhook URL.",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "webhook",
+        "type": "webhook_input",
+        "name": "Incoming request",
+        "position": {
+          "x": 80,
+          "y": 200
+        },
+        "config": {
+          "path": "starter-reshape",
+          "method": "POST",
+          "responseMode": "responseNode",
+          "authMode": "none"
+        }
+      },
+      {
+        "id": "reshape",
+        "type": "set_node",
+        "name": "Reshape",
+        "position": {
+          "x": 360,
+          "y": 200
+        },
+        "config": {
+          "assignments": [
+            {
+              "key": "fullName",
+              "valueTemplate": "{{first_name}} {{last_name}}",
+              "type": "string"
+            },
+            {
+              "key": "email",
+              "valueTemplate": "{{ email.toLowerCase() }}",
+              "type": "auto"
+            },
+            {
+              "key": "isVip",
+              "valueTemplate": "{{ orders > 10 }}",
+              "type": "auto"
+            }
+          ]
+        }
+      },
+      {
+        "id": "reply",
+        "type": "webhook_response",
+        "name": "Reply",
+        "position": {
+          "x": 640,
+          "y": 200
+        },
+        "config": {
+          "statusCode": 200,
+          "headersTemplate": "{\n  \"content-type\": \"application/json\"\n}",
+          "bodyTemplate": "{\"customer\": {{ JSON.stringify(fullName) }}, \"email\": {{ JSON.stringify(email) }}, \"vip\": {{isVip}}}"
+        }
+      },
+      {
+        "id": "out",
+        "type": "output",
+        "name": "Run result",
+        "position": {
+          "x": 640,
+          "y": 340
+        },
+        "config": {
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e_webhook_out_reshape",
+        "source": "webhook",
+        "target": "reshape"
+      },
+      {
+        "id": "e_reshape_out_reply",
+        "source": "reshape",
+        "target": "reply"
+      },
+      {
+        "id": "e_reshape_out_out",
+        "source": "reshape",
+        "target": "out"
+      }
+    ],
+    "settings": {
+      "testWebhookPayload": {
+        "first_name": "Ada",
+        "last_name": "Lovelace",
+        "email": "ADA@Example.com",
+        "orders": 12
+      }
+    }
+  },
+  "exportedAt": "2026-11-19T00:00:00.000Z"
+}

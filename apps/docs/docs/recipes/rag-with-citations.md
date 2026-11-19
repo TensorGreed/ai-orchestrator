@@ -35,7 +35,7 @@ related: ["grounding","rag","hybrid-search","output-checks","misinformation"]
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
 3. Create a knowledge base and add a document, as in the [knowledge base recipe](/recipes/rag-knowledge-base#create-a-knowledge-base-with-the-api). Create it with the embedder the **Retrieve** node uses: `openai-embedder` as shipped, or `token-embedder` to start with no key.
 4. With no OpenAI key, use echo for the **LLM** node. The **Provider** list has no echo entry, so set the node's `providerId` to `echo` in the JSON file and import it again before you edit the nodes below.
-5. Open **Retrieve** and replace `<your-kb-id>` with the knowledge base id, in **Vector Store Extra Config (JSON)**. If you used `token-embedder`, set **Embedder** to **Token Based (Local Demo)**. Leave **Vector Store** alone: its list has no entry for the built-in knowledge base, so it may show another store, but the saved `knowledge-base` value stays. Save.
+5. Open **Retrieve**. **Vector Store** already shows **Knowledge Base (built in)**: pick your knowledge base in **Knowledge Base**, in place of the `<your-kb-id>` placeholder. If you used `token-embedder`, check that **Embedder** shows **Token Based (Local Demo)**. Save.
 6. Run it, then open the run and click **Extract Citations** to read the resolved citations.
 
 ## How it works

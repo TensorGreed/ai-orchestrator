@@ -125,9 +125,9 @@ test("the agent's Language Models drawer offers LLM Call", async () => {
 test("the template gallery says which templates need a model", async () => {
   await page.keyboard.press("Escape");
   await sidebarItem("Templates").click();
-  await expect(page.getByTestId("tpl-deps-builtin-conditional-flow")).toContainText("Runs out of the box");
-  await expect(page.getByTestId("tpl-deps-builtin-rag-flow")).toContainText("Runs out of the box");
-  await expect(page.getByTestId("tpl-deps-builtin-agentic-mcp-flow")).toContainText("Runs out of the box");
+  await expect(page.getByTestId("tpl-deps-builtin-conditional-flow")).toContainText("Runs without setup");
+  await expect(page.getByTestId("tpl-deps-builtin-rag-flow")).toContainText("Runs without setup");
+  await expect(page.getByTestId("tpl-deps-builtin-agentic-mcp-flow")).toContainText("Runs without setup");
   await expect(page.getByTestId("tpl-needs-model-builtin-structured-output-flow")).toBeVisible();
   await expect(page.getByTestId("tpl-needs-model-builtin-vscode-l2m-coding-agent-flow")).toBeVisible();
   await page.getByTestId("tpl-deps-builtin-structured-output-flow").scrollIntoViewIfNeeded();
