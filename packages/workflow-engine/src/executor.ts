@@ -4578,7 +4578,7 @@ async function runWithNodeTemplateMode<T>(context: Pick<NodeRuntimeContext, "wor
         ErrorCategory.NODE_CONFIG,
         false,
         { code: TEMPLATE_VALUE_MISSING_CODE },
-        "Strict templates are on for this workflow. Open the node and fix the field the error names (the editor lists the paths the last run had), or turn off Strict templates in the workflow menu."
+        "Strict templates are on for this workflow. Open the node and fix the field the error names (type {{ in it for the fields the last run had), or turn off Strict templates in the workflow menu."
       );
     }
     throw error;

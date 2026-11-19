@@ -1092,9 +1092,6 @@
 }
 
 /* `{{ }}` autocomplete: the last run's fields, under the field being typed in. */
-.expression-field {
-  position: relative;
-}
 .template-suggest {
   list-style: none;
   margin: -2px 0 0;

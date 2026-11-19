@@ -65,7 +65,7 @@ function renderInspector(element: React.ReactElement) {
   return view;
 }
 
-function type(field: HTMLTextAreaElement, text: string) {
+function type(field: HTMLTextAreaElement | HTMLInputElement, text: string) {
   fireEvent.change(field, { target: { value: text, selectionStart: text.length, selectionEnd: text.length } });
 }
 
@@ -122,6 +122,26 @@ describe("template field autocomplete", () => {
     const option = within(screen.getByTestId("template-suggest")).getByRole("option");
     expect(option.textContent).toContain("results.fetch_items");
     expect(option.textContent).toContain("Fetch items");
+  });
+
+  it("works in plain text fields too, such as a Set node's Value Template and a Key field", () => {
+    renderInspector(
+      <NodeInspector {...props({ node: node("post_order", "set_node", { assignments: [{ key: "line", valueTemplate: "" }] }) })} />
+    );
+    const valueField = screen.getByLabelText("Value Template") as HTMLTextAreaElement;
+    fireEvent.focus(valueField);
+    type(valueField, "Total: {{bo");
+    expect(screen.getByTestId("template-suggest")).toBeInTheDocument();
+    type(valueField, "Total: {{stat");
+    fireEvent.keyDown(valueField, { key: "Tab" });
+    expect(valueField.value).toBe("Total: {{status}}");
+    // A plain field without {{ shows no list.
+    const keyField = screen.getByLabelText("Key") as HTMLInputElement;
+    fireEvent.focus(keyField);
+    type(keyField, "line{{");
+    expect(screen.getByTestId("template-suggest")).toBeInTheDocument();
+    type(keyField, "line");
+    expect(screen.queryByTestId("template-suggest")).toBeNull();
   });
 
   it("shows no list outside {{ }}", () => {

@@ -731,6 +731,135 @@ function HttpErrorStatusFields({
   );
 }
 
+/** What the template fields of the open node can suggest and warn about (provided by the inspector). */
+interface TemplateAssist {
+  suggestions: TemplateSuggestion[];
+  /** The node has input from the last run, so a `{{ }}` the preview cannot fill has no value in that run. */
+  hasRunInput: boolean;
+  /** The workflow's strict templates setting: a `{{ }}` without a value fails the node. */
+  strictTemplates: boolean;
+}
+
+const TemplateAssistContext = createContext<TemplateAssist | null>(null);
+
+type TextEntryElement = HTMLTextAreaElement | HTMLInputElement;
+
+/**
+ * Autocomplete for the `{{ }}` being typed in a text field of the inspector: a list of the last run's fields under
+ * the field, opened only inside an open `{{`, so plain text and JSON fields behave as before. The arrow keys move,
+ * Enter or Tab inserts the path (closing the braces), Escape closes the list (not the inspector).
+ */
+function useTemplateAutocomplete<T extends TextEntryElement>({
+  value,
+  onChange,
+  label,
+  disabled = false
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  label: string;
+  disabled?: boolean;
+}) {
+  const assist = useContext(TemplateAssistContext);
+  const enabled = Boolean(assist) && !disabled;
+  const elementRef = useRef<T | null>(null);
+  const [token, setToken] = useState<TemplateToken | null>(null);
+  const [activeOption, setActiveOption] = useState(0);
+  const [dismissedAt, setDismissedAt] = useState<number | null>(null);
+  const pendingCaret = useRef<number | null>(null);
+  const listboxId = useId();
+  const options = useMemo(
+    () => (token && assist && enabled ? rankTemplateSuggestions(assist.suggestions, token.query, 50) : []),
+    [assist, enabled, token]
+  );
+  const open = Boolean(token) && options.length > 0 && dismissedAt !== token?.from;
+  const activeIndex = Math.min(activeOption, Math.max(options.length - 1, 0));
+
+  // After a suggestion is applied, the caret goes after the inserted path once the new text is in the field.
+  useEffect(() => {
+    const caret = pendingCaret.current;
+    const element = elementRef.current;
+    if (caret === null || !element || element.value !== value) return;
+    pendingCaret.current = null;
+    element.setSelectionRange(caret, caret);
+  }, [value]);
+
+  const updateToken = (element: TextEntryElement) => {
+    const caret = element.selectionStart;
+    const next = enabled && caret !== null && caret === element.selectionEnd ? templateTokenAt(element.value, caret) : null;
+    const same = next === token || (next && token && next.from === token.from && next.to === token.to && next.query === token.query);
+    if (same) return;
+    setToken(next);
+    setActiveOption(0);
+  };
+
+  const apply = (option: TemplateSuggestion) => {
+    if (!token) return;
+    const applied = applyTemplateSuggestion(value, token, option.path);
+    pendingCaret.current = applied.caret;
+    setToken(null);
+    onChange(applied.text);
+  };
+
+  const inputProps = {
+    ref: (element: T | null) => {
+      elementRef.current = element;
+    },
+    onSelect: (event: React.SyntheticEvent<T>) => updateToken(event.currentTarget),
+    onKeyDown: (event: React.KeyboardEvent<T>) => {
+      if (!open) return;
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const step = event.key === "ArrowDown" ? 1 : -1;
+        setActiveOption((activeIndex + step + options.length) % options.length);
+      } else if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        apply(options[activeIndex]!);
+      } else if (event.key === "Escape") {
+        // Closes the list only: the inspector ignores an Escape that was handled.
+        event.preventDefault();
+        setDismissedAt(token?.from ?? null);
+      }
+    },
+    "aria-autocomplete": enabled ? ("list" as const) : undefined,
+    "aria-controls": open ? listboxId : undefined,
+    "aria-activedescendant": open ? `${listboxId}-${activeIndex}` : undefined
+  };
+
+  const list = open ? (
+    <ul className="template-suggest" role="listbox" id={listboxId} aria-label={`${label}: fields from the last run`} data-testid="template-suggest">
+      {options.map((option, index) => (
+        <li
+          key={option.path}
+          id={`${listboxId}-${index}`}
+          role="option"
+          aria-selected={index === activeIndex}
+          className={index === activeIndex ? "active" : undefined}
+          // Keeps the focus (and the caret) in the field.
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={(event) => {
+            event.preventDefault();
+            apply(option);
+          }}
+        >
+          <code className="template-suggest-path">{option.path}</code>
+          <span className="template-suggest-source">{option.source}</span>
+          {option.detail ? <span className="template-suggest-detail">{option.detail}</span> : null}
+        </li>
+      ))}
+    </ul>
+  ) : null;
+
+  return {
+    inputProps,
+    list,
+    elementRef,
+    /** Call from the field's change handler with the element, after passing the new text on. */
+    onTextChange: updateToken,
+    close: () => setToken(null)
+  };
+}
+
 function TextField({
   label,
   value,
@@ -744,10 +873,21 @@ function TextField({
   placeholder?: string;
   help?: React.ReactNode;
 }) {
+  const autocomplete = useTemplateAutocomplete<HTMLInputElement>({ value, onChange, label });
   return (
     <label className="cfg-field">
       <FieldLabel label={label} help={help} />
-      <input value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
+      <input
+        {...autocomplete.inputProps}
+        value={value}
+        onChange={(event) => {
+          onChange(event.target.value);
+          autocomplete.onTextChange(event.target);
+        }}
+        onBlur={autocomplete.close}
+        placeholder={placeholder}
+      />
+      {autocomplete.list}
     </label>
   );
 }
@@ -908,6 +1048,7 @@ function TextAreaField({
   const [formatError, setFormatError] = useState("");
   const showJsonFormat = !readOnly && (allowJsonFormat ?? shouldOfferJsonFormatting(label));
   const fieldId = useId();
+  const autocomplete = useTemplateAutocomplete<HTMLTextAreaElement>({ value, onChange, label, disabled: readOnly });
 
   useEffect(() => {
     setFormatError("");
@@ -934,12 +1075,18 @@ function TextAreaField({
         )}
       </div>
       <textarea
+        {...autocomplete.inputProps}
         id={fieldId}
         value={value}
-        onChange={(event) => onChange(event.target.value)}
+        onChange={(event) => {
+          onChange(event.target.value);
+          autocomplete.onTextChange(event.target);
+        }}
+        onBlur={autocomplete.close}
         rows={rows}
         readOnly={readOnly}
       />
+      {autocomplete.list}
       {formatError && <div className="cfg-field-error">{formatError}</div>}
     </div>
   );
@@ -1038,17 +1185,6 @@ function stringifyInline(value: unknown): string {
   }
 }
 
-/** What the template fields of the open node can suggest and warn about (provided by the inspector). */
-interface TemplateAssist {
-  suggestions: TemplateSuggestion[];
-  /** The node has input from the last run, so a `{{ }}` the preview cannot fill has no value in that run. */
-  hasRunInput: boolean;
-  /** The workflow's strict templates setting: a `{{ }}` without a value fails the node. */
-  strictTemplates: boolean;
-}
-
-const TemplateAssistContext = createContext<TemplateAssist | null>(null);
-
 /** The run's optional prompt fields: they render empty without a value, in strict mode too (engine template.ts). */
 const OPTIONAL_RUN_FIELDS = new Set(["system_prompt", "user_prompt", "session_id"]);
 
@@ -1082,18 +1218,7 @@ function ExpressionField({
   // A preview that only repeats the text typed adds nothing; it shows when the template resolved to something else.
   const showPreview = Boolean(previewError) || (Boolean(previewText) && previewText.trim() !== value.trim());
   const showJsonFormat = shouldOfferJsonFormatting(label);
-  // Autocomplete for the `{{ }}` being typed: the token at the caret, the highlighted option, and an Escape.
-  const [token, setToken] = useState<TemplateToken | null>(null);
-  const [activeOption, setActiveOption] = useState(0);
-  const [dismissedAt, setDismissedAt] = useState<number | null>(null);
-  const pendingCaret = useRef<number | null>(null);
-  const listboxId = useId();
-  const options = useMemo(
-    () => (token && assist ? rankTemplateSuggestions(assist.suggestions, token.query, 50) : []),
-    [assist, token]
-  );
-  const suggestOpen = Boolean(token) && options.length > 0 && dismissedAt !== token?.from;
-  const activeIndex = Math.min(activeOption, Math.max(options.length - 1, 0));
+  const autocomplete = useTemplateAutocomplete<HTMLTextAreaElement>({ value, onChange, label });
 
   useEffect(() => {
     setFormatError("");
@@ -1145,31 +1270,6 @@ function ExpressionField({
   const fieldRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // After a suggestion is applied, the caret goes after the inserted path once the new text is in the field.
-  useEffect(() => {
-    const caret = pendingCaret.current;
-    const element = textareaRef.current;
-    if (caret === null || !element || element.value !== value) return;
-    pendingCaret.current = null;
-    element.setSelectionRange(caret, caret);
-  }, [value]);
-
-  const updateToken = (element: HTMLTextAreaElement) => {
-    const next = assist && element.selectionStart === element.selectionEnd ? templateTokenAt(element.value, element.selectionStart) : null;
-    const same = next === token || (next && token && next.from === token.from && next.to === token.to && next.query === token.query);
-    if (same) return;
-    setToken(next);
-    setActiveOption(0);
-  };
-
-  const applyOption = (option: TemplateSuggestion) => {
-    if (!token) return;
-    const applied = applyTemplateSuggestion(value, token, option.path);
-    pendingCaret.current = applied.caret;
-    setToken(null);
-    onChange(applied.text);
-  };
-
   // Only a run with input for this node can say a value is missing; a missing value fails the node in strict mode.
   const missingWarning =
     mode !== "expression" && assist?.hasRunInput && missingPaths.length > 0 ? (
@@ -1182,9 +1282,10 @@ function ExpressionField({
           </span>
         ))}
         {missingPaths.length > 4 ? ` and ${missingPaths.length - 4} more` : null}
+        {missingPaths.length === 1 ? " has no value" : " have no value"}
         {assist.strictTemplates
-          ? " has no value, and Strict templates is on, so this node fails."
-          : " has no value, so it renders empty. Check the path, or pick one from the suggestions."}
+          ? ", and Strict templates is on, so this node fails."
+          : ", so it renders empty. Check the path, or type {{ to pick one."}
       </div>
     ) : null;
 
@@ -1221,61 +1322,27 @@ function ExpressionField({
         )}
       </div>
       <textarea
+        {...autocomplete.inputProps}
         aria-label={label}
         value={value}
         onChange={(event) => {
           onChange(event.target.value);
-          updateToken(event.target);
+          autocomplete.onTextChange(event.target);
         }}
-        onSelect={(event) => updateToken(event.currentTarget)}
-        onKeyDown={(event) => {
-          if (!suggestOpen) return;
-          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-            event.preventDefault();
-            const step = event.key === "ArrowDown" ? 1 : -1;
-            setActiveOption((activeIndex + step + options.length) % options.length);
-          } else if (event.key === "Enter" || event.key === "Tab") {
-            event.preventDefault();
-            applyOption(options[activeIndex]!);
-          } else if (event.key === "Escape") {
-            // Closes the list only, not the inspector (which ignores a handled Escape).
-            event.preventDefault();
-            setDismissedAt(token?.from ?? null);
-          }
+        ref={(element) => {
+          autocomplete.inputProps.ref(element);
+          textareaRef.current = element;
         }}
-        ref={textareaRef}
         onFocus={() => setEditing(true)}
         onBlur={() => {
-          setToken(null);
+          autocomplete.close();
           runAfterPointerRelease(() => {
             if (document.activeElement !== textareaRef.current) setEditing(false);
           });
         }}
         rows={rows}
-        aria-autocomplete={assist ? "list" : undefined}
-        aria-controls={suggestOpen ? listboxId : undefined}
-        aria-activedescendant={suggestOpen ? `${listboxId}-${activeIndex}` : undefined}
       />
-      {suggestOpen ? (
-        <ul className="template-suggest" role="listbox" id={listboxId} aria-label={`${label}: fields from the last run`} data-testid="template-suggest">
-          {options.map((option, index) => (
-            <li
-              key={option.path}
-              id={`${listboxId}-${index}`}
-              role="option"
-              aria-selected={index === activeIndex}
-              className={index === activeIndex ? "active" : undefined}
-              // Keeps the focus (and the caret) in the field.
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => applyOption(option)}
-            >
-              <code className="template-suggest-path">{option.path}</code>
-              <span className="template-suggest-source">{option.source}</span>
-              {option.detail ? <span className="template-suggest-detail">{option.detail}</span> : null}
-            </li>
-          ))}
-        </ul>
-      ) : null}
+      {autocomplete.list}
       {formatError && <div className="cfg-field-error">{formatError}</div>}
       {focusWithin ? (
         <div className="expression-suggestions" aria-label={`${label} suggestions`}>
