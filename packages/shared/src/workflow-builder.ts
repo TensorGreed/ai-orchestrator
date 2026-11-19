@@ -104,9 +104,9 @@ export function builderKeywords(text: string): string[] {
 
 /**
  * The templates closest to a description, best first: a word of the description in the template's name counts most,
- * then its tags, category and description. Templates that need a model (`needsModel`) come after the ones that run
- * without one, since they are offered when no real model is set. Featured templates win ties, so a vague description
- * still gets the starting points the gallery leads with.
+ * then its tags, category and description. On a tie a template that runs without a model (no `needsModel`) comes
+ * first, since they are offered when no real model is set, then featured ones, so a vague description still gets the
+ * starting points the gallery leads with.
  */
 export function rankTemplatesForPrompt<
   T extends { id: string; name: string; description?: string; category?: string; tags?: readonly string[]; featured?: boolean; needsModel?: boolean }
@@ -128,8 +128,8 @@ export function rankTemplatesForPrompt<
   });
   scored.sort(
     (a, b) =>
-      Number(Boolean(a.template.needsModel)) - Number(Boolean(b.template.needsModel)) ||
       b.score - a.score ||
+      Number(Boolean(a.template.needsModel)) - Number(Boolean(b.template.needsModel)) ||
       Number(Boolean(b.template.featured)) - Number(Boolean(a.template.featured)) ||
       a.index - b.index
   );

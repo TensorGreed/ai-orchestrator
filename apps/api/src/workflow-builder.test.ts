@@ -32,7 +32,7 @@ const ENV_KEYS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"] as co
 const savedEnv: Record<string, string | undefined> = {};
 
 /** Canned model turns, by how many tool results the request already carries. */
-type Turn = { content?: string; toolCalls?: Array<{ name: string; arguments: Record<string, unknown> }> };
+type Turn = { content?: string; toolCalls?: Array<{ name: string; arguments: Record<string, unknown> }>; fail?: string; delayMs?: number };
 let script: Turn[] = [];
 const modelRequests: Array<{ messages: Array<{ role: string; content?: unknown }>; tools?: Array<{ function?: { name?: string } }>; stream?: boolean }> = [];
 let mockServer: http.Server;
@@ -54,6 +54,15 @@ const goodDraft = {
 };
 
 function respond(res: http.ServerResponse, turn: Turn, index: number) {
+  if (turn.delayMs) {
+    setTimeout(() => respond(res, { ...turn, delayMs: 0 }, index), turn.delayMs);
+    return;
+  }
+  if (turn.fail) {
+    res.writeHead(401, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: { message: turn.fail, type: "invalid_request_error" } }));
+    return;
+  }
   const message = {
     role: "assistant",
     content: turn.content ?? null,
@@ -285,23 +294,68 @@ describe("POST /api/workflow-builder/build", () => {
     expect(modelRequests).toHaveLength(0);
   });
 
-  it("an admin can turn it off; the studio learns it from the definitions", async () => {
+  it("an admin can turn it off; the studio learns it from GET /api/workflow-builder", async () => {
     const context = await createTestContext({ WORKFLOW_BUILDER_ENABLED: "false" });
     const cookie = await login(context, "builder");
     const response = await build(context, cookie, { prompt: "anything", model: mockModel() });
     expect(response.statusCode).toBe(403);
     expect(response.json()).toMatchObject({ code: "workflow_builder_disabled" });
-    const definitions = await context.app.inject({ method: "GET", url: "/api/definitions", headers: { cookie } });
-    expect(definitions.json()).toMatchObject({ workflowBuilder: { enabled: false } });
     expect((await context.app.inject({ method: "GET", url: "/api/workflow-builder", headers: { cookie } })).json()).toEqual({ enabled: false });
     expect(modelRequests).toHaveLength(0);
 
     const on = await createTestContext();
     const onCookie = await login(on, "builder", "builder2@example.com");
-    const onDefinitions = await on.app.inject({ method: "GET", url: "/api/definitions", headers: { cookie: onCookie } });
-    expect(onDefinitions.json()).toMatchObject({ workflowBuilder: { enabled: true } });
-    expect((await on.app.inject({ method: "GET", url: "/api/workflow-builder", headers: { cookie: onCookie } })).json()).toEqual({ enabled: true });
+    expect((await on.app.inject({ method: "GET", url: "/api/workflow-builder", headers: { cookie: onCookie } })).json()).toEqual({
+      enabled: true,
+      defaultModel: { providerId: "echo", model: "echo" }
+    });
     const viewer = await login(on, "viewer");
     expect((await on.app.inject({ method: "GET", url: "/api/workflow-builder", headers: { cookie: viewer } })).statusCode).toBe(403);
   });
+
+  it("uses the default model of the project: a saved key there, not one from another project", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context, "builder");
+    const project = await context.app.inject({ method: "POST", url: "/api/projects", headers: { cookie }, payload: { name: "Other" } });
+    const otherId = project.json<{ id: string }>().id;
+    const secret = await context.app.inject({
+      method: "POST",
+      url: "/api/secrets",
+      headers: { cookie },
+      payload: { name: "Other key", provider: "openai", value: "other-project-key", projectId: otherId }
+    });
+    expect(secret.statusCode).toBeLessThan(300);
+    const status = async (projectId: string) =>
+      (await context.app.inject({ method: "GET", url: `/api/workflow-builder?projectId=${projectId}`, headers: { cookie } })).json();
+    expect(await status("default")).toMatchObject({ defaultModel: { providerId: "echo" } });
+    expect(await status(otherId)).toMatchObject({ defaultModel: { providerId: "openai", model: "gpt-4o-mini" } });
+    // A build in the default project stays on Echo: no model call.
+    expect((await build(context, cookie, { prompt: "post orders" })).json()).toMatchObject({ status: "needs_model" });
+    expect(modelRequests).toHaveLength(0);
+  });
+
+  it("runs one build at a time per person", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context, "builder");
+    script = [{ content: "Which shop?", delayMs: 600 }];
+    const first = build(context, cookie, { prompt: "orders", model: mockModel() });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const second = await build(context, cookie, { prompt: "orders", model: mockModel() });
+    expect(second.statusCode).toBe(409);
+    expect((await first).json()).toMatchObject({ status: "question" });
+    expect((await build(context, cookie, { prompt: "orders", model: mockModel() })).statusCode).toBe(200);
+  });
+
+  it("redacts a provider's error before it goes out", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context, "builder");
+    const leaked = `Incorrect API key provided: sk-${"a1B2c3D4e5".repeat(3)}`;
+    script = [{ fail: leaked }];
+    const response = await build(context, cookie, { prompt: "orders", model: mockModel() });
+    expect(response.json()).toMatchObject({ status: "failed" });
+    const text = response.body;
+    expect(text).not.toContain("a1B2c3D4e5a1B2c3D4e5");
+    expect(text).toContain("REDACTED");
+    expect(modelRequests.length).toBeGreaterThan(0);
+  }, 30_000);
 });

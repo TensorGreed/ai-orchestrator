@@ -615,22 +615,27 @@ export async function duplicateWorkflow(
 }
 
 /**
- * Imports a workflow JSON file. `mode: "new"` (the default) makes a new workflow: the file's id is kept when it is
- * free, otherwise the import gets a new id. `mode: "replace"` overwrites the stored workflow with the file's id.
+ * Whether "Describe it" is on for this server (builders only), and the model a build in the project would use (the
+ * server picks it: a key in its environment, else a saved secret the person may use in the project, else Echo).
  */
-/** Whether "Describe it" is on for this server (builders only). */
-export async function fetchWorkflowBuilderStatus() {
-  return apiRequest<{ enabled: boolean }>("/api/workflow-builder");
+export async function fetchWorkflowBuilderStatus(projectId?: string) {
+  const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+  return apiRequest<{ enabled: boolean; defaultModel?: { providerId: string; model: string } }>(`/api/workflow-builder${query}`);
 }
 
 /** Describe-it builder: a description in, a workflow draft preview out (nothing is saved). */
-export async function buildWorkflowFromDescription(payload: WorkflowBuilderRequest) {
+export async function buildWorkflowFromDescription(payload: WorkflowBuilderRequest, signal?: AbortSignal) {
   return apiRequest<WorkflowBuilderResult>("/api/workflow-builder/build", {
     method: "POST",
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    ...(signal ? { signal } : {})
   });
 }
 
+/**
+ * Imports a workflow JSON file. `mode: "new"` (the default) makes a new workflow: the file's id is kept when it is
+ * free, otherwise the import gets a new id. `mode: "replace"` overwrites the stored workflow with the file's id.
+ */
 export async function importWorkflow(payload: { json?: string; workflow?: unknown; mode?: "new" | "replace" }) {
   return apiRequest<Workflow>("/api/workflows/import", {
     method: "POST",
@@ -1122,7 +1127,6 @@ export async function fetchDefinitions() {
     /** Hosted model providers whose API key the server's environment sets (builders only). */
     envModelProviders?: string[];
     /** Whether "Describe it" is on (builders only; absent on older servers). */
-    workflowBuilder?: { enabled: boolean };
   }>("/api/definitions");
 }
 

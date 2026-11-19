@@ -64,19 +64,24 @@ What the builder never does:
 - It never fills in credentials. Credential values and secret references in the model's answer are left out (the
   preview says so); pick saved credentials on the nodes afterwards. Settings only an admin may make, such as a
   trigger's input trust, are left out too.
-- Model nodes it creates use the model the builder used, never a provider or base URL the model wrote.
+- It never takes a model or a model server address from the model's answer. A new **LLM Call** uses the model the
+  builder used; a chain node such as **Summarization Chain** stays on the upstream model unless the answer gave it one,
+  and then it gets the builder's model too; a dedicated chat model node keeps its placeholder address (the preview
+  says so), so you set your server on it.
 - Triggers get paths no other workflow uses.
 
-It uses the same model a new **LLM Call** starts on (see [Model nodes](#model-nodes)). Under **More** you can choose
+It uses the same model a new **LLM Call** starts on (see [Model nodes](#model-nodes)), with the keys saved in the
+project; the dialog shows which one. Under **More** you can choose
 another one (a provider, a model, a base URL for an OpenAI-compatible server, Azure OpenAI or Ollama, and a saved
 credential); the browser remembers the choice, never a key. On **Echo** nothing is sent to a model: Echo only repeats its
-input, so the dialog says a real model is needed and offers the three closest templates, those that run without a model
-first.
+input, so the dialog says a real model is needed and offers the three closest templates (on a tie, those that run
+without a model first).
 
 An admin can turn the builder off with `WORKFLOW_BUILDER_ENABLED=false` on the API server: **Describe it…** goes away and
 `POST /api/workflow-builder/build` answers `403` with `code: "workflow_builder_disabled"`. Each build is audited as
 `workflow.builder.build` (the model, the outcome and the number of tries, never the description). One build runs at a
-time per person, for at most two minutes, and the project's model allowlist applies.
+time per person (and a few at a time per server), for at most two minutes; closing the dialog stops it. The project's
+model allowlist applies, and a model's error message is redacted before it is shown.
 
 ## Undo and redo
 

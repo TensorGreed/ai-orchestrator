@@ -2631,7 +2631,6 @@ function StudioApp() {
         setDefinitions(definitionPayload.nodes);
         setMcpServerDefinitions(definitionPayload.mcpServers);
         setEnvModelProviders(definitionPayload.envModelProviders ?? []);
-        setWorkflowBuilderEnabled(definitionPayload.workflowBuilder?.enabled === true);
       } catch (definitionError) {
         if (cancelled) {
           return;
@@ -6629,6 +6628,7 @@ function StudioApp() {
           defaultModel={pickDefaultModelProvider({ envProviders: envModelProviders, secrets })}
           secrets={secrets}
           projectId={activeProjectId}
+          userId={authUser?.id}
           onCreate={handleCreateBuiltWorkflow}
           onUseTemplate={handleBuilderTemplate}
           onClose={() => setWorkflowBuilderOpen(false)}

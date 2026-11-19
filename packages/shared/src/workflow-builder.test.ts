@@ -45,10 +45,12 @@ describe("rankTemplatesForPrompt", () => {
     expect(rankTemplatesForPrompt("slack", templates, 1)).toHaveLength(1);
   });
 
-  it("puts templates that run without a model first", () => {
-    const withModel = templates.map((template) => ({ ...template, needsModel: template.id === "slack" }));
-    expect(rankTemplatesForPrompt("When a webhook arrives, send a message to Slack", withModel).map((t) => t.id)).not.toContain("slack");
-    expect(rankTemplatesForPrompt("slack", withModel, 4).at(-1)!.id).toBe("slack");
+  it("ranks by closeness, and on a tie puts templates that run without a model first", () => {
+    const withModel = templates.map((template) => ({ ...template, needsModel: template.id === "slack" || template.id === "cond" }));
+    // The closest one still comes first even when it needs a model.
+    expect(rankTemplatesForPrompt("When a webhook arrives, send a message to Slack", withModel)[0]!.id).toBe("slack");
+    // A vague description ties everything: the featured template that runs without a model leads.
+    expect(rankTemplatesForPrompt("do the thing", withModel)[0]!.id).toBe("agent");
   });
 
   it("matches words, not stop words or plurals", () => {

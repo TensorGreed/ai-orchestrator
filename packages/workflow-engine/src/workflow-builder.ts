@@ -10,6 +10,7 @@
 import { createDefaultAgentRuntime, type AgentRuntimeAdapter, type AgentRuntimeContext, type AgentToolRuntime } from "@ai-orchestrator/agent-runtime";
 import type { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import {
+  DEFAULT_MODEL_NODE_TYPES,
   PROVIDER_CONFIG_NODE_TYPES,
   SENSITIVE_OUTPUT_CONFIG_KEY,
   TRIGGER_TRUST_BINDING_KEY,
@@ -94,10 +95,21 @@ const NODE_ID_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 
 /** Config keys that hold a credential or a reference to a stored secret: the builder never fills them in. */
 const CREDENTIAL_KEY_PATTERN =
-  /^(?:secretRef|.*SecretRef|.*SecretId|secretId|credentials?|apiKey|api_key|password|passwd|accessToken|access_token|refreshToken|refresh_token|clientSecret|client_secret|privateKey|private_key|bearerToken|bearer_token|token|authToken|auth_token|signingSecret|signing_secret|connectionString|connection_string)$/i;
+  /^(?:secretRef|.*SecretRef|.*SecretId|secretId|credentials?|apiKey|api_key|password|passwd|accessToken|access_token|refreshToken|refresh_token|clientSecret|client_secret|privateKey|private_key|bearerToken|bearer_token|token|authToken|auth_token|signingSecret|signing_secret|connectionString|connection_string|secret|.*SecretRefs|authorization)$/i;
 
 /** Config keys only an admin may set (a trigger's input trust and its binding, a node's sensitive-output mark). */
 const ADMIN_ONLY_KEYS = new Set([TRIGGER_TRUST_CONFIG_KEY, TRIGGER_TRUST_BINDING_KEY, SENSITIVE_OUTPUT_CONFIG_KEY]);
+
+/** Where a dedicated chat model node sends its calls: the builder leaves these at the node's placeholder. */
+const MODEL_ADDRESS_KEYS: Readonly<Record<string, readonly string[]>> = {
+  openai_compatible_chat_model: ["baseUrl"],
+  ollama_chat_model: ["baseUrl"],
+  ai_gateway_chat_model: ["baseUrl", "apiProvider"],
+  azure_openai_chat_model: ["endpoint"]
+};
+
+/** The most a submission may weigh (its JSON), so a model cannot hand in an endless config. */
+export const WORKFLOW_BUILDER_MAX_SUBMISSION_CHARS = 200_000;
 
 function availableDefinitions(): NodeDefinition[] {
   return nodeDefinitions.filter((definition) => !definition.unavailable);
@@ -115,20 +127,36 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+/**
+ * A Switch's outputs as the canvas draws them and the engine routes them: each case's label, and `default`.
+ * `normalizeSwitchCases` has given every case a trimmed label first.
+ */
 function switchOutputs(config: Record<string, unknown>): string[] {
   const cases = Array.isArray(config.cases) ? config.cases : [];
-  const outputs: string[] = [];
-  cases.forEach((entry, index) => {
-    if (isRecord(entry)) {
-      const label = typeof entry.label === "string" && entry.label.trim() ? entry.label.trim() : typeof entry.value === "string" ? entry.value.trim() : "";
-      if (label) outputs.push(label);
-    } else if (typeof entry === "string" && entry.trim()) {
-      outputs.push(entry.trim());
-    }
-    outputs.push(`case_${index}`);
+  const labels = cases.map((entry) => (isRecord(entry) && typeof entry.label === "string" ? entry.label : "")).filter(Boolean);
+  return [...new Set([...labels, "default"])];
+}
+
+/**
+ * Gives every Switch case a `{ value, label }` with a trimmed label (the value when the model gave none), since the
+ * engine routes on the label and the canvas draws a handle per label. Returns the problems to send back.
+ */
+function normalizeSwitchCases(id: string, config: Record<string, unknown>): WorkflowBuilderIssue[] {
+  if (!Array.isArray(config.cases)) return [{ message: `node '${id}': cases must be an array of { value, label }`, nodeId: id }];
+  const issues: WorkflowBuilderIssue[] = [];
+  const seen = new Set<string>();
+  config.cases = config.cases.map((entry, index) => {
+    const value = isRecord(entry) ? entry.value : entry;
+    const valueText = typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? String(value).trim() : "";
+    const given = isRecord(entry) && typeof entry.label === "string" ? entry.label.trim() : "";
+    const label = given || valueText;
+    if (!valueText) issues.push({ message: `node '${id}': cases[${index}] needs a value`, nodeId: id });
+    if (label === "default") issues.push({ message: `node '${id}': a case cannot be labelled 'default' (that is the default output)`, nodeId: id });
+    else if (label && seen.has(label)) issues.push({ message: `node '${id}': two cases are labelled '${label}'`, nodeId: id });
+    seen.add(label);
+    return { value: valueText, label };
   });
-  const defaultLabel = typeof config.defaultLabel === "string" && config.defaultLabel.trim() ? config.defaultLabel.trim() : "default";
-  return [...new Set([...outputs, defaultLabel, "default"])];
+  return issues;
 }
 
 function outputsOf(type: string, config: Record<string, unknown>): readonly string[] | undefined {
@@ -309,12 +337,16 @@ export function checkBuilderDraft(raw: unknown, options: BuilderDraftOptions): B
   if (!rawEdges) issues.push({ message: "edges must be an array" });
   if (rawNodes && rawNodes.length > WORKFLOW_BUILDER_MAX_NODES) issues.push({ message: `at most ${WORKFLOW_BUILDER_MAX_NODES} nodes` });
   if (rawEdges && rawEdges.length > WORKFLOW_BUILDER_MAX_EDGES) issues.push({ message: `at most ${WORKFLOW_BUILDER_MAX_EDGES} edges` });
+  if (JSON.stringify(raw).length > WORKFLOW_BUILDER_MAX_SUBMISSION_CHARS) {
+    issues.push({ message: `the workflow is too large (at most ${WORKFLOW_BUILDER_MAX_SUBMISSION_CHARS} characters of JSON)` });
+  }
   if (issues.length > 0) return { issues, unfinished: [], notes };
 
   const nodes: WorkflowNode[] = [];
   const ids = new Set<string>();
   const removedCredentials: string[] = [];
   const removedAdminKeys: string[] = [];
+  const removedAddresses: string[] = [];
   let modelChanged = false;
   rawNodes!.forEach((entry, index) => {
     if (!isRecord(entry)) {
@@ -350,7 +382,10 @@ export function checkBuilderDraft(raw: unknown, options: BuilderDraftOptions): B
     }
     if (PROVIDER_CONFIG_NODE_TYPES.has(definition.type)) {
       const asked = isRecord(given.provider) ? given.provider : undefined;
-      if (options.nodeModel) {
+      // As in the editor: a new LLM Call gets the model; a chain node keeps "Not set" (the upstream model) unless
+      // the model gave it one, and then it gets the builder's model instead of the one written.
+      const wantsModel = DEFAULT_MODEL_NODE_TYPES.has(definition.type) || Boolean(asked);
+      if (options.nodeModel && wantsModel) {
         if (asked && (asked.providerId !== options.nodeModel.providerId || asked.model !== options.nodeModel.model)) modelChanged = true;
         config = {
           ...config,
@@ -364,6 +399,13 @@ export function checkBuilderDraft(raw: unknown, options: BuilderDraftOptions): B
         delete config.provider;
       }
     }
+    for (const key of MODEL_ADDRESS_KEYS[definition.type] ?? []) {
+      if (key in given && given[key] !== (definition.sampleConfig as Record<string, unknown> | undefined)?.[key]) removedAddresses.push(`${id}.${key}`);
+      const placeholder = (definition.sampleConfig as Record<string, unknown> | undefined)?.[key];
+      if (placeholder === undefined) delete config[key];
+      else config[key] = placeholder;
+    }
+    if (definition.type === "switch_node") issues.push(...normalizeSwitchCases(id, config));
     const label = typeof entry.label === "string" && entry.label.trim() ? entry.label.trim().slice(0, 120) : definition.label;
     nodes.push({ id, type: definition.type, name: label, position: { x: 0, y: 0 }, config } as WorkflowNode);
   });
@@ -449,6 +491,7 @@ export function checkBuilderDraft(raw: unknown, options: BuilderDraftOptions): B
 
   if (removedCredentials.length > 0) notes.push(`Left out credential values the model wrote (${removedCredentials.join(", ")}): pick saved credentials on those nodes.`);
   if (removedAdminKeys.length > 0) notes.push(`Left out settings only an admin sets (${removedAdminKeys.join(", ")}).`);
+  if (removedAddresses.length > 0) notes.push(`Left the model server address at its placeholder on ${removedAddresses.join(", ")}: set your server on those nodes.`);
   if (modelChanged) notes.push("Model nodes use the model the builder used; change it on each node if you want another one.");
   return { workflow, issues, unfinished, notes };
 }
@@ -717,7 +760,8 @@ export async function runWorkflowBuilder(options: WorkflowBuilderRunOptions): Pr
       return { status: "question", question: state.clarification.question, model };
     }
     if (state.stopReason === "error") {
-      return { status: "failed", message: state.finalAnswer || "The model call failed", issues: [], attempts, model };
+      // The runtime's text here is a provider's error or the model's last words: the server redacts it before it goes out.
+      return { status: "failed", message: `The model call failed: ${state.finalAnswer || "no answer"}`, issues: lastIssues, attempts, model };
     }
     finalText = state.finalAnswer?.trim() ?? "";
   } catch (error) {

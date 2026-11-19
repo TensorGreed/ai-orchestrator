@@ -7,7 +7,7 @@ import { WorkflowBuilderDialog, builderModelLabel, readStoredBuilderModel } from
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
-  return { ...actual, buildWorkflowFromDescription: vi.fn() };
+  return { ...actual, buildWorkflowFromDescription: vi.fn(), fetchWorkflowBuilderStatus: vi.fn(), fetchSecrets: vi.fn() };
 });
 
 const workflow: Workflow = {
@@ -51,6 +51,8 @@ const defaults = {
 beforeEach(() => {
   vi.resetAllMocks();
   window.localStorage.clear();
+  vi.mocked(api.fetchWorkflowBuilderStatus).mockResolvedValue({ enabled: true });
+  vi.mocked(api.fetchSecrets).mockResolvedValue(defaults.secrets);
 });
 
 describe("WorkflowBuilderDialog", () => {
@@ -63,7 +65,10 @@ describe("WorkflowBuilderDialog", () => {
 
     await userEvent.type(screen.getByLabelText("What should the workflow do?"), "When an order arrives, post it to the shop");
     await userEvent.click(screen.getByRole("button", { name: "Build" }));
-    expect(api.buildWorkflowFromDescription).toHaveBeenCalledWith({ prompt: "When an order arrives, post it to the shop", projectId: "default" });
+    expect(api.buildWorkflowFromDescription).toHaveBeenCalledWith(
+      { prompt: "When an order arrives, post it to the shop", projectId: "default" },
+      expect.any(AbortSignal)
+    );
 
     const preview = screen.getByRole("region", { name: "Preview" });
     expect(within(preview).getByRole("img", { name: "Preview of Order alerts" })).toBeInTheDocument();
@@ -135,16 +140,69 @@ describe("WorkflowBuilderDialog", () => {
     expect(screen.getByTestId("builder-model")).toHaveTextContent("OpenAI Compatible · local");
     await userEvent.type(screen.getByLabelText("What should the workflow do?"), "x");
     await userEvent.click(screen.getByRole("button", { name: "Build" }));
-    expect(api.buildWorkflowFromDescription).toHaveBeenCalledWith({
-      prompt: "x",
-      projectId: "default",
-      model: { providerId: "openai_compatible", model: "local", baseUrl: "http://127.0.0.1:8000/v1", secretRef: { secretId: "sec-1" } }
-    });
+    expect(api.buildWorkflowFromDescription).toHaveBeenCalledWith(
+      {
+        prompt: "x",
+        projectId: "default",
+        model: { providerId: "openai_compatible", model: "local", baseUrl: "http://127.0.0.1:8000/v1", secretRef: { secretId: "sec-1" } }
+      },
+      expect.any(AbortSignal)
+    );
     expect(readStoredBuilderModel()).toEqual({ providerId: "openai_compatible", model: "local", baseUrl: "http://127.0.0.1:8000/v1", secretRef: { secretId: "sec-1" } });
 
     await userEvent.click(screen.getByRole("button", { name: "Use the default model" }));
     expect(readStoredBuilderModel()).toBeNull();
     expect(screen.getByTestId("builder-model")).toHaveTextContent("OpenAI · gpt-4o-mini");
+  });
+
+  it("shows the model the server says a build in the project uses", async () => {
+    vi.mocked(api.fetchWorkflowBuilderStatus).mockResolvedValue({ enabled: true, defaultModel: { providerId: "anthropic", model: "claude-x" } });
+    render(<WorkflowBuilderDialog {...defaults} defaultModel={{ providerId: "echo", model: "echo" }} onCreate={vi.fn()} onUseTemplate={vi.fn()} />);
+    expect(api.fetchWorkflowBuilderStatus).toHaveBeenCalledWith("default");
+    expect(await screen.findByText("Model: Anthropic · claude-x")).toBeInTheDocument();
+  });
+
+  it("another provider drops the base URL and a credential saved for a different provider; a deleted credential is not sent", async () => {
+    vi.mocked(api.buildWorkflowFromDescription).mockResolvedValue({ status: "question", question: "?", model: { providerId: "openai", model: "m" } });
+    window.localStorage.setItem(
+      "l2m:builder-model:u1",
+      JSON.stringify({ providerId: "openai_compatible", model: "local", baseUrl: "http://127.0.0.1:8000/v1", secretRef: { secretId: "gone" } })
+    );
+    render(<WorkflowBuilderDialog {...defaults} userId="u1" onCreate={vi.fn()} onUseTemplate={vi.fn()} />);
+    expect(screen.getByTestId("builder-model")).toHaveTextContent("OpenAI Compatible · local");
+    await screen.findByRole("option", { name: "Local LLM key (openai_compatible)" });
+    await userEvent.type(screen.getByLabelText("What should the workflow do?"), "x");
+    await userEvent.click(screen.getByRole("button", { name: "Build" }));
+    expect(vi.mocked(api.buildWorkflowFromDescription).mock.calls[0]![0].model).toEqual({
+      providerId: "openai_compatible",
+      model: "local",
+      baseUrl: "http://127.0.0.1:8000/v1"
+    });
+
+    await userEvent.click(screen.getByText("More"));
+    await userEvent.selectOptions(screen.getByLabelText("Credential"), "sec-1");
+    await userEvent.selectOptions(screen.getByLabelText("Provider"), "openai");
+    expect(screen.queryByLabelText("Base URL")).toBeNull();
+    expect(readStoredBuilderModel("u1")).toEqual({ providerId: "openai", model: "gpt-4o-mini" });
+    // Another person in this browser does not get this choice.
+    expect(readStoredBuilderModel("u2")).toBeNull();
+  });
+
+  it("closing while it builds stops the build", async () => {
+    let signal: AbortSignal | undefined;
+    vi.mocked(api.buildWorkflowFromDescription).mockImplementation((_payload, given) => {
+      signal = given;
+      return new Promise(() => undefined);
+    });
+    const onClose = vi.fn();
+    const { unmount } = render(<WorkflowBuilderDialog {...defaults} onCreate={vi.fn()} onUseTemplate={vi.fn()} onClose={onClose} />);
+    await userEvent.type(screen.getByLabelText("What should the workflow do?"), "x");
+    await userEvent.click(screen.getByRole("button", { name: "Build" }));
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+    await userEvent.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalled();
+    unmount();
+    expect(signal?.aborted).toBe(true);
   });
 
   it("labels models", () => {

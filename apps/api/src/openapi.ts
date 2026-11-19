@@ -989,8 +989,8 @@ export const openApiSpec = {
     "/api/workflow-builder": {
       get: {
         tags: ["Workflows"],
-        summary: "Whether the describe-it builder is on (builder role)",
-        responses: { "200": { description: "{ enabled }" }, "403": { description: "Not a builder" } }
+        summary: "Whether the describe-it builder is on, and the model a build in ?projectId= uses (builder role)",
+        responses: { "200": { description: "{ enabled, defaultModel?: { providerId, model } }" }, "403": { description: "Not a builder" } }
       }
     },
     "/api/workflow-builder/build": {

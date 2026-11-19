@@ -206,6 +206,63 @@ describe("checkBuilderDraft", () => {
     expect(check.unfinished.map((issue) => issue.nodeId)).toContain("fetch");
   });
 
+  it("gives every Switch case the label the engine routes on and the canvas draws, and refuses other handles", () => {
+    const draft = (cases: unknown, handle: string) => ({
+      name: "switch",
+      nodes: [
+        { id: "start", type: "manual_trigger", config: {} },
+        { id: "route", type: "switch_node", config: { switchValue: "{{kind}}", cases } },
+        { id: "alpha", type: "noop_node", config: {} }
+      ],
+      edges: [
+        { source: "start", target: "route" },
+        { source: "route", target: "alpha", sourceHandle: handle }
+      ]
+    });
+    // No label: the value becomes the label, so the engine routes on it.
+    const byValue = checkBuilderDraft(draft([{ value: "a" }], "a"), { workflowId: "wf" });
+    expect(byValue.issues).toEqual([]);
+    expect(byValue.workflow!.nodes.find((node) => node.id === "route")!.config.cases).toEqual([{ value: "a", label: "a" }]);
+    // The canvas draws no case_0 handle for a labelled case.
+    expect(checkBuilderDraft(draft([{ value: "a", label: " Alpha " }], "case_0"), { workflowId: "wf" }).issues.map((issue) => issue.message).join()).toMatch(/case_0/);
+    expect(checkBuilderDraft(draft([{ value: "a", label: "Alpha" }, { value: "b", label: "Alpha" }], "Alpha"), { workflowId: "wf" }).issues.map((issue) => issue.message).join()).toMatch(/two cases/);
+    expect(checkBuilderDraft(draft([{ value: "" }], "default"), { workflowId: "wf" }).issues.map((issue) => issue.message).join()).toMatch(/needs a value/);
+  });
+
+  it("gives an LLM Call the builder's model, leaves a chain node on the upstream model, and keeps chat model addresses at their placeholder", () => {
+    const check = checkBuilderDraft(
+      {
+        name: "models",
+        nodes: [
+          { id: "start", type: "manual_trigger", config: {} },
+          { id: "ask", type: "llm_call", config: { provider: { providerId: "openai", model: "gpt-x", baseUrl: "https://elsewhere.example/v1" } } },
+          { id: "sum", type: "summarization_chain", config: {} },
+          { id: "agent", type: "agent_orchestrator", config: {} },
+          { id: "chat", type: "openai_compatible_chat_model", config: { baseUrl: "https://elsewhere.example/v1", model: "m" } }
+        ],
+        edges: [
+          { source: "start", target: "ask" },
+          { source: "ask", target: "sum" },
+          { source: "sum", target: "agent" },
+          { source: "agent", target: "chat", sourceHandle: "chat_model" }
+        ]
+      },
+      { workflowId: "wf", nodeModel: NODE_MODEL }
+    );
+    expect(check.issues).toEqual([]);
+    const config = (id: string) => check.workflow!.nodes.find((node) => node.id === id)!.config as Record<string, unknown>;
+    expect(config("ask").provider).toEqual(NODE_MODEL);
+    expect(config("sum").provider).toBeUndefined();
+    expect(config("chat").baseUrl).toBe("http://localhost:1234/v1");
+    expect(JSON.stringify(check.workflow)).not.toContain("elsewhere.example");
+    expect(check.notes.join(" ")).toMatch(/chat\.baseUrl/);
+  });
+
+  it("refuses a submission too large to be a workflow", () => {
+    const huge = { ...webhookToHttp, nodes: [{ ...webhookToHttp.nodes[0]!, config: { path: "x".repeat(250_000) } }, webhookToHttp.nodes[1]!] };
+    expect(checkBuilderDraft(huge, { workflowId: "wf" }).issues[0]!.message).toMatch(/too large/);
+  });
+
   it("knows the outputs of every branching node the canvas draws", () => {
     expect(Object.keys(BUILDER_BRANCH_OUTPUTS).sort()).toEqual(["approval_gate", "chat_intent_router", "filter_node", "guard", "if_node", "try_catch"]);
     const check = checkBuilderDraft(
@@ -257,10 +314,11 @@ describe("builderPreview", () => {
 class ScriptedModel implements LLMProviderAdapter {
   readonly definition = { id: "openai_compatible", label: "Scripted", supportsTools: true, configSchema: {} };
   readonly calls: ProviderCallRequest[] = [];
-  constructor(private readonly turns: Array<{ content?: string; toolCalls?: ToolCall[] }>) {}
+  constructor(private readonly turns: Array<{ content?: string; toolCalls?: ToolCall[]; error?: string }>) {}
   async generate(request: ProviderCallRequest) {
     this.calls.push(request);
     const turn = this.turns[this.calls.length - 1] ?? { content: "done" };
+    if (turn.error) throw new Error(turn.error);
     return { content: turn.content ?? "", toolCalls: turn.toolCalls ?? [] };
   }
 }
@@ -307,6 +365,17 @@ describe("runWorkflowBuilder", () => {
     if (result.status === "failed") expect(result.issues[0]!.message).toMatch(/unknown node type 'nope'/);
     expect(model.calls).toHaveLength(3);
   });
+
+  it("reports a model call that fails, with the problems of the last rejected workflow", async () => {
+    const bad = { name: "bad", nodes: [{ id: "x", type: "nope", config: {} }], edges: [] };
+    const model = new ScriptedModel([{ toolCalls: [call("t1", "submit_workflow", bad)] }, ...Array.from({ length: 8 }, () => ({ error: "upstream said 500" }))]);
+    const result = await runWorkflowBuilder({ ...base, prompt: "something", providerRegistry: registryWith(model) });
+    expect(result).toMatchObject({ status: "failed" });
+    if (result.status === "failed") {
+      expect(result.message).toMatch(/^The model call failed/);
+      expect(result.issues[0]!.message).toMatch(/unknown node type 'nope'/);
+    }
+  }, 30_000);
 
   it("returns the model's question when it asks one", async () => {
     const model = new ScriptedModel([{ toolCalls: [call("c1", "agent_clarify", { question: "Which channel should it post to?" })] }]);

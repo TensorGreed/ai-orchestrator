@@ -14,15 +14,19 @@ import {
   type WorkflowBuilderModel,
   type WorkflowBuilderResult
 } from "@ai-orchestrator/shared";
-import { buildWorkflowFromDescription, type SecretListItem } from "../lib/api";
+import { buildWorkflowFromDescription, fetchSecrets, fetchWorkflowBuilderStatus, type SecretListItem } from "../lib/api";
 
 const MODEL_STORAGE_KEY = "l2m:builder-model";
+const storageKey = (userId?: string) => (userId ? `${MODEL_STORAGE_KEY}:${userId}` : MODEL_STORAGE_KEY);
 const BASE_URL_PROVIDERS = new Set(["openai_compatible", "azure_openai", "ollama"]);
 
-/** The model chosen under "More" in this browser, if any (a provider, model, base URL and secret id; never a key). */
-export function readStoredBuilderModel(): WorkflowBuilderModel | null {
+/**
+ * The model this person chose under "More" in this browser, if any (a provider, model, base URL and secret id; never
+ * a key).
+ */
+export function readStoredBuilderModel(userId?: string): WorkflowBuilderModel | null {
   try {
-    const raw = window.localStorage.getItem(MODEL_STORAGE_KEY);
+    const raw = window.localStorage.getItem(storageKey(userId));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<WorkflowBuilderModel>;
     if (typeof parsed.providerId !== "string" || typeof parsed.model !== "string" || !parsed.providerId || !parsed.model) return null;
@@ -37,10 +41,10 @@ export function readStoredBuilderModel(): WorkflowBuilderModel | null {
   }
 }
 
-function storeBuilderModel(model: WorkflowBuilderModel | null): void {
+function storeBuilderModel(model: WorkflowBuilderModel | null, userId?: string): void {
   try {
-    if (model) window.localStorage.setItem(MODEL_STORAGE_KEY, JSON.stringify(model));
-    else window.localStorage.removeItem(MODEL_STORAGE_KEY);
+    if (model) window.localStorage.setItem(storageKey(userId), JSON.stringify(model));
+    else window.localStorage.removeItem(storageKey(userId));
   } catch {
     // Private windows and blocked storage: the choice lasts until the dialog closes.
   }
@@ -106,10 +110,16 @@ export function BuilderPreviewCanvas({ workflow }: { workflow: Workflow }) {
 }
 
 interface WorkflowBuilderDialogProps {
-  /** The model a new LLM Call node would start on (a server key, else a saved secret, else Echo). */
+  /**
+   * The model a new LLM Call node would start on (a server key, else a saved secret, else Echo), shown until the
+   * server says which model a build in the project uses.
+   */
   defaultModel: DefaultModelProvider;
+  /** The project's secrets as the studio has them; the dialog loads the project's list again when it opens. */
   secrets: SecretListItem[];
   projectId?: string;
+  /** Keeps the model chosen under More per person. */
+  userId?: string;
   /** Saves the draft as a new workflow and opens it. */
   onCreate: (workflow: Workflow) => Promise<void>;
   /** Makes a workflow from a template and opens it. */
@@ -119,7 +129,15 @@ interface WorkflowBuilderDialogProps {
 
 type Phase = { kind: "idle" } | { kind: "building" } | { kind: "result"; result: WorkflowBuilderResult } | { kind: "error"; message: string };
 
-export function WorkflowBuilderDialog({ defaultModel, secrets, projectId, onCreate, onUseTemplate, onClose }: WorkflowBuilderDialogProps) {
+export function WorkflowBuilderDialog({
+  defaultModel: studioDefault,
+  secrets: studioSecrets,
+  projectId,
+  userId,
+  onCreate,
+  onUseTemplate,
+  onClose
+}: WorkflowBuilderDialogProps) {
   const promptId = useId();
   const providerId = useId();
   const modelId = useId();
@@ -127,26 +145,58 @@ export function WorkflowBuilderDialog({ defaultModel, secrets, projectId, onCrea
   const secretId = useId();
   const [prompt, setPrompt] = useState("");
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
-  const [override, setOverride] = useState<WorkflowBuilderModel | null>(() => readStoredBuilderModel());
+  const [override, setOverride] = useState<WorkflowBuilderModel | null>(() => readStoredBuilderModel(userId));
+  const [serverDefault, setServerDefault] = useState<{ providerId: string; model: string } | null>(null);
+  const [loadedSecrets, setLoadedSecrets] = useState<SecretListItem[] | null>(null);
+  const buildAbort = useRef<AbortController | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  const savingRef = useRef(false);
+  savingRef.current = saving;
 
   useEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     promptRef.current?.focus();
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onCloseRef.current();
+      // While a draft is being saved the dialog stays; a build still running is stopped by closing.
+      if (event.key === "Escape" && !savingRef.current) onCloseRef.current();
     };
     document.addEventListener("keydown", onKey);
     return () => {
       document.removeEventListener("keydown", onKey);
+      // Closing stops a build still running: the server stops calling the model when the request goes away.
+      buildAbort.current?.abort();
       if (previous?.isConnected) previous.focus();
     };
   }, []);
 
+  // The model a build would use comes from the server, and the credentials from the project, so the dialog matches
+  // the build even where the studio has not loaded them (the Workflows page).
+  useEffect(() => {
+    let cancelled = false;
+    fetchWorkflowBuilderStatus(projectId)
+      .then((status) => {
+        if (!cancelled && status.defaultModel) setServerDefault(status.defaultModel);
+      })
+      .catch(() => undefined);
+    fetchSecrets(projectId ? { projectId } : {})
+      .then((items) => {
+        if (!cancelled) setLoadedSecrets(items);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
+
+  const secrets = loadedSecrets ?? studioSecrets;
+  const defaultModel: DefaultModelProvider =
+    serverDefault && (serverDefault.providerId !== studioDefault.providerId || serverDefault.model !== studioDefault.model)
+      ? serverDefault
+      : studioDefault;
   const model: { providerId: string; model: string } = override ?? defaultModel;
   const building = phase.kind === "building";
 
@@ -157,10 +207,24 @@ export function WorkflowBuilderDialog({ defaultModel, secrets, projectId, onCrea
       ...(defaultModel.secretRef ? { secretRef: { ...defaultModel.secretRef } } : {})
     };
     const next: WorkflowBuilderModel = { ...base, ...patch };
+    if (patch.providerId && patch.providerId !== base.providerId) {
+      // Another provider: its own address, and only a credential saved for it.
+      delete next.baseUrl;
+      const kept = secrets.find((secret) => secret.id === next.secretRef?.secretId);
+      if (!kept || kept.provider !== patch.providerId) delete next.secretRef;
+    }
     if (!next.baseUrl) delete next.baseUrl;
     if (!next.secretRef?.secretId) delete next.secretRef;
     setOverride(next);
-    storeBuilderModel(next.model.trim() ? next : null);
+    storeBuilderModel(next.model.trim() ? next : null, userId);
+  };
+
+  /** The override as sent: a credential that is no longer in the project's list is left out. */
+  const overrideToSend = (): WorkflowBuilderModel | null => {
+    if (!override || !override.model.trim()) return null;
+    const sent: WorkflowBuilderModel = { ...override, model: override.model.trim() };
+    if (sent.secretRef && loadedSecrets && !loadedSecrets.some((secret) => secret.id === sent.secretRef!.secretId)) delete sent.secretRef;
+    return sent;
   };
 
   const build = async () => {
@@ -168,15 +232,25 @@ export function WorkflowBuilderDialog({ defaultModel, secrets, projectId, onCrea
     if (!text || building) return;
     setPhase({ kind: "building" });
     setSaveError(null);
+    const controller = new AbortController();
+    buildAbort.current = controller;
+    const sent = overrideToSend();
     try {
-      const result = await buildWorkflowFromDescription({
-        prompt: text,
-        ...(projectId ? { projectId } : {}),
-        ...(override && override.model.trim() ? { model: { ...override, model: override.model.trim() } } : {})
-      });
-      setPhase({ kind: "result", result });
+      const result = await buildWorkflowFromDescription(
+        {
+          prompt: text,
+          ...(projectId ? { projectId } : {}),
+          ...(sent ? { model: sent } : {})
+        },
+        controller.signal
+      );
+      if (!controller.signal.aborted) setPhase({ kind: "result", result });
     } catch (buildError) {
-      setPhase({ kind: "error", message: buildError instanceof Error ? buildError.message : "Could not build the workflow" });
+      if (!controller.signal.aborted) {
+        setPhase({ kind: "error", message: buildError instanceof Error ? buildError.message : "Could not build the workflow" });
+      }
+    } finally {
+      if (buildAbort.current === controller) buildAbort.current = null;
     }
   };
 
@@ -397,7 +471,7 @@ export function WorkflowBuilderDialog({ defaultModel, secrets, projectId, onCrea
                       disabled={building}
                       onClick={() => {
                         setOverride(null);
-                        storeBuilderModel(null);
+                        storeBuilderModel(null, userId);
                       }}
                     >
                       Use the default model
@@ -452,7 +526,7 @@ export function WorkflowBuilderDialog({ defaultModel, secrets, projectId, onCrea
               ) : null}
 
               <div className="webhook-test-actions">
-                <button type="button" className="pg-btn" onClick={onClose} disabled={building}>
+                <button type="button" className="pg-btn" onClick={onClose} disabled={saving}>
                   Cancel
                 </button>
                 <button type="submit" className="pg-btn primary" disabled={building || !prompt.trim() || Boolean(override && !override.model.trim())}>

@@ -1,7 +1,7 @@
 /**
  * Describe-it builder.
  *
- *   GET  /api/workflow-builder         builder+: { enabled }
+ *   GET  /api/workflow-builder         builder+: { enabled, defaultModel? } (the model a build in ?projectId= uses)
  *   POST /api/workflow-builder/build   builder+: a description in, a workflow draft preview out (nothing is saved)
  *
  * The model is the one the request names, else the default model (a provider whose key the server's environment sets,
@@ -63,16 +63,29 @@ export interface WorkflowBuilderRoutesDeps {
   timeoutMs?: number;
 }
 
+/** Builds running at once on one API process. */
+export const WORKFLOW_BUILDER_MAX_CONCURRENT_BUILDS = 8;
+
 export function registerWorkflowBuilderRoutes(deps: WorkflowBuilderRoutesDeps): void {
   const { app } = deps;
-  // One build at a time per person: each one makes several model calls.
+  // One build at a time per person, and a few at a time on this server: each one makes several model calls.
   const building = new Set<string>();
 
-  // Whether builders get "Describe it" (the studio asks once, to show or hide it).
-  app.get("/api/workflow-builder", async (request, reply) => {
+  const defaultModelFor = async (user: SafeUser, projectId: string): Promise<LLMProviderConfig> =>
+    pickDefaultModelProvider({
+      envProviders: envModelProviders(process.env),
+      secrets: await deps.usableSecrets(user, projectId)
+    }) as LLMProviderConfig;
+
+  // Whether builders get "Describe it", and the model a build in the project would use (shown in the dialog).
+  app.get<{ Querystring: { projectId?: string } }>("/api/workflow-builder", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["builder"]);
     if (!user) return;
-    return { enabled: deps.enabled };
+    if (!deps.enabled) return { enabled: false };
+    const projectId = typeof request.query.projectId === "string" && request.query.projectId ? request.query.projectId : DEFAULT_PROJECT_ID;
+    if (!(await deps.canCreateIn(user, projectId)).ok) return { enabled: true };
+    const model = await defaultModelFor(user, projectId);
+    return { enabled: true, defaultModel: { providerId: model.providerId, model: model.model } };
   });
 
   app.post<{ Body: unknown }>("/api/workflow-builder/build", async (request, reply) => {
@@ -103,10 +116,7 @@ export function registerWorkflowBuilderRoutes(deps: WorkflowBuilderRoutesDeps): 
       }
       provider = { ...parsed.data.model } as LLMProviderConfig;
     } else {
-      provider = pickDefaultModelProvider({
-        envProviders: envModelProviders(process.env),
-        secrets: await deps.usableSecrets(user, projectId)
-      }) as LLMProviderConfig;
+      provider = await defaultModelFor(user, projectId);
     }
     const registry = deps.providerRegistryFor(projectId);
     if (!registry.tryGet(provider.providerId)) {
@@ -135,6 +145,10 @@ export function registerWorkflowBuilderRoutes(deps: WorkflowBuilderRoutesDeps): 
       reply.code(409);
       return { error: "A workflow is already being built for you. Wait for it to finish." };
     }
+    if (building.size >= WORKFLOW_BUILDER_MAX_CONCURRENT_BUILDS) {
+      reply.code(429);
+      return { error: "Several workflows are being built on this server. Try again in a minute." };
+    }
     building.add(user.id);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error("timeout")), deps.timeoutMs ?? WORKFLOW_BUILDER_TIMEOUT_MS);
@@ -159,8 +173,11 @@ export function registerWorkflowBuilderRoutes(deps: WorkflowBuilderRoutesDeps): 
         result = { ...outcome, workflow: await deps.prepareDraft(outcome.workflow) };
       } else if (outcome.status === "needs_model") {
         result = { status: "needs_model", message: "Describing a workflow needs a real model.", templates: [] };
+      } else if (outcome.status === "failed") {
+        // A provider's error text can echo a request header: redacted like every other model error.
+        result = { ...outcome, message: deps.redact(outcome.message) };
       } else {
-        result = outcome;
+        result = { ...outcome, question: deps.redact(outcome.question) };
       }
       await deps.audit(request, user, {
         category: "workflow",
