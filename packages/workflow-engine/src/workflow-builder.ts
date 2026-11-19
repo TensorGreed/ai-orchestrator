@@ -19,7 +19,9 @@ import {
   WORKFLOW_BUILDER_MAX_EDGES,
   WORKFLOW_BUILDER_MAX_NODES,
   WORKFLOW_SCHEMA_VERSION,
+  legacyBehaviours,
   nodeDefinitions,
+  upgradeToNewBehaviour,
   type LLMProviderConfig,
   type NodeDefinition,
   type ToolDefinition,
@@ -406,6 +408,11 @@ export function checkBuilderDraft(raw: unknown, options: BuilderDraftOptions): B
       else config[key] = placeholder;
     }
     if (definition.type === "switch_node") issues.push(...normalizeSwitchCases(id, config));
+    // A new node is on the newer behaviours, as one added in the editor is (no "earlier behaviour" notice when the
+    // person opens it). A behaviour the model chose on purpose (an explicit `collectResults: false`, a Filter's
+    // `mode: "gate"`) is kept.
+    const lacking = legacyBehaviours(definition.type, config);
+    if (lacking.length > 0) config = upgradeToNewBehaviour(definition.type, config, lacking);
     const label = typeof entry.label === "string" && entry.label.trim() ? entry.label.trim().slice(0, 120) : definition.label;
     nodes.push({ id, type: definition.type, name: label, position: { x: 0, y: 0 }, config } as WorkflowNode);
   });

@@ -7,6 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { behavioursOffDefault } from "@ai-orchestrator/shared";
 import { importWorkflowFromJson } from "./serialization.js";
 import { validateWorkflowGraph } from "./validation.js";
 
@@ -44,5 +45,16 @@ describe("starter templates", () => {
     expectValid(raw);
     const companions = (JSON.parse(raw) as { companions?: unknown[] }).companions ?? [];
     for (const companion of companions) expectValid(JSON.stringify(companion));
+  });
+
+  it.each(starterFiles)("%s starts every node on the newer behaviours (no earlier-behaviour switches in the editor)", (file) => {
+    const raw = fs.readFileSync(path.join(STARTERS, file), "utf8").split("$L2M_API_BASE").join("http://127.0.0.1:4000");
+    const companions = (JSON.parse(raw) as { companions?: unknown[] }).companions ?? [];
+    for (const source of [raw, ...companions.map((companion) => JSON.stringify(companion))]) {
+      for (const node of importWorkflowFromJson(source).nodes) {
+        const config = (node.config ?? {}) as Record<string, unknown>;
+        expect(behavioursOffDefault(node.type, config, node.errorConfig), `${file} ${node.id}`).toEqual([]);
+      }
+    }
   });
 });

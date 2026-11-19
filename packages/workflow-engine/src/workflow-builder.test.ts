@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ProviderRegistry, type LLMProviderAdapter, type ProviderCallRequest } from "@ai-orchestrator/provider-sdk";
-import type { LLMProviderConfig, ToolCall } from "@ai-orchestrator/shared";
+import { legacyBehaviours, type LLMProviderConfig, type ToolCall } from "@ai-orchestrator/shared";
 import {
   BUILDER_BRANCH_OUTPUTS,
   builderNodeCatalog,
@@ -256,6 +256,37 @@ describe("checkBuilderDraft", () => {
     expect(config("chat").baseUrl).toBe("http://localhost:1234/v1");
     expect(JSON.stringify(check.workflow)).not.toContain("elsewhere.example");
     expect(check.notes.join(" ")).toMatch(/chat\.baseUrl/);
+  });
+
+  it("puts new nodes on the newer behaviours, as the editor does, and keeps a behaviour the model chose", () => {
+    const check = checkBuilderDraft(
+      {
+        name: "Loop and set",
+        nodes: [
+          { id: "incoming", type: "webhook_input", label: "Incoming", config: { path: "items" } },
+          { id: "each_item", type: "loop_node", label: "Each item", config: { inputKey: "items" } },
+          { id: "tag_item", type: "set_node", label: "Tag item", config: { assignments: [{ key: "tag", valueTemplate: "new" }] } },
+          { id: "keep_open", type: "filter_node", label: "Keep open", config: { mode: "gate", conditions: [] } },
+          { id: "post_item", type: "http_request", label: "Post item", config: { urlTemplate: "https://example.com" } }
+        ],
+        edges: [
+          { source: "incoming", target: "each_item" },
+          { source: "each_item", target: "tag_item" },
+          { source: "tag_item", target: "keep_open" },
+          { source: "keep_open", target: "post_item", sourceHandle: "pass" }
+        ]
+      },
+      { workflowId: "wf" }
+    );
+    const byId = new Map(check.workflow!.nodes.map((node) => [node.id, node]));
+    for (const node of check.workflow!.nodes) {
+      expect(legacyBehaviours(node.type, node.config as Record<string, unknown>), node.id).toEqual([]);
+    }
+    expect(byId.get("each_item")!.config).toMatchObject({ collectResults: true, routeBranches: true });
+    expect(byId.get("tag_item")!.config).toMatchObject({ assignments: [{ key: "tag", valueTemplate: "new", type: "auto" }] });
+    expect(byId.get("post_item")!.config).toMatchObject({ failOnHttpError: true });
+    // Chosen on purpose: kept (the editor shows its switch without the "earlier behaviour" notice).
+    expect(byId.get("keep_open")!.config).toMatchObject({ mode: "gate" });
   });
 
   it("refuses a submission too large to be a workflow", () => {

@@ -57,4 +57,5 @@ export * from "./model-defaults";
 export * from "./item-nodes";
 export * from "./workflow-diff";
 export * from "./integration-catalog";
+export * from "./legacy-behaviour";
 export * from "./workflow-builder";
