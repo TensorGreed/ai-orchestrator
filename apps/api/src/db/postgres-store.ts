@@ -27,6 +27,7 @@ import * as misc from "./postgres/misc.js";
 import * as model_allowlist from "./postgres/model-allowlist.js";
 import * as queue from "./postgres/queue.js";
 import * as release from "./postgres/release.js";
+import * as starterFill from "./postgres/execution-starter-fill.js";
 import * as replay from "./postgres/replay.js";
 import * as retention from "./postgres/retention.js";
 import * as legalHolds from "./postgres/legal-holds.js";
@@ -723,6 +724,12 @@ export class PostgresStore implements Store {
   }
   async getExecutionStarter(...args: Parameters<Store["getExecutionStarter"]>): ReturnType<Store["getExecutionStarter"]> {
     return release.getExecutionStarter(this.ctx, ...args);
+  }
+  async getExecutionStarterFill(): ReturnType<Store["getExecutionStarterFill"]> {
+    return starterFill.getExecutionStarterFill(this.ctx);
+  }
+  async fillExecutionStarters(...args: Parameters<Store["fillExecutionStarters"]>): ReturnType<Store["fillExecutionStarters"]> {
+    return starterFill.fillExecutionStarters(this.ctx, ...args);
   }
   async getExecutionRelease(...args: Parameters<Store["getExecutionRelease"]>): ReturnType<Store["getExecutionRelease"]> {
     return release.getExecutionRelease(this.ctx, ...args);

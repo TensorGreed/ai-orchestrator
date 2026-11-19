@@ -49,6 +49,7 @@
  * so it can simply be re-run, and a copy that does not verify is never committed. Postgres has no transaction size
  * limit beyond disk for WAL; the target is not in use during the copy (the advisory lock holds back API starts).
  */
+import { isStarterFillProgressMarker } from "../db/execution-starter-fill.js";
 import Database, { type Database as BetterSqlite3Database } from "better-sqlite3";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
@@ -281,9 +282,17 @@ function checkSourceSchema(source: SqliteSchema, code: SqliteSchema, sqlitePath:
   for (const name of source.indexes.keys()) if (!code.indexes.has(name)) unknown.push(`index ${name}`);
   for (const name of code.triggers) if (!source.triggers.has(name)) missing.push(`trigger ${name}`);
   for (const name of source.triggers) if (!code.triggers.has(name)) unknown.push(`trigger ${name}`);
+  const upgrade = upgradeHint(sqlitePath, origins);
+  // v80 — the background fill of who started the runs recorded before the upgrade is still under way: its progress is
+  // counted in SQLite rowids, which mean nothing in the copy, so it must finish first.
+  if ([...source.markers].some(isStarterFillProgressMarker)) {
+    throw new DbCopyRefusal(
+      `The SQLite database is still filling in who started its older runs (a background job after the v80 upgrade). ` +
+        `Start this build against it until its log says "Filled in who started the runs recorded before this upgrade", then run db:copy again.`
+    );
+  }
   for (const name of code.markers) if (!source.markers.has(name)) missing.push(`schema marker ${name}`);
   for (const name of source.markers) if (!code.markers.has(name)) unknown.push(`schema marker ${name}`);
-  const upgrade = upgradeHint(sqlitePath, origins);
   if (unknown.length > 0) {
     throw new DbCopyRefusal(
       `The SQLite database has ${unknown.length} schema object(s) this build does not know (${preview(unknown)}): it was written by a newer ` +

@@ -223,6 +223,7 @@ import {
 import { ExternalSecretsService } from "./services/external-secrets-service";
 import { GIT_SYNC_LOCK_WAIT_MS, GitSyncService } from "./services/git-sync-service.js";
 import { LeaderElectionService, NEVER_LEAD } from "./services/leader-election-service";
+import { ExecutionStarterFillService } from "./services/execution-starter-fill-service.js";
 import { RetentionService, captureStep, redactionStep, ruleSimulationStep, usageRetentionWarning } from "./services/retention-service.js";
 import { reconcileInterruptedRuns } from "./services/run-reconcile-service.js";
 import type { ClusterBus } from "./services/cluster-bus.js";
@@ -5763,6 +5764,20 @@ export async function createApp(
   app.addHook("onClose", async () => {
     await retention.stop();
   });
+  // v80 — who started the runs recorded before the upgrade: filled in the background after start-up, in short batches,
+  // by one instance at a time (the leader holding the fill's lease). Until a run is reached it is nobody's own.
+  const starterFill = new ExecutionStarterFillService({
+    store,
+    instanceId: leaderElection.getInstanceId(),
+    isLeader: () => leaderElection.isLeader(),
+    logger: { info: (fields, message) => app.log.info(fields, message), warn: (fields, message) => app.log.warn(fields, message) }
+  });
+  app.addHook("onReady", async () => {
+    starterFill.start();
+  });
+  app.addHook("onClose", async () => {
+    await starterFill.stop();
+  });
 
   const notificationService = new NotificationService(config, async () =>
     (await store.listNotificationConfigs()).map(c => ({
@@ -5800,11 +5815,11 @@ export async function createApp(
   });
 
   /**
-   * v80 — who started a paused run that recorded no starter's user id: its history's (migration 80 set it on the runs
-   * recorded before, or left it empty when it could tell nobody). A run paused with no history row follows migration
-   * 80's rule: its first approval request's requester (`firstRequester`, by user id, else by email) or, with no request,
-   * the paused row's `triggeredBy`; that names the account with that user id, or with that email when the account is
-   * older than the run.
+   * v80 — who started a paused run that recorded no starter's user id: its history's (the v80 fill set it on the runs
+   * recorded before, or left it empty when it could tell nobody). A run paused with no history row, or one the fill has
+   * not reached yet, follows the fill's rule: its first approval request's requester (`firstRequester`, by user id,
+   * else by email) or, with no request, the paused row's `triggeredBy`; that names the account with that user id, or
+   * with that email when the account is older than the run.
    */
   const pausedRunStarter = async (
     executionId: string,
@@ -5813,7 +5828,11 @@ export async function createApp(
     triggeredBy: string | null,
     startedAt: string | null
   ): Promise<string | null> => {
-    if (hasHistory) return await store.getExecutionStarter(executionId);
+    if (hasHistory) {
+      const recorded = await store.getExecutionStarter(executionId);
+      // A run recorded before v80 that the background fill has not reached yet: the fill's rule, applied here.
+      if (recorded || (await store.getExecutionStarterFill()).done) return recorded;
+    }
     if (firstRequester?.userId) return (await store.getUserById(firstRequester.userId))?.id ?? null;
     const ref = firstRequester ? firstRequester.email : triggeredBy;
     if (!ref) return null;

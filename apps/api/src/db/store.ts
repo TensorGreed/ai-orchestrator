@@ -107,6 +107,7 @@ import type {
   SubjectTextRow,
   WorkflowReleaseRecord
 } from "./database.js";
+import type { ExecutionStarterFillBatch, ExecutionStarterFillState } from "./execution-starter-fill.js";
 import type { LostJobOutcome } from "./queue-leases.js";
 import type { AiGatewayStore } from "./ai-gateway-store.js";
 import type { ScimStore } from "./scim-store.js";
@@ -561,9 +562,18 @@ export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentR
   getExecutionSessionOwner(executionId: string): Promise<string | null>;
   /**
    * v80 — the user id of the person who started the run (saveExecutionHistory's `triggeredByUserId`), or null: a run
-   * no signed-in person started, a run recorded before v80, or no such run.
+   * no signed-in person started, a run recorded before v80 that the background fill has not reached (or could name
+   * nobody for), or no such run.
    */
   getExecutionStarter(executionId: string): Promise<string | null>;
+  /** v80 — where the background fill of the starters of runs recorded before v80 stands (db/execution-starter-fill.ts). */
+  getExecutionStarterFill(): Promise<ExecutionStarterFillState>;
+  /**
+   * v80 — fills the starters of the next `limit` runs the fill has not visited, in one transaction that also saves how
+   * far it got; `done` once nothing is left (the done marker is then written). Safe to call from several instances:
+   * a batch only writes runs that still have no starter, and the same rule gives the same answer.
+   */
+  fillExecutionStarters(limit?: number): Promise<ExecutionStarterFillBatch>;
   /**
    * v74 — whether content copied from this run is sensitive: its record is marked, or its run never wrote a final
    * answer (see saveExecutionHistory's `sensitive`). Null when there is no record.

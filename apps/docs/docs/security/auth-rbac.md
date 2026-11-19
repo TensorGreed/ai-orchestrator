@@ -279,11 +279,13 @@ project member keeps the full view, and so does anyone who also has the workflow
 - **Whose run it is.** A run records the user id of the person who started it: from the app, with their API key, or
   by a signed-in form submission or chat (a signed-in form also keeps the submitter's session memory to them, as a
   signed-in chat does). The run stays theirs, and keeps them as "started by", when someone else approves it; the
-  approver is recorded on the decision. An email never counts: migration v80 recorded the user id on older runs once,
-  for the account with that email created before the run started (for a run that asked for an approval, the first
-  request's requester), and left it empty where it could tell nobody (a
-  deleted account's email, an email a new account got later, two accounts). Runs with no user id, like runs no person
-  started (webhooks, schedules, public forms and chats, MCP and gateway calls), are nobody's own.
+  approver is recorded on the decision. An email never counts: after the v80 upgrade a background job records the user
+  id on older runs once, for the account with that email created before the run started (for a run that asked for an
+  approval, the first request's requester), and leaves it empty where it can tell nobody (a deleted account's email,
+  an email a new account got later, two accounts). Runs with no user id, like runs no person started (webhooks,
+  schedules, public forms and chats, MCP and gateway calls), are nobody's own. So is an older run the job has not
+  reached yet: right after the upgrade, someone who sees only their own runs sees their older runs appear as the job
+  fills them in (it runs in short batches after start-up; the log says when it is done).
 - **Lists.** The run history, the editor's run picker (it reads **Your runs** then) and the restored run data show only
   their runs, filtered before paging, so totals count only those.
 - **Single runs.** Someone else's run answers `404`, the same answer as a run that does not exist: its detail, its live

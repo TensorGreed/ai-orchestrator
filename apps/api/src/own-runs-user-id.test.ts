@@ -1,7 +1,8 @@
 /**
  * v80 — own runs by user id. A run records the id of the person who started it (`triggered_by_user_id`), and "their own
  * runs" (a person who has a workflow only through a share with them) is judged by that id and the session owner only:
- * an email never counts (migration 80 set the id on the runs recorded before; db/execution-starter-v80-upgrade.test.ts).
+ * an email never counts (after the v80 upgrade a background job sets the id on the runs recorded before;
+ * db/execution-starter-v80-upgrade.test.ts).
  * An approver's resume changes neither the id nor "started by"; the approver is on the decision. Signed-in form
  * submissions and chats are the submitter's own runs. Release history and the publish preview leave out what comes
  * from other people's runs (gate reasons, figures, the replay job) for such a person.
@@ -281,6 +282,27 @@ describe("own runs by user id (v80)", () => {
     // Not re-judged by its email at the resume, and never the approver's.
     expect(await context.store.getExecutionStarter(executionId)).toBeNull();
     expect((await listRuns(context, olivia)).ids).toEqual([]);
+  });
+
+  it("a run paused before the upgrade that the background fill has not reached yet resumes as its starter's, by the fill's rule", async () => {
+    const { context, owner, olivia } = await seed();
+    const paused = await call(context, "POST", "/api/workflows/wf-gated/execute", olivia.cookie, { input: {} });
+    const executionId = paused.json<{ executionId: string }>().executionId;
+    const state = (await context.store.getWorkflowExecutionState(executionId))!;
+    const { triggeredByUserId: _dropped, ...olderState } = state.state as Record<string, unknown>;
+    await context.store.saveWorkflowExecutionState({ ...state, state: olderState } as never);
+    await testSql(context.store).run("UPDATE execution_history SET triggered_by_user_id = NULL WHERE id = ?", executionId);
+    // The fill is still to reach it.
+    await testSql(context.store).run("DELETE FROM schema_markers WHERE name = 'execution_starter_backfill'");
+    await testSql(context.store).run("INSERT INTO schema_markers (name, created_at) VALUES ('execution_starter_fill_upto:1000000', ?)", new Date().toISOString());
+    expect((await context.store.getExecutionStarterFill()).done).toBe(false);
+    expect((await listRuns(context, olivia)).ids).toEqual([]);
+
+    const approved = await call(context, "POST", `/api/approvals/${executionId}/approve`, owner.cookie, {});
+    expect(approved.statusCode, approved.body).toBeLessThan(300);
+    expect((await context.store.getExecutionHistory(executionId))?.status).toBe("success");
+    expect(await context.store.getExecutionStarter(executionId)).toBe(olivia.id);
+    expect((await listRuns(context, olivia)).ids).toEqual([executionId]);
   });
 
   it("a retry of a run whose starter's account is gone, with no session owner recorded, is refused", async () => {
