@@ -286,6 +286,13 @@ Webhook Response that ran, else the last node's output. **Last Node Output** alw
 A run that fails after its Webhook Response answers with the error. Runs that no webhook started (the editor's **Run**,
 sub-workflows, schedules) keep their Output node's result.
 
+**On Received** answers the caller at once, before the run starts its work: `202` with
+`{"executionId": "…", "status": "accepted"}`, on the webhook's URL and on `/webhook-test/`. The run goes on in the
+background (on a worker when runs are queued) and is listed in **Runs** under that id, where its result is. Use it
+for callers that must not wait, such as a service that retries a slow reply. Content rules on responses check this
+reply too, an idempotency key answers a retry with the same `202`, and a used-up block budget or a full queue is still
+refused before anything runs. `POST /api/webhooks/execute` always waits for the run.
+
 ## Validation behavior
 
 Validation checks include:

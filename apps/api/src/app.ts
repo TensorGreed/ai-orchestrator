@@ -124,6 +124,7 @@ import {
   convertExternalWorkflow,
   ExternalWorkflowImportError,
   outputLabelsOf,
+  checkRunResponse,
   checkTriggerInput,
   describeRunResult,
   workflowDeclaresSensitiveSource,
@@ -14367,6 +14368,87 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
               };
             }
           }
+        }
+
+        // Response Mode "On Received": the caller gets 202 with the run's id at once and the run goes on in the
+        // background (inline, or on the queue). Nothing of the run is in the reply, so the run carries no response
+        // boundary; the reply itself still goes through the response rules.
+        if (match.endpoint.config.responseMode === "onReceived") {
+          if (!budgetAdmitted) {
+            await admitRunBudget({ workflow: match.workflow, triggerType, triggeredBy: "webhook" });
+            budgetAdmitted = true;
+          }
+          const acknowledgement = { executionId, status: "accepted" as const };
+          const now = new Date().toISOString();
+          const ackChecked = await checkRunResponse({
+            result: { workflowId: match.workflow.id, executionId, status: "success", startedAt: now, completedAt: now, nodeResults: [], output: acknowledgement },
+            boundary: { surface: "webhook" },
+            guard: guardService.runtimeFor({ executionId, workflowId: match.workflow.id, projectId: match.workflow.projectId ?? DEFAULT_PROJECT_ID }),
+            resolveSecret: (secretRef) => secretService.resolveSecret(secretRef),
+            executionId,
+            workflowId: match.workflow.id,
+            nodeId: match.endpoint.nodeId,
+            logger: (message, metadata) => app.log.warn({ workflowId: match.workflow.id, metadata }, message)
+          });
+          const ackStatus = responseWasWithheld(ackChecked) ? RESPONSE_WITHHELD_STATUS : 202;
+          const ackBody = responseWasWithheld(ackChecked) ? contentFilterEnvelope(executionId) : (ackChecked.output ?? acknowledgement);
+          let started: Awaited<ReturnType<typeof runDispatcher.start>>;
+          try {
+            started = await runDispatcher.start(
+              {
+                v: DISPATCH_SPEC_VERSION,
+                run: {
+                  workflow: match.workflow,
+                  webhookPayload: {
+                    ...parsedInput.body,
+                    ...(parsedInput.systemPrompt ? { system_prompt: parsedInput.systemPrompt } : {}),
+                    ...(parsedInput.userPrompt ? { user_prompt: parsedInput.userPrompt } : {}),
+                    session_id: parsedInput.sessionId,
+                    variables: parsedInput.variables
+                  },
+                  variables: parsedInput.variables,
+                  systemPrompt: parsedInput.systemPrompt,
+                  userPrompt: parsedInput.userPrompt,
+                  sessionId: parsedInput.sessionId,
+                  executionTimeoutMs: parsedInput.executionTimeoutMs,
+                  executionId,
+                  triggerType,
+                  triggeredBy: "webhook",
+                  channel: isTestRoute ? "draft" : "production",
+                  ...(webhookInputLabels ? { inputLabels: webhookInputLabels, recordInputLabels: true } : {})
+                },
+                progress: { requestInput: parsedInput.body },
+                history: { requestInput: parsedInput.body }
+              },
+              { pool: dispatchPoolOf(match.workflow), enforceBackpressure: true, admitted: true }
+            );
+          } catch (error) {
+            // Refused before it started (a full pool, a failed enqueue): the key is free for a retry.
+            if (security.idempotencyEnabled && idempotencyKey) {
+              await store
+                .releaseWebhookIdempotencyPending({ endpointKey, idempotencyKey, requestHash: computeSha256Hex(rawBody) })
+                .catch(() => false);
+            }
+            throw error;
+          }
+          if (!started.queued) {
+            started.done.catch((error: unknown) => {
+              app.log.warn(
+                { executionId, workflowId: match.workflow.id, err: secretService.redact(error instanceof Error ? error.message : String(error)) },
+                "A webhook run answered on receipt failed"
+              );
+            });
+          }
+          if (security.idempotencyEnabled && idempotencyKey) {
+            await store.saveWebhookIdempotencyResult({
+              endpointKey,
+              idempotencyKey,
+              status: "success",
+              result: { __webhookHttpResponse: { statusCode: ackStatus, headers: {}, body: ackBody } }
+            });
+          }
+          reply.code(ackStatus);
+          return ackBody;
         }
 
         const result = await runDispatcher.run(

@@ -5131,7 +5131,7 @@ export function NodeInspector({
             { value: "auto", label: "Automatic (the Webhook Response if one ran, else the last node)" },
             { value: "lastNode", label: "Last Node Output" },
             { value: "responseNode", label: "Wait for Response Node" },
-            { value: "onReceived", label: "On Received (immediate 200)" }
+            { value: "onReceived", label: "On Received (answer 202 at once, run in the background)" }
           ]}
         />
         <NumberField

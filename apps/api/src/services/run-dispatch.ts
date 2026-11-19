@@ -461,14 +461,15 @@ export class RunDispatcher {
   /**
    * `fire` in two steps, for a caller that answers someone before an inline run ends (a Slack event): resolves once
    * the run is admitted and either queued (or found already queued) or started in this process. A refusal (a full
-   * pool, a failed enqueue) is thrown before it resolves; an inline run's outcome is `done`.
+   * pool, a failed enqueue) is thrown before it resolves; an inline run's outcome is `done`. `admitted`: the caller
+   * checked the budgets already (a webhook answered at once), so `admit` is not asked again.
    */
   async start(
     spec: DispatchedRunSpec,
-    options: { pool: string; queueItemId?: string; enforceBackpressure?: boolean }
+    options: { pool: string; queueItemId?: string; enforceBackpressure?: boolean; admitted?: boolean }
   ): Promise<{ queued: true; deduplicated: boolean } | { queued: false; refused?: BudgetExceededError; done: Promise<FireOutcome> }> {
     try {
-      await this.deps.admit?.(spec);
+      if (!options.admitted) await this.deps.admit?.(spec);
     } catch (error) {
       // 12.6 — nobody waits on a fired run: a budget refusal is recorded as a failed run with the reason. `refused`
       // tells a polling trigger not to count what it fired as delivered.
