@@ -43,7 +43,7 @@ What each kind of access gives on one workflow.
 workflow. It decides who runs the draft (on `/execute`, the manual trigger route and a retry), who may use the editor's
 run options, who may replay a run with its recorded MCP calls, who may replay golden runs and start replay jobs (they
 run the draft or a candidate), whose runs use the workflow's session memory, and who sees the editor's edit controls
-(including the run tape's replay controls). An operator with an editor membership may not edit: the role caps it.
+(and, on the Runs page, Replay from here, Replay with the recorded MCP calls and the golden run controls). An operator with an editor membership may not edit: the role caps it.
 A builder who may only run a workflow (through an execute share to their project, say) is treated like an operator
 for it.
 

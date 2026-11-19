@@ -191,6 +191,7 @@ import { WorkflowCanvasArea, type ImportPanelBinding } from "./components/Workfl
 import { ExternalImportDialog, type ExternalImportSource } from "./components/ExternalImportDialog";
 import { ImportConflictDialog, type ImportConflictChoice } from "./components/ImportConflictDialog";
 import { editorAccess, mayUseEditorRunOptions, type WorkflowAccessView } from "./lib/editor-access";
+import { useEditableWorkflows } from "./lib/editable-workflows";
 import { SecretSaveWarnings } from "./components/SecretSaveWarnings";
 import { DraftWarnings } from "./components/DraftWarnings";
 import { WebhookTestPayloadDialog } from "./components/WebhookTestPayloadDialog";
@@ -1608,6 +1609,9 @@ function StudioApp() {
     };
   }, [authUser, currentWorkflow.id, currentWorkflowExists]);
   const openWorkflowAccess = workflowAccess && workflowAccess.workflowId === currentWorkflow.id ? workflowAccess : null;
+  // The run list's replay controls run the draft: shown only for the workflows you may edit.
+  const runListWorkflowIds = useMemo(() => executionHistoryItems.map((item) => item.workflowId), [executionHistoryItems]);
+  const mayEditRunWorkflow = useEditableWorkflows(authUser?.role, activeMode === "executions" ? runListWorkflowIds : []);
   const { editDisabledReason, runDisabledReason } = editorAccess(authUser?.role, openWorkflowAccess);
   // The editor's run options (pinned data, recording, one node or from a node): for someone who may edit this workflow.
   const editorRunOptions = mayUseEditorRunOptions(authUser?.role, openWorkflowAccess);
@@ -6183,6 +6187,7 @@ function StudioApp() {
               onReplayCassette={canManageWorkflows ? (executionId, mode) => handleReplayCassette(executionId, mode) : undefined}
               canDeleteCassettes={authUser?.role === "admin"}
               canManageGoldenRuns={canManageWorkflows}
+              mayEditWorkflow={mayEditRunWorkflow}
               onReviewApproval={(executionId) => {
                 setApprovalFocusExecutionId(executionId);
                 setActiveMode("approvals");

@@ -323,4 +323,32 @@ describe("ExecutionHistoryPanel", () => {
     expect(screen.queryByRole("button", { name: /MCP calls recorded/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Replay" })).not.toBeInTheDocument();
   });
+
+  it("hides replay controls on runs of a workflow you may not edit, and keeps them on one you may", () => {
+    const detail = (id: string, workflowId: string): ExecutionHistoryDetail => ({
+      ...makeSummary({ id, workflowId, status: "error" }),
+      input: {},
+      output: null,
+      nodeResults: [{ nodeId: "llm", status: "error", durationMs: 5, error: "boom" }]
+    });
+    const cassette = { id: "cas_1", callCount: 2, truncated: false };
+    render(
+      <ExecutionHistoryPanel
+        {...makeProps({
+          executionHistoryTotal: 2,
+          executionHistoryItems: [
+            makeSummary({ id: "ex-run", workflowId: "wf-run-only", status: "error", mcpCassette: cassette }),
+            makeSummary({ id: "ex-edit", workflowId: "wf-edit", status: "error", mcpCassette: { ...cassette, id: "cas_2" } })
+          ],
+          expandedExecutionIds: ["ex-run", "ex-edit"],
+          executionDetailById: { "ex-run": detail("ex-run", "wf-run-only"), "ex-edit": detail("ex-edit", "wf-edit") },
+          onReplayFromNode: vi.fn(),
+          onReplayCassette: vi.fn(),
+          mayEditWorkflow: (workflowId: string) => workflowId === "wf-edit"
+        })}
+      />
+    );
+    expect(screen.getAllByRole("button", { name: "Replay" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: /Replay from here/ })).toHaveLength(1);
+  });
 });

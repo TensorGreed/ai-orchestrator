@@ -113,7 +113,14 @@ interface ExecutionHistoryPanelProps {
   canManageGoldenRuns?: boolean;
   /** Phase 11.2 — opens the Approvals inbox on a run paused for a decision. */
   onReviewApproval?: (executionId: string) => void;
+  /**
+   * Whether you may edit a run's workflow. Replaying from a node, replaying with the recorded MCP calls and golden runs
+   * run the draft, so their controls are shown only for workflows you may edit. Left out: every workflow.
+   */
+  mayEditWorkflow?: (workflowId: string) => boolean;
 }
+
+const everyWorkflow = () => true;
 
 const GOLDEN_SOURCE_BLOCKED = new Set(["running", "pending", "queued", "waiting_approval"]);
 
@@ -202,12 +209,13 @@ export function ExecutionHistoryPanel({
   onReplayCassette,
   canDeleteCassettes = false,
   canManageGoldenRuns = false,
-  onReviewApproval
+  onReviewApproval,
+  mayEditWorkflow = everyWorkflow
 }: ExecutionHistoryPanelProps) {
   const [expandedTraceKey, setExpandedTraceKey] = useState<string | null>(null);
-  const [viewer, setViewer] = useState<{ cassetteId: string; executionId: string } | null>(null);
+  const [viewer, setViewer] = useState<{ cassetteId: string; executionId: string; workflowId: string } | null>(null);
   const [saveGolden, setSaveGolden] = useState<ExecutionHistorySummary | null>(null);
-  const [goldenId, setGoldenId] = useState<string | null>(null);
+  const [golden, setGolden] = useState<{ id: string; workflowId: string } | null>(null);
   const toggleTraceRow = useCallback((key: string) => {
     setExpandedTraceKey((current) => (current === key ? null : key));
   }, []);
@@ -373,7 +381,7 @@ export function ExecutionHistoryPanel({
                             title={`MCP calls recorded into a cassette${item.mcpCassette.truncated ? " (truncated)" : ""}. Open it.`}
                             onClick={(event) => {
                               event.stopPropagation();
-                              setViewer({ cassetteId: item.mcpCassette!.id, executionId: item.id });
+                              setViewer({ cassetteId: item.mcpCassette!.id, executionId: item.id, workflowId: item.workflowId });
                             }}
                           >
                             <CassetteIcon />
@@ -395,7 +403,7 @@ export function ExecutionHistoryPanel({
                           title={`Saved as ${item.goldenRuns.count} golden run${item.goldenRuns.count === 1 ? "" : "s"}. Open the latest.`}
                           onClick={(event) => {
                             event.stopPropagation();
-                            setGoldenId(item.goldenRuns!.latestId);
+                            setGolden({ id: item.goldenRuns!.latestId, workflowId: item.workflowId });
                           }}
                         >
                           <GoldenStarIcon />
@@ -430,7 +438,7 @@ export function ExecutionHistoryPanel({
                       >
                         Retry
                       </button>
-                      {item.mcpCassette && onReplayCassette && (
+                      {item.mcpCassette && onReplayCassette && mayEditWorkflow(item.workflowId) && (
                         <button
                           className="pg-btn small"
                           title="Run again with MCP calls answered from the recorded cassette"
@@ -442,7 +450,7 @@ export function ExecutionHistoryPanel({
                           Replay
                         </button>
                       )}
-                      {canManageGoldenRuns && !GOLDEN_SOURCE_BLOCKED.has(item.status) && item.completedAt && item.triggerType !== "replay" && !item.goldenRuns && (
+                      {canManageGoldenRuns && mayEditWorkflow(item.workflowId) && !GOLDEN_SOURCE_BLOCKED.has(item.status) && item.completedAt && item.triggerType !== "replay" && !item.goldenRuns && (
                         <button
                           className="pg-btn small"
                           title="Keep this run as a golden run to replay changes against"
@@ -545,7 +553,7 @@ export function ExecutionHistoryPanel({
                                       <span className="execution-trace-extra">
                                         <DataLabelChips labels={trace?.labels} />
                                         <EndorsementNote endorsement={trace?.endorsement} />
-                                        {onReplayFromNode && (
+                                        {onReplayFromNode && mayEditWorkflow(item.workflowId) && (
                                           <button
                                             type="button"
                                             className="pg-btn small ghost"
@@ -612,20 +620,27 @@ export function ExecutionHistoryPanel({
           hasCassette={Boolean(saveGolden.mcpCassette)}
           onClose={() => setSaveGolden(null)}
           onSaved={(recordingId) => {
+            setGolden({ id: recordingId, workflowId: saveGolden.workflowId });
             setSaveGolden(null);
-            setGoldenId(recordingId);
             onRefresh();
           }}
         />
       )}
-      {goldenId && <GoldenRunViewer recordingId={goldenId} canReplay={canManageGoldenRuns} onClose={() => setGoldenId(null)} onChanged={onRefresh} />}
+      {golden && (
+        <GoldenRunViewer
+          recordingId={golden.id}
+          canReplay={canManageGoldenRuns && mayEditWorkflow(golden.workflowId)}
+          onClose={() => setGolden(null)}
+          onChanged={onRefresh}
+        />
+      )}
       {viewer && (
         <McpCassetteViewer
           cassetteId={viewer.cassetteId}
           canDelete={canDeleteCassettes}
           onClose={() => setViewer(null)}
           onDeleted={onRefresh}
-          {...(onReplayCassette
+          {...(onReplayCassette && mayEditWorkflow(viewer.workflowId)
             ? {
                 onReplay: (mode: McpReplayMode) => {
                   const executionId = viewer.executionId;
