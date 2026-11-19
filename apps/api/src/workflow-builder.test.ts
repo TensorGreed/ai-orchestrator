@@ -34,7 +34,7 @@ const ENV_KEYS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"] as co
 const savedEnv: Record<string, string | undefined> = {};
 
 /** Canned model turns, by how many tool results the request already carries. */
-type Turn = { content?: string; toolCalls?: Array<{ name: string; arguments: Record<string, unknown> }>; fail?: string; delayMs?: number };
+type Turn = { content?: string; toolCalls?: Array<{ name: string; arguments: Record<string, unknown> }>; fail?: string; delayMs?: number; noUsage?: boolean };
 let script: Turn[] = [];
 const modelRequests: Array<{ messages: Array<{ role: string; content?: unknown }>; tools?: Array<{ function?: { name?: string } }>; stream?: boolean }> = [];
 let mockServer: http.Server;
@@ -85,7 +85,7 @@ function respond(res: http.ServerResponse, turn: Turn, index: number) {
       object: "chat.completion",
       model: "mock-builder",
       choices: [{ index: 0, message, finish_reason: turn.toolCalls ? "tool_calls" : "stop" }],
-      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }
+      ...(turn.noUsage ? {} : { usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } })
     })
   );
 }
@@ -428,6 +428,14 @@ describe("Describe it and model spending limits", () => {
     const after = await usageOfBuilds(context);
     expect(after).toHaveLength(2);
     expect(after.find((event) => event.status === "error")).toMatchObject({ totalTokens: 15, llmCallCount: 1 });
+
+    // A server that reports no usage is charged an estimate, as a run's call is, never nothing.
+    script = [{ toolCalls: [{ name: "submit_workflow", arguments: goodDraft }], noUsage: true }];
+    await build(context, cookie, { prompt: "orders once more", model: mockModel() });
+    const quiet = (await usageOfBuilds(context)).filter((event) => !after.some((earlier) => earlier.id === event.id));
+    expect(quiet).toHaveLength(1);
+    expect(Number(quiet[0]!.inputTokens)).toBeGreaterThan(0);
+    expect(Number(quiet[0]!.outputTokens)).toBeGreaterThan(0);
   }, 30_000);
 
   it("refuses a build before any model call once a block budget on the project or the person is used up", async () => {

@@ -1233,7 +1233,9 @@ function listWebhookEndpoints(workflow: Workflow): WebhookEndpoint[] {
 async function listWebhookEndpointMatchesByPath(
   store: Store,
   path: string,
-  load: WorkflowLoader = async (id) => await store.getWorkflow(id)
+  load: WorkflowLoader = async (id) => await store.getWorkflow(id),
+  /** Leave out webhooks switched off (production listings: an off webhook is not advertised). */
+  liveOnly = false
 ): Promise<Array<{ workflowId: string; workflowName: string; nodeId: string; path: string; method: string }>> {
   const normalizedPath = normalizeWebhookPath(path, "").toLowerCase();
   const matches: Array<{ workflowId: string; workflowName: string; nodeId: string; path: string; method: string }> = [];
@@ -1246,6 +1248,7 @@ async function listWebhookEndpointMatchesByPath(
     }
 
     for (const endpoint of listWebhookEndpoints(workflow)) {
+      if (liveOnly && endpoint.config.active === false) continue;
       if (endpoint.path.toLowerCase() !== normalizedPath) {
         continue;
       }
@@ -1299,7 +1302,9 @@ async function listMcpServerUsages(
 
 async function listAllWebhookEndpoints(
   store: Store,
-  load: WorkflowLoader = async (id) => await store.getWorkflow(id)
+  load: WorkflowLoader = async (id) => await store.getWorkflow(id),
+  /** Leave out webhooks switched off (production listings: an off webhook is not advertised). */
+  liveOnly = false
 ): Promise<Array<{ workflowId: string; workflowName: string; nodeId: string; path: string; method: string }>> {
   const endpoints: Array<{ workflowId: string; workflowName: string; nodeId: string; path: string; method: string }> = [];
   const workflows = await store.listWorkflows();
@@ -1311,6 +1316,7 @@ async function listAllWebhookEndpoints(
     }
 
     for (const endpoint of listWebhookEndpoints(workflow)) {
+      if (liveOnly && endpoint.config.active === false) continue;
       endpoints.push({
         workflowId: workflow.id,
         workflowName: workflow.name,
@@ -14042,7 +14048,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
               return { error: DEACTIVATED_MESSAGE, path: request.params.path };
             }
           }
-          const pathMatches = await listWebhookEndpointMatchesByPath(store, request.params.path, loadForRoute);
+          const pathMatches = await listWebhookEndpointMatchesByPath(store, request.params.path, loadForRoute, !isTestRoute);
           if (pathMatches.length > 0) {
             const allowedMethods = [...new Set(pathMatches.map((entry) => entry.method))];
             reply.code(405);
@@ -14055,7 +14061,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
               matches: pathMatches
             };
           }
-          const allEndpoints = await listAllWebhookEndpoints(store, loadForRoute);
+          const allEndpoints = await listAllWebhookEndpoints(store, loadForRoute, !isTestRoute);
           const methodMatches = allEndpoints.filter((entry) => entry.method === request.method).slice(0, 20);
           reply.code(404);
           return {

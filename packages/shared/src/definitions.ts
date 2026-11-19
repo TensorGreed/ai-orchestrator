@@ -3475,8 +3475,9 @@ export function isEntryNodeType(type: string): boolean {
 
 /**
  * The triggers anyone can reach from outside once a workflow is saved: webhooks, forms, chats, MCP triggers and
- * schedules. Each can be switched off with `config.active: false` (unset means on, as nodes saved before it had no
- * such setting): production calls to an off webhook, form, chat or MCP trigger answer "not found", the MCP gateway
+ * schedules. Each can be switched off with `config.active: false`; for a webhook, form, chat or MCP trigger unset means
+ * on, as nodes saved before it had no such setting (a schedule's `active` is required, and fires only when true):
+ * production calls to an off webhook, form, chat or MCP trigger answer "not found", the MCP gateway
  * leaves an off trigger's tool out, and an off schedule never fires. Runs from the editor (Run, Webhook run, the
  * `/webhook-test/` URL) work either way. Starter templates ship with theirs off.
  */

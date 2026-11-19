@@ -337,6 +337,12 @@ describe("starters start switched off", () => {
     const off = await anonymous("POST", `/webhook/${webhookPath}`, body);
     expect(off.statusCode).toBe(404);
     expect(off.json()).toMatchObject({ code: "trigger_off", error: "This webhook is turned off. Turn it on in the workflow editor to accept live calls." });
+    // Another method or path does not advertise it either.
+    const wrongMethod = await anonymous("GET", `/webhook/${webhookPath}`);
+    expect(wrongMethod.statusCode).toBe(404);
+    expect(JSON.stringify(wrongMethod.json().availableEndpoints ?? [])).not.toContain(`"${webhookPath}"`);
+    const elsewhere = await anonymous("POST", `/webhook/no-such-${webhookPath}`, body);
+    expect(JSON.stringify(elsewhere.json().availableEndpoints ?? [])).not.toContain(`"${webhookPath}"`);
     // The editor's runs: Run, Webhook run and the test URL.
     expect((await run(workflow)).status).toBe("success");
     expect((await webhookRun(workflow)).status).toBe("success");

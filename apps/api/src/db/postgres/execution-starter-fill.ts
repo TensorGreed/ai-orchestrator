@@ -16,6 +16,8 @@ import type { PgContext } from "./context.js";
 const FILL_MARKERS_SQL = `SELECT name FROM schema_markers WHERE name = $1 OR left(name, length($2)) = $2`;
 /** The prefix every progress marker shares (`execution_starter_fill_upto:` and `execution_starter_fill_after:`). */
 const PROGRESS_PREFIX = "execution_starter_fill_";
+/** The advisory lock class the batches take turns on (see the key space in postgres-store.ts). */
+export const ADVISORY_LOCK_CLASS_STARTER_FILL = 0x4c3246;
 
 /** v80 — see Store.getExecutionStarterFill. */
 export async function getExecutionStarterFill(ctx: PgContext): Promise<ExecutionStarterFillState> {
@@ -29,14 +31,17 @@ export async function getExecutionStarterFill(ctx: PgContext): Promise<Execution
  * run with no request names nobody; any other run, its triggered_by. That names the account with that user id, or with
  * that email (any case) when the account was created before the run started. No account, or two: NULL.
  *
- * One transaction per batch: the fill's markers are locked first (FOR UPDATE), so two instances that both ran a batch
- * take turns, then at most `limit` runs by `seq` are filled and the progress marker moves past them.
+ * One transaction per batch: it takes a transaction-level advisory lock first, so two instances that both ran a batch
+ * take turns, then reads the markers in a statement of its own (READ COMMITTED: it sees the progress the other one
+ * committed; a `FOR UPDATE` read of the markers would not see a marker the other one inserted, and would start over).
+ * Then at most `limit` runs by `seq` are filled and the progress marker moves past them.
  */
 export async function fillExecutionStarters(ctx: PgContext, limit: number = STARTER_FILL_BATCH_SIZE): Promise<ExecutionStarterFillBatch> {
   const size = Math.max(1, Math.min(Math.floor(limit), 50_000));
   const began = performance.now();
   const outcome = await ctx.withTransaction(async (client) => {
-    const names = (await client.query<{ name: string }>(`${FILL_MARKERS_SQL} FOR UPDATE`, [STARTER_FILL_DONE_MARKER, PROGRESS_PREFIX])).rows.map((row) =>
+    await client.query(`SELECT pg_advisory_xact_lock($1, hashtext(current_schema()))`, [ADVISORY_LOCK_CLASS_STARTER_FILL]);
+    const names = (await client.query<{ name: string }>(FILL_MARKERS_SQL, [STARTER_FILL_DONE_MARKER, PROGRESS_PREFIX])).rows.map((row) =>
       String(row.name)
     );
     const state = starterFillState(names);

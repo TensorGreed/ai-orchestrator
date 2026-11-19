@@ -7,8 +7,8 @@
  * - Resumable: each batch saves how far it got in the same transaction (db/execution-starter-fill.ts). A stop, a crash
  *   or a lost lease resumes after the last committed batch at the next start (or the next retry).
  * - One instance at a time: only the leader (always the instance itself when HA is off) runs it, and only while it
- *   holds the `execution-starter-fill` lease, renewed every batch. The batches also lock the fill's markers, so even
- *   two runners would take turns, never fill a run twice.
+ *   holds the `execution-starter-fill` lease, renewed every batch. Each batch also takes a lock of its own (on
+ *   Postgres an advisory lock; SQLite has one writer), so even two runners would take turns, never visit a run twice.
  * - Until a run is reached it records nobody, which counts as nobody's own run (fail closed): a person who sees only
  *   their own runs sees it once the fill has reached it.
  *

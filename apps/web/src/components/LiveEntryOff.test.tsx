@@ -65,7 +65,7 @@ describe("an entry point that is off", () => {
     expect(within(screen.getByTestId("advanced-fields")).getByText("1 set")).toBeInTheDocument();
     await user.click(within(notice).getByRole("button", { name: "Turn on" }));
     expect(screen.queryByTestId("live-entry-off")).toBeNull();
-    expect(screen.getByTestId("live-entry-on")).toHaveTextContent("Turned on: it takes live calls once you save.");
+    expect(screen.getByTestId("live-entry-on")).toHaveTextContent("Turned on: it takes live calls once you save (and publish, if production runs a published version).");
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     expect(view.onSave).toHaveBeenCalledWith(expect.objectContaining({ config: { path: "starter-reshape", method: "POST", authMode: "none" } }));
   });

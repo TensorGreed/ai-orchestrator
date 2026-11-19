@@ -302,6 +302,28 @@ describe.skipIf(!postgresUrl)("v80 on Postgres", () => {
         await first.close();
         await second.close();
       }
+
+      // Once more, with two runners' batches interleaved and no lease at all: they take turns, so each run is visited once.
+      await rollbackMigrations(run, current, setRolledBack, 79);
+      const third = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema, maxConnections: 2 }));
+      const fourth = await PostgresStore.create(postgresStoreConfig(testPostgresSettings(), { schema, maxConnections: 2 }));
+      try {
+        const loop = async (store: Store) => {
+          let visited = 0;
+          for (;;) {
+            const batch = await store.fillExecutionStarters(700);
+            if (batch.done) return visited;
+            visited += batch.visited;
+          }
+        };
+        const counts = await Promise.all([loop(third), loop(fourth)]);
+        expect(counts[0]! + counts[1]!).toBe(BULK + 14);
+        expect((await third.getExecutionStarterFill()).done).toBe(true);
+        expect(await third.getExecutionStarter("run-ana")).toBe("usr_ana");
+      } finally {
+        await third.close();
+        await fourth.close();
+      }
     } finally {
       await pool.end();
       await admin.end();

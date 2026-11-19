@@ -10421,7 +10421,7 @@ export function NodeInspector({
       // Turned on in this edit: it takes live calls once saved.
       return savedNodeConfig.active === false ? (
         <div className="cfg-tip" data-testid="live-entry-on">
-          Turned on: it takes live calls once you save.
+          Turned on: it takes live calls once you save (and publish, if production runs a published version).
         </div>
       ) : null;
     }

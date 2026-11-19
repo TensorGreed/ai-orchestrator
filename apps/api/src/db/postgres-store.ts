@@ -87,6 +87,8 @@ export interface PostgresStoreConfig {
  *                     purge batch and hold-checked delete, exclusive while a hold is placed; see db/legal-hold-sql.ts.
  *   0x4c3250 ("L2P")  MCP gateway approval requests — key: hashtext(schema:client id), held for the creating
  *                     transaction (pg_advisory_xact_lock) so the per-client pending cap holds; see postgres/mcp.ts.
+ *   0x4c3246 ("L2F")  v80 run-starter fill — key: hashtext(schema), held for each batch's transaction so two runners
+ *                     take turns; see postgres/execution-starter-fill.ts.
  * Add a new class here rather than reusing one.
  */
 export const ADVISORY_LOCK_CLASS_MIGRATIONS = 0x4c324d;
