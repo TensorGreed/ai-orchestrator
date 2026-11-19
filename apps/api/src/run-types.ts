@@ -91,6 +91,8 @@ export interface RunWorkflowExecutionInput {
   triggerType?: string;
   /** Phase 12 coverage — the trigger that produced the input (a replay's recording), when it differs from `triggerType`. */
   inputTriggerType?: string;
+  /** The trigger whose output rule the run follows (a replay of a webhook recording, imported ones too). */
+  outputTriggerType?: string;
   triggeredBy?: string;
   /**
    * Phase 10.2 — the signed-in user who started this run. Set only by

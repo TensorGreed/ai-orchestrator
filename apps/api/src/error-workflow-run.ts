@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import type { Store } from "./db/store.js";
 
 /**
  * An error workflow's run is recorded like any other run, under an id derived from the failed run's id: one failed run
@@ -45,4 +46,27 @@ export interface ErrorWorkflowRunLink {
   workflowId: string;
   workflowName: string;
   status: string;
+}
+
+/** The claim's record: one row per failed run in the webhook idempotency table (insert-only, so one racer wins). */
+const ERROR_WORKFLOW_CLAIM_ENDPOINT = "l2m:error-workflow-run";
+/** How long a failed run's claim is kept: longer than any re-run of that run (a lost lease, a dead-letter retry). */
+const ERROR_WORKFLOW_CLAIM_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+type ClaimStore = Pick<Store, "saveWebhookIdempotencyPending" | "getWebhookIdempotency">;
+
+/**
+ * Claims the error workflow run of a failed run: true for the first caller, false when the failed run already started
+ * its error workflow (the same run executed again, as after a lost lease). A store error other than the claim being
+ * taken counts as claimed, so the error workflow still runs, as it did before claims.
+ */
+export async function claimErrorWorkflowRun(store: ClaimStore, failedExecutionId: string, now = Date.now()): Promise<boolean> {
+  const key = { endpointKey: ERROR_WORKFLOW_CLAIM_ENDPOINT, idempotencyKey: failedExecutionId };
+  try {
+    await store.saveWebhookIdempotencyPending({ ...key, requestHash: errorWorkflowRunId(failedExecutionId), expiresAt: new Date(now + ERROR_WORKFLOW_CLAIM_TTL_MS).toISOString() });
+    return true;
+  } catch {
+    const existing = await store.getWebhookIdempotency(key).catch(() => null);
+    return existing === null;
+  }
 }

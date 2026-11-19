@@ -15,7 +15,7 @@ import type { Store } from "./db/store.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
 import { openTestStore } from "./test-support/test-store.js";
-import { errorWorkflowRunId } from "./error-workflow-run.js";
+import { claimErrorWorkflowRun, errorWorkflowRunId } from "./error-workflow-run.js";
 
 interface TestContext {
   app: FastifyInstance;
@@ -242,5 +242,31 @@ describe("an error workflow's run", () => {
     expect(failedRun.errorWorkflowRun).toMatchObject({ executionId: errorRunId, status: "error" });
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(await context.store.getExecutionHistory(errorWorkflowRunId(errorRunId))).toBeNull();
+  });
+
+  it("fires once per failed run: the failed run executed again under its id (as after a lost lease) starts no second error run", async () => {
+    const context = await createTestContext("role");
+    const admin = await login(context, "admin", "ada");
+    await context.store.upsertWorkflow(handlerWorkflow("wf-handler"));
+    await context.store.upsertWorkflow(failingWorkflow("wf-fails", "wf-handler"));
+    const { failedRunId, errorRunId } = await runAndWaitForHandler(context, admin, "wf-fails", "wf-handler");
+    const firstError = await context.store.getExecutionHistory(errorRunId);
+
+    // The same failed run executes again under its execution id.
+    const uuid = vi.spyOn(crypto, "randomUUID").mockImplementationOnce(() => failedRunId as ReturnType<typeof crypto.randomUUID>);
+    const again = await call(context, "POST", "/api/workflows/wf-fails/execute", admin.cookie, {});
+    uuid.mockRestore();
+    expect(again.json<{ executionId: string }>().executionId).toBe(failedRunId);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect((await context.store.getExecutionHistory(errorRunId))?.startedAt).toBe(firstError?.startedAt);
+    expect((await runsOf(context, admin, "wf-handler")).map((row) => row.id)).toEqual([errorRunId]);
+  });
+
+  it("claims a failed run's error workflow run once, however many callers race for it", async () => {
+    const context = await createTestContext("role");
+    const claims = await Promise.all([1, 2, 3].map(() => claimErrorWorkflowRun(context.store, "failed-run-1")));
+    expect(claims.filter(Boolean)).toHaveLength(1);
+    expect(await claimErrorWorkflowRun(context.store, "failed-run-1")).toBe(false);
+    expect(await claimErrorWorkflowRun(context.store, "failed-run-2")).toBe(true);
   });
 });

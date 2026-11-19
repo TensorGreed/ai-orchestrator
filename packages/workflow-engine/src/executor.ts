@@ -758,6 +758,11 @@ export interface ExecuteWorkflowRequest {
    * recorded run gives the recording's trigger). Decides whether the input is a caller's own words at the model boundary.
    */
   inputTriggerType?: string;
+  /**
+   * The trigger whose output rule the run follows when it is not the run's own (a replay of a webhook recording,
+   * imported ones included): a webhook run's output is its last Webhook Response's reply. It decides nothing else.
+   */
+  outputTriggerType?: string;
   triggeredBy?: string;
   /**
    * Phase 10.2 — whose role the MCP tool policy is evaluated with. Absent →
@@ -1286,14 +1291,15 @@ function categorizedProviderError(
 }
 
 /** Whether a webhook started the run (or the recorded run a replay replays): its caller is answered with a reply. */
-function runAnswersWebhook(request: { triggerType?: string; inputTriggerType?: string }): boolean {
-  const triggerType = (request.inputTriggerType ?? request.triggerType ?? "").trim().toLowerCase();
+function runAnswersWebhook(request: { triggerType?: string; inputTriggerType?: string; outputTriggerType?: string }): boolean {
+  const triggerType = (request.outputTriggerType ?? request.inputTriggerType ?? request.triggerType ?? "").trim().toLowerCase();
   return triggerType.startsWith("webhook");
 }
 
 /** The last Webhook Response node that ran successfully in this run, with its output (the reply), or undefined. */
 function lastWebhookReply(workflow: Workflow, nodeResults: NodeExecutionResult[]): { nodeId: string; output: unknown } | undefined {
-  // A webhook trigger set to answer with the last node's output (Response Mode "Last Node Output") keeps that answer.
+  // A webhook trigger set to answer with the last node's output (Response Mode "Last Node Output") keeps that answer;
+  // Automatic (unset or "auto", the default) and "Wait for Response Node" answer with the reply.
   const ranIds = new Set(nodeResults.filter((entry) => entry.status === "success").map((entry) => entry.nodeId));
   const startedBy = workflow.nodes.filter((node) => node.type === "webhook_input" && ranIds.has(node.id));
   if (startedBy.length > 0 && startedBy.every((node) => (node.config as Record<string, unknown> | undefined)?.responseMode === "lastNode")) {

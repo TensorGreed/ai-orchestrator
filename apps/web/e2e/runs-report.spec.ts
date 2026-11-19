@@ -2,8 +2,9 @@ import path from "node:path";
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 
 /**
- * Runs report what really happened (the end-user validation's B4, B8, B9): a handled failure reads as handled, an error
- * workflow's run is in Runs and linked to the failed run both ways, and the run tape counts nodes. Any request towards a
+ * Runs report what really happened (the end-user validation's B1, B4, B8, B9): a hand-built webhook answers with its
+ * Webhook Response, a handled failure reads as handled, an error workflow's run is in Runs and linked to the failed run
+ * both ways, and the run tape counts nodes. Any request towards a
  * local Ollama port fails the suite.
  */
 
@@ -178,4 +179,68 @@ test("an error workflow's run is in Runs, and the failed run links to it and bac
   const back = page.getByTestId("execution-run-link").filter({ hasText: "Error workflow for" });
   await expect(back).toContainText(`run ${executionId.slice(0, 8)}`);
   await page.screenshot({ path: path.join(SHOT_DIR, "after-04-error-run-in-runs.png") });
+});
+
+test("a webhook built by hand answers with its Webhook Response, though a node runs after it (Response Mode: Automatic)", async () => {
+  test.setTimeout(120_000);
+  const id = `wf-e2e-hand-webhook-${Date.now()}`;
+  await saveWorkflow({
+    id,
+    name: `E2E Hand-built webhook ${id}`,
+    schemaVersion: "1.0.0",
+    workflowVersion: 1,
+    nodes: [{ id: "out", type: "output", name: "Result", position: { x: 700, y: 0 }, config: { responseTemplate: "not the reply", outputKey: "result" } }],
+    edges: []
+  });
+  await page.reload();
+  await page.getByLabel("Workflow", { exact: true }).selectOption(id);
+  await sidebarItem("Editor").click();
+  await expect(canvasNode("Result")).toBeVisible();
+  // Room for the canvas: no run panel.
+  const debug = page.getByRole("button", { name: "Debug mode: ON" });
+  if (await debug.isVisible()) await debug.click();
+  const addNode = async (query: string, name: string) => {
+    await page.getByRole("button", { name: "Add node" }).click();
+    await page.getByRole("textbox", { name: "Search nodes" }).fill(query);
+    await expect(page.getByRole("dialog", { name: "Add a node" }).getByRole("option").first()).toContainText(name);
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("dialog", { name: "Add a node" })).toBeHidden();
+  };
+  await page.locator(".react-flow__pane").click({ position: { x: 8, y: 8 } });
+  await addNode("webhook input", "Webhook Input");
+  // Selected after it is added, so the reply chains after it.
+  await addNode("webhook response", "Webhook Response");
+  await page.getByRole("button", { name: "Fit", exact: true }).click();
+  await page.waitForTimeout(400);
+  const from = (await canvasNode("Webhook Response").locator(".react-flow__handle-right").first().boundingBox())!;
+  const to = (await canvasNode("Result").locator(".react-flow__handle-left").first().boundingBox())!;
+  await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 10 });
+  await page.mouse.up();
+  await expect(page.locator(".react-flow__edge")).toHaveCount(2);
+
+  // The new trigger's Response Mode is Automatic, under More.
+  await canvasNode("Webhook Input").dblclick();
+  const inspector = page.getByRole("dialog", { name: /^Inspect / });
+  await expect(inspector).toBeVisible();
+  await inspector.locator("details summary", { hasText: "More" }).first().click();
+  await expect(inspector.getByLabel("Response Mode")).toHaveValue("auto");
+  await inspector.getByLabel("Response Mode").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(SHOT_DIR, "after-05-response-mode-automatic.png") });
+  await inspector.getByRole("button", { name: "Save changes" }).click();
+  await page.getByRole("banner").getByRole("button", { name: "Save", exact: true }).click();
+
+  let hookPath = "";
+  await expect
+    .poll(async () => {
+      const stored = (await (await page.request.get(`/api/workflows/${id}`)).json()) as { nodes: Array<{ type: string; config: Record<string, unknown> }>; edges: unknown[] };
+      const hook = stored.nodes.find((node) => node.type === "webhook_input");
+      hookPath = String(hook?.config.path ?? "");
+      return { hook: Boolean(hook), mode: hook?.config.responseMode ?? "unset", edges: stored.edges.length };
+    }, { timeout: 15_000 })
+    .toEqual({ hook: true, mode: "unset", edges: 2 });
+  const answer = await page.request.post(`/webhook-test/${hookPath}`, { data: { result: "hi" } });
+  expect(answer.status(), await answer.text()).toBe(200);
+  expect(await answer.json()).toMatchObject({ ok: true });
 });

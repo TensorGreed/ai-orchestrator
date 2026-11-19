@@ -131,5 +131,22 @@ describe("a webhook run's reply", () => {
     expect(lastNode.output).not.toHaveProperty("__webhookResponse");
     const responseNode = await executeWorkflow({ workflow: withMode("responseNode"), triggerType: "webhook", webhookPayload: payload, input: payload }, dependencies());
     expect(responseNode.output).toMatchObject({ __webhookResponse: { statusCode: 201 } });
+    // Automatic (the default for new nodes, stored as "auto" or left unset) replies like the starter.
+    const automatic = await executeWorkflow({ workflow: withMode("auto"), triggerType: "webhook", webhookPayload: payload, input: payload }, dependencies());
+    expect(automatic.output).toMatchObject({ __webhookResponse: { statusCode: 201 } });
+  });
+
+  it("a new Webhook Input node answers automatically: no Response Mode is set on it", async () => {
+    const { nodeDefinitions } = await import("@ai-orchestrator/shared");
+    const webhook = nodeDefinitions.find((definition) => definition.type === "webhook_input")!;
+    expect(webhook.sampleConfig).not.toHaveProperty("responseMode");
+    expect((webhook.configSchema as { properties: { responseMode: { enum: string[] } } }).properties.responseMode.enum[0]).toBe("auto");
+  });
+
+  it("a replay that follows a webhook recording's output rule ends with the reply, whatever its input trigger", async () => {
+    const result = await executeWorkflow({ workflow: starterLike(), triggerType: "replay", outputTriggerType: "webhook", webhookPayload: payload, input: payload }, dependencies());
+    expect(result.output).toMatchObject({ __webhookResponse: { statusCode: 201 } });
+    const manualRecording = await executeWorkflow({ workflow: starterLike(), triggerType: "replay", outputTriggerType: "manual", inputTriggerType: "webhook", webhookPayload: payload, input: payload }, dependencies());
+    expect(manualRecording.output).not.toHaveProperty("__webhookResponse");
   });
 });

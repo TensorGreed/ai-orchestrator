@@ -365,7 +365,7 @@ import { DeliveryDedupe } from "./services/delivery-dedupe.js";
 import { acceptSlackEvent } from "./services/slack-intake.js";
 import { LocalRunEvents, openRunRelay, resultFromPersistedRun, RunEventPublisher, type PersistedRun, type RunEventName } from "./services/run-event-relay.js";
 import { runStarterId, type RedactedNodeEvent, type RunWorkflowExecutionInput, type WorkflowExecutionEventHooks } from "./run-types.js";
-import { ERROR_WORKFLOW_TRIGGER_TYPE, errorWorkflowRunId, type ErrorWorkflowInput } from "./error-workflow-run.js";
+import { ERROR_WORKFLOW_TRIGGER_TYPE, claimErrorWorkflowRun, errorWorkflowRunId, type ErrorWorkflowInput } from "./error-workflow-run.js";
 import type { WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import { createRunAccess, type RunAccessDenial } from "./run-access.js";
 import { ProjectNotEmptyError, ReleaseGateEnforcedError, StoreReferenceMissingError } from "./db/store-errors.js";
@@ -2780,6 +2780,7 @@ export async function createApp(
           executionTimeoutMs,
           triggerType: input.triggerType,
           ...(input.inputTriggerType ? { inputTriggerType: input.inputTriggerType } : {}),
+          ...(input.outputTriggerType ? { outputTriggerType: input.outputTriggerType } : {}),
           triggeredBy: input.triggeredBy,
           toolPolicySubject: input.policySubject ?? await resolveToolPolicySubject(input.workflow.id, input.policyActor),
           resumeState: input.resumeState,
@@ -2996,6 +2997,11 @@ export async function createApp(
             // Recorded like any other run (Runs, budgets, the queue), under an id the failed run's record can name.
             // It belongs to whoever owns the failed run: their own-runs view and their sessions.
             const errorExecutionId = payload.executionId ? errorWorkflowRunId(payload.executionId) : crypto.randomUUID();
+            // At most once per failed run: the same run executed again (a lost lease, a re-run job) starts no second one.
+            if (payload.executionId && !(await claimErrorWorkflowRun(store, payload.executionId))) {
+              app.log.info({ executionId: payload.executionId, errorWorkflowId: payload.errorWorkflowId }, "Error workflow already ran for this run");
+              return;
+            }
             try {
               await runDispatcher.fire(
                 {
@@ -16096,6 +16102,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         ...(replay.recording.sourceTriggerType && replay.recording.capabilities.origin !== "imported"
           ? { inputTriggerType: replay.recording.sourceTriggerType }
           : {}),
+        // The output rule follows the recorded trigger, an imported file's too, so the replay's output compares like
+        // for like with the recorded one (a webhook run's output is its reply).
+        ...(replay.recording.sourceTriggerType ? { outputTriggerType: replay.recording.sourceTriggerType } : {}),
         // Phase 16 (Q7) — the recording's input origin (replays, gate cases and simulations alike), not the starter's.
         // A golden run imported from a file always counts as outside content as well (its trigger is the file's claim).
         inputLabels: recordedInputLabels({

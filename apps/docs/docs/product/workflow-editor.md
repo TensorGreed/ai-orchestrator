@@ -132,7 +132,7 @@ that project shared it with execute access (see [what a running workflow can rea
 off. Its runs are listed in **Runs** like any other, with the trigger `error`: the failed run's details say
 **Error workflow ran → run …**, and the error workflow's run says which failed run it handled. Each belongs to the
 person who started the failed run, so someone who sees only their own runs sees the error runs of their runs. An
-error workflow that fails does not start another one.
+error workflow that fails does not start another one, and a failed run starts its error workflow once, even if it runs again.
 
 ## Running from the editor
 
@@ -256,9 +256,10 @@ history keeps masked or as placeholders (see [content rules](/product/content-ru
 
 A run started by a webhook (its URL, `/webhook-test/`, `POST /api/webhooks/execute` and its stream) answers with the
 reply of the last **Webhook Response** node that ran, even when other nodes (an Output node, a notification) run after
-it. The run's output in Runs is that reply too, so it shows what the caller got. The caller gets the run's output
-instead when no Webhook Response ran, or when the webhook trigger's **Response Mode** is **Last Node Output**. A run that
-fails after its Webhook Response answers with the error. Runs that no webhook started (the editor's **Run**,
+it. The run's output in Runs is that reply too, so it shows what the caller got; replays and golden sets of a webhook run
+follow the same rule. That is the webhook trigger's default **Response Mode**, **Automatic** (under More): the last
+Webhook Response that ran, else the last node's output. **Last Node Output** always answers with the last node's output.
+A run that fails after its Webhook Response answers with the error. Runs that no webhook started (the editor's **Run**,
 sub-workflows, schedules) keep their Output node's result.
 
 ## Validation behavior
