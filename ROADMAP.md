@@ -209,7 +209,7 @@
 
 ### 5.2 Advanced RBAC & Multi-Tenancy
 - [x] Project-level roles (Admin, Editor, Viewer) — `user_project_roles` table + `RbacService` with built-in `project_admin` / `editor` / `viewer` roles. Routes: `GET|POST /api/projects/:id/members`, `DELETE /api/projects/:id/members/:userId`. Permission checks fall back to the existing global role when no membership exists (backwards-compatible).
-- [x] Custom roles with granular permissions (Enterprise) — `custom_roles` table with a permission vocabulary (`workflow:read|write|execute|delete`, `secret:read|write|use`, `project:manage|invite`, `role:manage`). Admin-only CRUD at `/api/custom-roles`; assignable to members via `role: "custom", customRoleId: …`.
+- [x] Custom roles with granular permissions (Enterprise) — `custom_roles` table with a permission vocabulary (`workflow:read|write|execute|delete`, `secret:read|write|use`, `project:manage|invite`; `role:manage` was listed until it was removed, unchecked). Admin-only CRUD at `/api/custom-roles`; assignable to members via `role: "custom", customRoleId: …`.
 - [x] Credential sharing scoped to projects — `secret_shares` table + `/api/secrets/:id/shares` CRUD. Secrets still carry an owning `project_id`; shares grant read access from additional projects.
 - [x] Cross-project workflow sharing controls — `workflow_shares` table + `/api/workflows/:id/shares` CRUD with `accessLevel: "read" | "execute"`. `RbacService.canAccessWorkflow` honours shares when evaluating permissions.
 

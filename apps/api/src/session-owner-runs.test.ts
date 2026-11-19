@@ -410,3 +410,135 @@ describe("a non-owner's retry reads none of the owner's memory (v79)", () => {
     expect(retried.statusCode, retried.body).toBe(409);
   });
 });
+
+describe("one rule for who may edit: a builder role and workflow:write on the workflow", () => {
+  const released = (projectId: string, text: string): Workflow => ({
+    id: "wf-rel",
+    name: "Released",
+    schemaVersion: "1.0.0",
+    workflowVersion: 1,
+    projectId,
+    nodes: [
+      { id: "start", type: "manual_trigger", name: "Start", position: { x: 0, y: 0 }, config: {} },
+      { id: "out", type: "output", name: "Out", position: { x: 200, y: 0 }, config: { responseTemplate: text } }
+    ],
+    edges: [{ id: "e1", source: "start", target: "out" }]
+  });
+
+  it("an operator with an editor membership runs the released version and cannot ask for the draft", async () => {
+    const context = await createTestContext({ PROJECT_ISOLATION: "strict" });
+    const owner = await login(context, "builder", "owner");
+    const olivia = await login(context, "operator", "olivia");
+    await context.store.upsertProject({ id: "team", name: "Team" });
+    await context.store.upsertProjectRole({ userId: owner.id, projectId: "team", role: "project_admin" });
+    await context.store.upsertProjectRole({ userId: olivia.id, projectId: "team", role: "editor" });
+    expect((await call(context, "POST", "/api/workflows", owner.cookie, released("team", "v1-released"))).statusCode).toBe(200);
+    expect((await call(context, "POST", "/api/workflows/wf-rel/publish", owner.cookie, { version: 1 })).statusCode).toBe(200);
+    expect((await call(context, "PUT", "/api/workflows/wf-rel", owner.cookie, released("team", "unreleased draft"))).statusCode).toBe(200);
+
+    const run = await call(context, "POST", "/api/workflows/wf-rel/execute", olivia.cookie, { input: {} });
+    expect(run.statusCode, run.body).toBe(200);
+    expect(run.body).toContain("v1-released");
+    expect(run.body).not.toContain("unreleased draft");
+    expect((await call(context, "POST", "/api/workflows/wf-rel/execute?channel=draft", olivia.cookie, { input: {} })).statusCode).toBe(403);
+    expect((await call(context, "POST", "/api/workflows/wf-rel/execute", owner.cookie, { input: {} })).body).toContain("unreleased draft");
+    const access = await call(context, "GET", "/api/workflows/wf-rel/access", olivia.cookie);
+    expect(access.json<{ canEdit: boolean; canRun: boolean }>()).toMatchObject({ canEdit: false, canRun: true });
+  });
+
+  it("a builder who may run but not edit (a share to their project) gets no editor options and sessions of their own", async () => {
+    const context = await createTestContext({ PROJECT_ISOLATION: "strict" });
+    const owner = await login(context, "builder", "owner");
+    const guest = await login(context, "builder", "guest");
+    const other = await login(context, "builder", "other");
+    await context.store.upsertProject({ id: "team", name: "Team" });
+    await context.store.upsertProject({ id: "ops", name: "Ops" });
+    await context.store.upsertProjectRole({ userId: owner.id, projectId: "team", role: "project_admin" });
+    await context.store.upsertProjectRole({ userId: guest.id, projectId: "ops", role: "editor" });
+    await context.store.upsertProjectRole({ userId: other.id, projectId: "ops", role: "editor" });
+    await context.store.upsertWorkflow(notebook("wf-team", "team"));
+    await context.store.upsertWorkflowShare({ workflowId: "wf-team", projectId: "ops", accessLevel: "execute" });
+
+    const options = await call(context, "POST", "/api/workflows/wf-team/execute", guest.cookie, { input: { note: "x" }, startNodeId: "save" });
+    expect(options.statusCode, options.body).toBe(403);
+    expect(options.json<{ refusedOptions: string[] }>().refusedOptions).toEqual(["startNodeId"]);
+    const access = await call(context, "GET", "/api/workflows/wf-team/access", guest.cookie);
+    expect(access.json<{ canEdit: boolean; canRun: boolean }>()).toMatchObject({ canEdit: false, canRun: true });
+
+    expect(await runNote(context, owner.cookie, "wf-team", "owner-1")).toBe("");
+    expect(await runNote(context, guest.cookie, "wf-team", "guest-1")).toBe("");
+    expect(await runNote(context, guest.cookie, "wf-team", "guest-2", "webhook")).toBe("guest-1");
+    // Another runner of the same share does not continue the guest's session, and the owner keeps the workflow's.
+    expect(await runNote(context, other.cookie, "wf-team", "other-1")).toBe("");
+    expect(await runNote(context, owner.cookie, "wf-team", "owner-2")).toBe("owner-1");
+  });
+
+  it("a share-only runner is kept to their own sessions whatever the role, also with a key capped at operator", async () => {
+    const context = await createTestContext({ PROJECT_ISOLATION: "strict" });
+    const owner = await login(context, "builder", "owner");
+    const guest = await login(context, "builder", "guest");
+    await context.store.upsertProject({ id: "team", name: "Team" });
+    await context.store.upsertProjectRole({ userId: owner.id, projectId: "team", role: "project_admin" });
+    await context.store.upsertWorkflow(notebook("wf-team", "team"));
+    const shared = await call(context, "POST", "/api/workflows/wf-team/user-shares", owner.cookie, { email: guest.email, accessLevel: "execute" });
+    expect(shared.statusCode, shared.body).toBeLessThan(300);
+    expect(await runNote(context, owner.cookie, "wf-team", "owner-1")).toBe("");
+    expect(await runNote(context, guest.cookie, "wf-team", "guest-1")).toBe("");
+
+    const created = await call(context, "POST", "/api/auth/api-keys", guest.cookie, { name: "ops", role: "operator" });
+    expect(created.statusCode, created.body).toBe(200);
+    const token = created.json<{ key: string }>().key;
+    const run = await context.app.inject({
+      method: "POST",
+      url: "/api/workflows/wf-team/execute",
+      headers: { authorization: `Bearer ${token}` },
+      payload: { input: { note: "key-1" }, sessionId: "shared-session" }
+    });
+    expect(run.statusCode, run.body).toBe(200);
+    // The guest's own session, not the workflow's (which holds owner-1).
+    expect(run.body).toContain("seen=[guest-1]");
+  });
+
+  it("a builder who may only run a workflow runs the released version from the manual trigger route and on retry, and may not replay", async () => {
+    const context = await createTestContext({ PROJECT_ISOLATION: "strict" });
+    const owner = await login(context, "builder", "owner");
+    const guest = await login(context, "builder", "guest");
+    await context.store.upsertProject({ id: "team", name: "Team" });
+    await context.store.upsertProject({ id: "ops", name: "Ops" });
+    await context.store.upsertProjectRole({ userId: owner.id, projectId: "team", role: "project_admin" });
+    await context.store.upsertProjectRole({ userId: guest.id, projectId: "ops", role: "editor" });
+    const failing = (message: string): Workflow => ({
+      ...released("team", message),
+      nodes: [
+        { id: "start", type: "manual_trigger", name: "Start", position: { x: 0, y: 0 }, config: {} },
+        { id: "boom", type: "stop_and_error", name: "Boom", position: { x: 200, y: 0 }, config: { message } }
+      ],
+      edges: [{ id: "e1", source: "start", target: "boom" }]
+    });
+    expect((await call(context, "POST", "/api/workflows", owner.cookie, failing("v1-released stop"))).statusCode).toBe(200);
+    expect((await call(context, "POST", "/api/workflows/wf-rel/publish", owner.cookie, { version: 1 })).statusCode).toBe(200);
+    expect((await call(context, "PUT", "/api/workflows/wf-rel", owner.cookie, failing("unreleased draft stop"))).statusCode).toBe(200);
+    await context.store.upsertWorkflowShare({ workflowId: "wf-rel", projectId: "ops", accessLevel: "execute" });
+
+    const manual = await call(context, "POST", "/api/triggers/manual/wf-rel", guest.cookie, {});
+    expect(manual.statusCode, manual.body).toBe(200);
+    const manualRun = manual.json<{ executionId: string }>().executionId;
+    const history = await call(context, "GET", `/api/executions/${manualRun}`, guest.cookie);
+    expect(history.body).toContain("v1-released stop");
+    expect(history.body).not.toContain("unreleased draft stop");
+
+    const withOptions = await call(context, "POST", `/api/executions/${manualRun}/retry`, guest.cookie, { startNodeId: "boom" });
+    expect(withOptions.statusCode, withOptions.body).toBe(403);
+    expect(withOptions.json<{ refusedOptions: string[] }>().refusedOptions).toEqual(["startNodeId"]);
+    const retried = await call(context, "POST", `/api/executions/${manualRun}/retry`, guest.cookie, {});
+    expect(retried.body).toContain("v1-released stop");
+    expect(retried.body).not.toContain("unreleased draft stop");
+
+    const replay = await call(context, "POST", `/api/executions/${manualRun}/replay`, guest.cookie, {});
+    expect(replay.statusCode, replay.body).toBe(403);
+    // The owner, who may edit it, still runs the draft from the manual trigger route.
+    const ownerManual = await call(context, "POST", "/api/triggers/manual/wf-rel", owner.cookie, {});
+    const ownerHistory = await call(context, "GET", `/api/executions/${ownerManual.json<{ executionId: string }>().executionId}`, owner.cookie);
+    expect(ownerHistory.body).toContain("unreleased draft stop");
+  });
+});

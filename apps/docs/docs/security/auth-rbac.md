@@ -199,24 +199,30 @@ in `MFA_REQUIRED_ROLES`, see [MFA required per role](#mfa-required-per-role)).
 
 `POST /api/workflows/:id/execute`, `/execute/stream`, `POST /api/webhooks/execute` and `/stream` take operators and up,
 with `workflow:execute` on the workflow (a project membership, an execute share to a project, or an execute share to
-the person). Someone who may edit the workflow runs the draft from a signed-in session, as before; anyone else
-(an operator, a share-only runner, an API key) runs the released version (production: the published version, or the
+the person). Someone who may edit the workflow (a global role of builder or higher **and** `workflow:write` on it)
+runs the draft from a signed-in session, as before; anyone else (an operator, also one with an editor membership; a
+builder who may only run it; a share-only runner; an API key) runs the released version (production: the published version, or the
 saved workflow while nothing is published and no release gate is on), and gets `403` for `channel=draft`. They run it
 with the caller's input: `input`, `payload`, `variables`, `system_prompt`, `user_prompt`,
-`sessionId`, `customData` and a timeout. An operator's run uses no pinned data, and its timeout is at most
-`WORKFLOW_EXECUTION_TIMEOUT_MS`. Options that change what runs stay with builders and admins: `startNodeId`,
+`sessionId`, `customData` and a timeout. The run of someone who may not edit the workflow uses no pinned data, and its
+timeout is at most `WORKFLOW_EXECUTION_TIMEOUT_MS`. Options that change what runs stay with those who may edit it:
+`startNodeId`,
 `runMode: "single_node"`, `usePinnedData`, `pinnedData`, `nodeOutputs`, `sourceExecutionId`, `nodeOutputsExecutionId`,
-`record`, and a `workflow`, `nodes` or `edges` sent with the request; an operator who sends one gets `403` with
-`refusedOptions`, before any other check. Viewers are refused. Runs are audited as before.
+`record`, and a `workflow`, `nodes` or `edges` sent with the request. Anyone else who sends one gets `403` with
+`refusedOptions`: below builder before any other check, a builder once the workflow's access is known, before budgets. The
+manual trigger route (`POST /api/triggers/manual/:workflowId`) and a retry follow the same rule: a builder who may only
+run the workflow runs the released version there, without the editor's options or pinned data. Replaying a run with
+its recorded MCP calls runs the draft, so it needs someone who may edit the workflow. Viewers are refused. Runs are audited as before.
 
-**Session memory is kept to the person for operators and share-only runners.** A run started by a signed-in operator,
-or by anyone who may run the workflow only through a share with them, reads and writes session memory, the session
+**Session memory is kept to the person for those who may not edit the workflow and for share-only runners.** A run
+started by a signed-in person who may not edit the workflow (an operator, also with an editor membership; a builder
+who may only run it), or by anyone who may run or read the workflow only through a share with them, reads and writes session memory, the session
 tool cache and session artifacts under that person's own key. Another person who sends the same session id starts an
 empty session, so knowing someone's session id does not continue their conversation. The run's sub-workflows and
 error workflow, and its resumed part after an approval (whoever decides it), use the same person's key, and so do the
 person's queued runs (`POST /api/workflows/:id/enqueue`) and their messages to a chat trigger set to signed-in
 sessions. Someone who may run a workflow only through a share with them keeps their own key with an API key of their
-own too. Builders and admins with access through their projects, other API keys and service accounts (whatever role
+own too, whatever their role and the key's role ceiling. People who may edit the workflow (and admins), other API keys and service accounts (whatever role
 the key has), schedules and webhooks keep the workflow's sessions, as before; their runs do not see the sessions kept to a person, and a person's
 runs do not see theirs. A run records whose sessions it used, and a retry or an MCP replay of it keeps them: the
 person's own retry continues their sessions; anyone else's runs under that person's key in a namespace of its own, so

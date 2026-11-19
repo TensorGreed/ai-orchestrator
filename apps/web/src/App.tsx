@@ -186,7 +186,7 @@ import { WorkflowCardMenu } from "./components/WorkflowCardMenu";
 import { WorkflowCanvasArea, type ImportPanelBinding } from "./components/WorkflowCanvasArea";
 import { ExternalImportDialog, type ExternalImportSource } from "./components/ExternalImportDialog";
 import { ImportConflictDialog, type ImportConflictChoice } from "./components/ImportConflictDialog";
-import { editorAccess, roleMayUseEditorRunOptions, type WorkflowAccessView } from "./lib/editor-access";
+import { editorAccess, mayUseEditorRunOptions, type WorkflowAccessView } from "./lib/editor-access";
 import { SecretSaveWarnings } from "./components/SecretSaveWarnings";
 import { DraftWarnings } from "./components/DraftWarnings";
 import { WebhookTestPayloadDialog } from "./components/WebhookTestPayloadDialog";
@@ -1589,10 +1589,10 @@ function StudioApp() {
       cancelled = true;
     };
   }, [authUser, currentWorkflow.id, currentWorkflowExists]);
-  const { editDisabledReason, runDisabledReason } = editorAccess(
-    authUser?.role,
-    workflowAccess && workflowAccess.workflowId === currentWorkflow.id ? workflowAccess : null
-  );
+  const openWorkflowAccess = workflowAccess && workflowAccess.workflowId === currentWorkflow.id ? workflowAccess : null;
+  const { editDisabledReason, runDisabledReason } = editorAccess(authUser?.role, openWorkflowAccess);
+  // The editor's run options (pinned data, recording, one node or from a node): for someone who may edit this workflow.
+  const editorRunOptions = mayUseEditorRunOptions(authUser?.role, openWorkflowAccess);
   // Workflow settings in the More actions menu are edits too: only for someone who may save this workflow.
   const canEditOpenWorkflow = canManageWorkflows && !editDisabledReason;
   // Phase 11.2 — pending approvals the user can decide, for the sidebar badge.
@@ -3662,7 +3662,7 @@ function StudioApp() {
     };
 
     // Operators run the saved workflow with their input: pinned data, recording and partial runs are the editor's.
-    const editorOptions = roleMayUseEditorRunOptions(authUser?.role);
+    const editorOptions = editorRunOptions;
     if (editorOptions) {
       payload.usePinnedData = true;
     }
@@ -3691,7 +3691,7 @@ function StudioApp() {
     }
 
     return payload;
-  }, [authUser?.role, executionResult, editorPrompts.sendSystemPrompt, editorPrompts.sendUserPrompt, recordMcp, sessionId, systemPrompt, userPrompt]);
+  }, [editorRunOptions, executionResult, editorPrompts.sendSystemPrompt, editorPrompts.sendUserPrompt, recordMcp, sessionId, systemPrompt, userPrompt]);
 
   const buildWebhookExecutionPayload = useCallback(() => {
     const payload: {
@@ -3742,8 +3742,8 @@ function StudioApp() {
       return;
     }
     // Running one node or from a node is the editor's; operators run the whole saved workflow.
-    if ((options?.startNodeId || options?.runMode === "single_node") && !roleMayUseEditorRunOptions(authUser?.role)) {
-      setError("Running one node, or from a node, needs the builder role. Run the whole workflow instead.");
+    if ((options?.startNodeId || options?.runMode === "single_node") && !editorRunOptions) {
+      setError("Running one node, or from a node, needs a builder role and edit access to this workflow. Run the whole workflow instead.");
       return;
     }
     try {
@@ -3794,7 +3794,7 @@ function StudioApp() {
     persistForRun,
     refreshExecutionHistory,
     runDisabledReason,
-    authUser?.role,
+    editorRunOptions,
   ]);
 
   const handleWebhookExecute = useCallback(async (testPayload: Record<string, unknown>) => {

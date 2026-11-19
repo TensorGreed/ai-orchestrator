@@ -104,6 +104,7 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "app.ts", match: '(channel === "production" ? productionWorkflow(payload.sourceWorkflowId) : store.getWorkflow(payload.sourceWorkflowId))', kind: "production", why: "the error workflow follows the failing run's channel" },
   { file: "app.ts", match: "const loadForRoute = (id: string) => (isTestRoute ? store.getWorkflow(id) : productionTriggerWorkflow(id));", kind: "production", why: "/webhook/ runs the published version (an unfinished one answers 409), /webhook-test/ the draft" },
   { file: "execution-routes.ts", match: 'const workflow = executeChannel.channel === "production" ? productionWorkflow(access.workflow.id) : access.workflow;', kind: "production", why: "/execute and /execute/stream: API-key callers run the published version (or the draft with channel=draft and workflow:write), the editor the draft", count: 2 },
+  { file: "app.ts", match: "const workflow = mayEdit ? access.workflow : productionWorkflow(access.workflow.id);", kind: "production", why: "the manual trigger route: someone who may edit the workflow runs the draft, anyone else the published version" },
   { file: "execution-routes.ts", match: 'const workflow = retryChannel === "production" ? productionWorkflow(sourceExecution.workflowId) : store.getWorkflow(sourceExecution.workflowId);', kind: "production", why: "a retry of a production run runs what production runs now; a draft run's retry runs the draft" },
   { file: "app.ts", match: "const workflow = releaseService.deactivatedProductionWorkflow(summary.id);", kind: "not_run", why: "a deactivated gated workflow's paths, only to answer \"deactivated\" rather than \"not found\"" },
   { file: "app.ts", match: "const entry = workflowVersionService.get(request.params.id, version);", kind: "not_run", why: "reading or diffing a saved version in the history panel", count: 2 },
@@ -305,10 +306,10 @@ describe("every run names its release channel", () => {
 
   it("the draft runs only where a person runs it on purpose, and every computed channel is a known one", () => {
     const channels = calls.map((entry) => /\bchannel\s*:\s*([^,\n]+)/.exec(entry.text)?.[1]?.trim() ?? "");
-    // Eval run, executions replay, manual trigger, replay sandbox.
-    expect(channels.filter((value) => value === '"draft"').length).toBe(4);
+    // Eval run, executions replay (for those who may edit), replay sandbox.
+    expect(channels.filter((value) => value === '"draft"').length).toBe(3);
     const computed = [...new Set(channels.filter((value) => value !== '"draft"' && value !== '"production"'))].sort();
-    expect(computed).toEqual(['executeChannel.channel', 'isTestRoute ? "draft" : "production"', 'retryChannel', 'state.releaseChannel === "production" ? "production" : "draft"'].sort());
+    expect(computed).toEqual(['executeChannel.channel', 'isTestRoute ? "draft" : "production"', 'mayEdit ? "draft" : "production"', 'retryChannel', 'state.releaseChannel === "production" ? "production" : "draft"'].sort());
   });
 });
 

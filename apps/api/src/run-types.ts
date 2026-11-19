@@ -204,8 +204,8 @@ export interface RunWorkflowExecutionInput {
   budgetSubject?: { userEmail: string | null; userId: string | null };
   /**
    * The person whose session memory, session tool cache and session artifacts the run uses (run-editor-options.ts
-   * personalSessionOwner): set by the run routes for operators and for people who run a workflow only through a share
-   * with them, kept across a pause in the paused state. Absent: the workflow's sessions, as before.
+   * personalSessionOwner): set by the run routes for people who may not edit the workflow (operators; builders who may
+   * only run it) and for anyone who runs it only through a share with them, kept across a pause in the paused state. Absent: the workflow's sessions, as before.
    */
   sessionOwner?: string;
   /**

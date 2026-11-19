@@ -28,16 +28,24 @@ What each kind of access gives on one workflow.
 |---|---|---|---|---|---|
 | Admin | Yes, every workflow | All, also of deleted workflows | Yes | Yes | The workflow's |
 | Builder with `workflow:write` in the project | Yes | All | Yes | Yes (delete and publish if the project role grants them) | The workflow's |
-| Operator with `workflow:execute` in the project | Yes | All | The released version, with their own input | No | Their own |
+| Operator with `workflow:execute` in the project (an editor membership too) | Yes | All | The released version, with their own input | No | Their own |
 | Viewer with `workflow:read` in the project | Yes | All | No | No | Their own (signed-in chat) |
-| Member of a project the workflow is **shared to** | Yes | All | With an execute share, if they may run workflows in that project | No | As for their role |
+| Member of a project the workflow is **shared to** | Yes | All | With an execute share, if they may run workflows in that project: the released version, with their own input | No | Their own |
 | Person share, **Can view** | Yes | Only their own | No | No | Their own (signed-in chat) |
-| Person share, **Can view and run** | Yes | Only their own | Operators and up: the released version. Viewers: no | No | Their own |
-| API key | As its owner, within the key's scope | As its owner | The released version (the draft with `channel=draft` and `workflow:write`) | As its owner, within the key's scope | The workflow's ([exceptions](./auth-rbac.md#running-workflows-by-role)) |
+| Person share, **Can view and run** | Yes | Only their own | Operators and up: the released version. Viewers: no | No | Their own, also with a key of their own |
+| API key | As its owner, within the key's scope | As its owner | The released version (the draft with `channel=draft` when it may edit the workflow) | As its owner, within the key's scope | The workflow's ([exceptions](./auth-rbac.md#running-workflows-by-role)) |
 | Service account (through its keys) | As its role and memberships | As its role | As an API key | As its role | The workflow's |
 | Webhook, schedule, public chat or form, MCP gateway | No user check | No user | Yes | No | The workflow's |
 
 "Only their own" applies when the person share is all they have. See [Own runs only](#own-runs-only).
+
+**Who may edit a workflow** is one rule everywhere: a global role of builder or higher **and** `workflow:write` on the
+workflow. It decides who runs the draft (on `/execute`, the manual trigger route and a retry), who may use the editor's
+run options, who may replay a run with its recorded MCP calls, whose runs use the workflow's session memory, and who
+sees the editor's edit controls. Golden-run replays and replay jobs are testing tools: they need builder and
+`workflow:execute`. An operator with an editor membership may not edit: the role caps it.
+A builder who may only run a workflow (through an execute share to their project, say) is treated like an operator
+for it.
 
 ## Roles
 
@@ -118,14 +126,16 @@ Session memory, the session tool cache and session artifacts are stored per proj
 
 Some runs keep them to the person who runs:
 
-- runs by a signed-in operator (or viewer, in a signed-in chat);
-- runs by a builder who has the workflow only through a person share.
+- runs by anyone who has the workflow only through a person share, whatever their role, signed in or with a key of
+  their own;
+- runs by a signed-in person who may not edit the workflow: operators (also with an editor membership), builders who
+  may only run it, and viewers in a signed-in chat.
 
 These runs read and write under the person's own key. Another person who sends the same session id starts an empty
 session. Sub-workflows, the error workflow, queued runs and the part after an approval keep the same person's key.
 
-Builders and admins with project access, API keys, service accounts, schedules and webhooks use the workflow's
-sessions.
+People who may edit the workflow (and admins), other API keys, service accounts, schedules and webhooks use the
+workflow's sessions.
 
 - A retry or replay keeps the run's owner. The owner's own retry continues their session. Anyone else's retry runs in a
   namespace of its own and reads none of the owner's memory.
@@ -136,12 +146,15 @@ Details: [Running workflows by role](./auth-rbac.md#running-workflows-by-role).
 
 ## Running a workflow
 
-- A signed-in person with `workflow:write` on the workflow runs the draft. Everyone else runs the released version
-  (the published one, or the saved workflow while nothing is published and no release gate is on).
-- Anyone below builder runs with their own input only. Editor options (`startNodeId`, single-node runs, pinned data,
+- A signed-in person who may edit the workflow (builder role or higher and `workflow:write`) runs the draft. Everyone
+  else runs the released version (the published one, or the saved workflow while nothing is published and no release
+  gate is on), and gets `403` for `channel=draft`.
+- Anyone who may not edit the workflow runs with their own input only. Editor options (`startNodeId`, single-node runs, pinned data,
   `nodeOutputs`, `sourceExecutionId`, `record`, or a graph sent with the request) answer `403` with `refusedOptions`.
 - Their runs use no pinned data, and their timeout is at most `WORKFLOW_EXECUTION_TIMEOUT_MS`.
-- Queueing and cancelling need operator and `workflow:execute`. Retry and replay need builder.
+- Queueing and cancelling need operator and `workflow:execute`. Retry needs builder; a builder who may not edit the
+  workflow retries on the released version, without the editor's options. Replaying a run with its recorded MCP calls
+  needs someone who may edit the workflow.
 - A queued job runs only if the person who queued it may still run the workflow when it starts.
 
 Once a run is going, it reaches only its own project's secrets, MCP servers, knowledge bases and sub-workflows,
