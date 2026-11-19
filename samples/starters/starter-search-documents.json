@@ -1,0 +1,73 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "starter-search-documents",
+    "name": "Search a few documents",
+    "description": "Finds the passages that best match a question in five built-in help articles, using the built-in local embedder and in-memory search. No model or vector database needed.",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "question",
+        "type": "text_input",
+        "name": "Question",
+        "position": {
+          "x": 80,
+          "y": 200
+        },
+        "config": {
+          "text": "When will my refund arrive?"
+        }
+      },
+      {
+        "id": "search",
+        "type": "rag_retrieve",
+        "name": "Search the articles",
+        "position": {
+          "x": 360,
+          "y": 200
+        },
+        "config": {
+          "queryTemplate": "{{user_prompt}}",
+          "topK": 2,
+          "embedderId": "token-embedder",
+          "vectorStoreId": "in-memory-vector-store",
+          "documents": [
+            "Refunds: customers can ask for a refund within 30 days of delivery. Refunds go back to the original payment method within 5 business days.",
+            "Shipping: orders ship from our warehouse within 2 business days. Express shipping arrives the next business day.",
+            "Warranty: every lamp and desk has a 2-year warranty that covers manufacturing defects but not accidental damage.",
+            "Support hours: the support team answers chats and emails Monday to Friday, 8:00 to 18:00 UTC.",
+            "Accounts: you can change your billing address under Settings, then Billing. Changes apply to the next invoice."
+          ]
+        }
+      },
+      {
+        "id": "out",
+        "type": "output",
+        "name": "Best matches",
+        "position": {
+          "x": 640,
+          "y": 200
+        },
+        "config": {
+          "responseTemplate": "{{context}}",
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e_question_out_search",
+        "source": "question",
+        "target": "search"
+      },
+      {
+        "id": "e_search_out_out",
+        "source": "search",
+        "target": "out"
+      }
+    ]
+  },
+  "exportedAt": "2026-11-19T00:00:00.000Z"
+}

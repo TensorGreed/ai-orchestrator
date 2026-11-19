@@ -1,0 +1,130 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "starter-loop-collect",
+    "name": "Loop over items and collect",
+    "description": "Runs a Set node once per order line to work out each line total, then a Merge collects every pass into one list.",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "start",
+        "type": "manual_trigger",
+        "name": "Order lines",
+        "position": {
+          "x": 80,
+          "y": 200
+        },
+        "config": {
+          "label": "Run manually",
+          "testData": {
+            "lines": [
+              {
+                "sku": "PEN",
+                "qty": 10,
+                "price": 1.5
+              },
+              {
+                "sku": "LAMP",
+                "qty": 2,
+                "price": 24
+              },
+              {
+                "sku": "DESK",
+                "qty": 1,
+                "price": 180
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "loop",
+        "type": "loop_node",
+        "name": "For each line",
+        "position": {
+          "x": 340,
+          "y": 200
+        },
+        "config": {
+          "inputKey": "lines",
+          "itemVariable": "line",
+          "maxIterations": 100,
+          "collectResults": true,
+          "routeBranches": true
+        }
+      },
+      {
+        "id": "line_total",
+        "type": "set_node",
+        "name": "Line total",
+        "position": {
+          "x": 600,
+          "y": 200
+        },
+        "config": {
+          "assignments": [
+            {
+              "key": "sku",
+              "valueTemplate": "{{line.sku}}",
+              "type": "string"
+            },
+            {
+              "key": "total",
+              "valueTemplate": "{{ line.qty * line.price }}",
+              "type": "number"
+            }
+          ]
+        }
+      },
+      {
+        "id": "collect",
+        "type": "merge_node",
+        "name": "Collect lines",
+        "position": {
+          "x": 860,
+          "y": 200
+        },
+        "config": {
+          "mode": "collect_loop_passes"
+        }
+      },
+      {
+        "id": "out",
+        "type": "output",
+        "name": "Result",
+        "position": {
+          "x": 1120,
+          "y": 200
+        },
+        "config": {
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e_start_out_loop",
+        "source": "start",
+        "target": "loop"
+      },
+      {
+        "id": "e_loop_out_line_total",
+        "source": "loop",
+        "target": "line_total"
+      },
+      {
+        "id": "e_line_total_out_collect",
+        "source": "line_total",
+        "target": "collect"
+      },
+      {
+        "id": "e_collect_out_out",
+        "source": "collect",
+        "target": "out"
+      }
+    ]
+  },
+  "exportedAt": "2026-11-19T00:00:00.000Z"
+}

@@ -1,0 +1,128 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "starter-csv-to-json",
+    "name": "CSV to JSON: parse, sort and total",
+    "description": "Parses a small CSV, sorts the rows by region, totals the units per region and turns the result into a JSON file. Paste your own CSV into the Parse CSV node.",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "start",
+        "type": "manual_trigger",
+        "name": "Run",
+        "position": {
+          "x": 80,
+          "y": 200
+        },
+        "config": {
+          "label": "Run manually"
+        }
+      },
+      {
+        "id": "parse",
+        "type": "extract_from_file_node",
+        "name": "Parse CSV",
+        "position": {
+          "x": 340,
+          "y": 200
+        },
+        "config": {
+          "format": "csv",
+          "encoding": "utf8",
+          "data": "region,product,units,price\nNorth,Pens,120,1.5\nSouth,Lamps,8,24\nNorth,Desks,3,180\nWest,Pens,60,1.5\nSouth,Pens,45,1.5\nWest,Lamps,12,24"
+        }
+      },
+      {
+        "id": "sort",
+        "type": "sort_node",
+        "name": "Sort by region",
+        "position": {
+          "x": 600,
+          "y": 200
+        },
+        "config": {
+          "field": "region",
+          "order": "asc",
+          "inputKey": "rows"
+        }
+      },
+      {
+        "id": "totals",
+        "type": "summarize_node",
+        "name": "Units per region",
+        "position": {
+          "x": 860,
+          "y": 200
+        },
+        "config": {
+          "fieldsToSummarize": [
+            {
+              "field": "units",
+              "aggregation": "sum"
+            }
+          ],
+          "fieldsToGroupBy": [
+            "region"
+          ],
+          "inputKey": "items"
+        }
+      },
+      {
+        "id": "file",
+        "type": "convert_to_file_node",
+        "name": "JSON file",
+        "position": {
+          "x": 1120,
+          "y": 200
+        },
+        "config": {
+          "format": "json",
+          "filename": "units-per-region.json",
+          "inputKey": "items"
+        }
+      },
+      {
+        "id": "out",
+        "type": "output",
+        "name": "Result",
+        "position": {
+          "x": 1380,
+          "y": 200
+        },
+        "config": {
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e_start_out_parse",
+        "source": "start",
+        "target": "parse"
+      },
+      {
+        "id": "e_parse_out_sort",
+        "source": "parse",
+        "target": "sort"
+      },
+      {
+        "id": "e_sort_out_totals",
+        "source": "sort",
+        "target": "totals"
+      },
+      {
+        "id": "e_totals_out_file",
+        "source": "totals",
+        "target": "file"
+      },
+      {
+        "id": "e_file_out_out",
+        "source": "file",
+        "target": "out"
+      }
+    ]
+  },
+  "exportedAt": "2026-11-19T00:00:00.000Z"
+}

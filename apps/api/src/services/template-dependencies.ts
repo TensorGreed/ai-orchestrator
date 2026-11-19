@@ -46,6 +46,8 @@ const CHAT_MODEL_NODE_PROVIDERS: Record<string, string> = {
 
 const VECTOR_STORE_DEPENDENCIES: Record<string, { label: string; envVar?: string } | null> = {
   "in-memory": null,
+  "in-memory-vector-store": null,
+  "knowledge-base": null,
   "pinecone-vector-store": { label: "Pinecone", envVar: "PINECONE_API_KEY" },
   "azure-ai-search-vector-store": { label: "Azure AI Search" },
   "qdrant-vector-store": { label: "Qdrant", envVar: "QDRANT_API_KEY" },
@@ -127,9 +129,22 @@ function unwrapWorkflow(raw: unknown): Record<string, unknown> {
   return root;
 }
 
-export function computeTemplateDependencies(rawWorkflow: unknown): TemplateDependency[] {
+/** The nodes of a template's workflow and of the companion workflows it brings (template-companions.ts). */
+function templateNodes(rawWorkflow: unknown): unknown[] {
   const workflow = unwrapWorkflow(rawWorkflow);
-  const nodes = Array.isArray(workflow.nodes) ? workflow.nodes : [];
+  const nodes = Array.isArray(workflow.nodes) ? [...workflow.nodes] : [];
+  const companions = asRecord(rawWorkflow).companions;
+  if (Array.isArray(companions)) {
+    for (const companion of companions) {
+      const companionWorkflow = unwrapWorkflow(companion);
+      if (Array.isArray(companionWorkflow.nodes)) nodes.push(...companionWorkflow.nodes);
+    }
+  }
+  return nodes;
+}
+
+export function computeTemplateDependencies(rawWorkflow: unknown): TemplateDependency[] {
+  const nodes = templateNodes(rawWorkflow);
   const seen = new Map<string, TemplateDependency>();
   const add = (kind: TemplateDependencyKind, label: string, envVar?: string) => {
     const key = `${kind}:${label}`;

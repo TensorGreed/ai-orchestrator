@@ -1,0 +1,141 @@
+{
+  "schemaVersion": "1.0.0",
+  "workflowVersion": 1,
+  "workflow": {
+    "id": "starter-sub-workflow",
+    "name": "Call a sub-workflow",
+    "description": "Calls a reusable workflow with Execute Workflow and uses its answer. Using this template also creates the sub-workflow it calls.",
+    "schemaVersion": "1.0.0",
+    "workflowVersion": 1,
+    "nodes": [
+      {
+        "id": "start",
+        "type": "manual_trigger",
+        "name": "Run",
+        "position": {
+          "x": 80,
+          "y": 200
+        },
+        "config": {
+          "label": "Run manually",
+          "testData": {
+            "name": "Katherine"
+          }
+        }
+      },
+      {
+        "id": "call",
+        "type": "execute_workflow",
+        "name": "Format a greeting",
+        "position": {
+          "x": 360,
+          "y": 200
+        },
+        "config": {
+          "workflowId": "starter-sub-workflow-child",
+          "inputMapping": {
+            "name": "name"
+          },
+          "mode": "sync",
+          "outputMapping": {}
+        }
+      },
+      {
+        "id": "out",
+        "type": "output",
+        "name": "Result",
+        "position": {
+          "x": 640,
+          "y": 200
+        },
+        "config": {
+          "outputKey": "result"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e_start_out_call",
+        "source": "start",
+        "target": "call"
+      },
+      {
+        "id": "e_call_out_out",
+        "source": "call",
+        "target": "out"
+      }
+    ]
+  },
+  "exportedAt": "2026-11-19T00:00:00.000Z",
+  "companions": [
+    {
+      "schemaVersion": "1.0.0",
+      "workflowVersion": 1,
+      "workflow": {
+        "id": "starter-sub-workflow-child",
+        "name": "Format a greeting (sub-workflow)",
+        "description": "A reusable step: takes a name and returns a greeting. The \"Call a sub-workflow\" starter calls it.",
+        "schemaVersion": "1.0.0",
+        "workflowVersion": 1,
+        "nodes": [
+          {
+            "id": "entry",
+            "type": "sub_workflow_trigger",
+            "name": "Called by another workflow",
+            "position": {
+              "x": 80,
+              "y": 200
+            },
+            "config": {
+              "description": "Takes name, returns greeting.",
+              "readOnly": true
+            }
+          },
+          {
+            "id": "greet",
+            "type": "set_node",
+            "name": "Greeting",
+            "position": {
+              "x": 360,
+              "y": 200
+            },
+            "config": {
+              "assignments": [
+                {
+                  "key": "greeting",
+                  "valueTemplate": "Hello, {{name}}!",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          {
+            "id": "out",
+            "type": "output",
+            "name": "Greeting",
+            "position": {
+              "x": 640,
+              "y": 200
+            },
+            "config": {
+              "responseTemplate": "{{greeting}}",
+              "outputKey": "result"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "id": "e_entry_out_greet",
+            "source": "entry",
+            "target": "greet"
+          },
+          {
+            "id": "e_greet_out_out",
+            "source": "greet",
+            "target": "out"
+          }
+        ]
+      }
+    }
+  ]
+}

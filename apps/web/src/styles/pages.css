@@ -2365,6 +2365,14 @@ button.tag-chip:hover {
   color: var(--accent);
 }
 
+/* A thin rule between the categories and the "Runs without setup" filter. */
+.tpl-categories-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 4px 4px;
+  background: var(--line);
+}
+
 .tpl-loading,
 .tpl-empty {
   padding: 40px 20px;

@@ -7,6 +7,7 @@ import {
 
 const CATEGORIES = [
   "All",
+  "Starters",
   "Getting Started",
   "RAG & AI",
   "Agents",
@@ -27,15 +28,18 @@ export function TemplateGallery({ onWorkflowCreated, initialCategory }: Template
     initialCategory && (CATEGORIES as readonly string[]).includes(initialCategory) ? initialCategory : "All"
   );
   const [searchQuery, setSearchQuery] = useState("");
+  // Only templates with nothing to set up (no model, key, server or service).
+  const [withoutSetupOnly, setWithoutSetupOnly] = useState(false);
   const [usingTemplateId, setUsingTemplateId] = useState<string | null>(null);
 
   const loadTemplates = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const filters: { category?: string; search?: string } = {};
+      const filters: { category?: string; search?: string; withoutSetupOnly?: boolean } = {};
       if (activeCategory !== "All") filters.category = activeCategory;
       if (searchQuery.trim()) filters.search = searchQuery.trim();
+      if (withoutSetupOnly) filters.withoutSetupOnly = true;
       const result = await fetchTemplates(filters);
       setTemplates(result.templates);
     } catch (err) {
@@ -43,7 +47,7 @@ export function TemplateGallery({ onWorkflowCreated, initialCategory }: Template
     } finally {
       setLoading(false);
     }
-  }, [activeCategory, searchQuery]);
+  }, [activeCategory, searchQuery, withoutSetupOnly]);
 
   useEffect(() => {
     void loadTemplates();
@@ -95,6 +99,16 @@ export function TemplateGallery({ onWorkflowCreated, initialCategory }: Template
             {cat}
           </button>
         ))}
+        <span className="tpl-categories-sep" aria-hidden="true" />
+        <button
+          type="button"
+          className={`tpl-category-btn tpl-filter-no-setup${withoutSetupOnly ? " active" : ""}`}
+          aria-pressed={withoutSetupOnly}
+          title="Only templates with no model, key, server or service to set up"
+          onClick={() => setWithoutSetupOnly((current) => !current)}
+        >
+          Runs without setup
+        </button>
       </div>
 
       {error && <div className="tpl-error">{error}</div>}
@@ -102,7 +116,7 @@ export function TemplateGallery({ onWorkflowCreated, initialCategory }: Template
       {loading ? (
         <div className="tpl-loading">Loading templates...</div>
       ) : templates.length === 0 ? (
-        <div className="tpl-empty">No templates found.</div>
+        <div className="tpl-empty">{withoutSetupOnly ? "No templates here run without setup." : "No templates found."}</div>
       ) : (
         <div className="tpl-grid">
           {templates.map((tpl) => (
@@ -147,7 +161,7 @@ export function TemplateGallery({ onWorkflowCreated, initialCategory }: Template
               {tpl.dependencies && tpl.dependencies.length === 0 ? (
                 <div className="tpl-card-deps tpl-card-deps-none" data-testid={`tpl-deps-${tpl.id}`}>
                   <span className="tpl-dep-pill tpl-dep-pill-none">
-                    Runs out of the box — no setup
+                    Runs without setup
                   </span>
                 </div>
               ) : tpl.dependencies && tpl.dependencies.length > 0 ? (

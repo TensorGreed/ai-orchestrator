@@ -2970,10 +2970,12 @@ export interface TemplateListItem {
   featured?: boolean;
 }
 
-export async function fetchTemplates(filters?: { category?: string; search?: string }) {
+export async function fetchTemplates(filters?: { category?: string; search?: string; withoutSetupOnly?: boolean }) {
   const params = new URLSearchParams();
   if (filters?.category) params.set("category", filters.category);
   if (filters?.search) params.set("search", filters.search);
+  // Only templates that run without setup (no model, key, server or service to configure).
+  if (filters?.withoutSetupOnly) params.set("setup", "none");
   const suffix = params.toString() ? `?${params.toString()}` : "";
   return apiRequest<{ templates: TemplateListItem[] }>(`/api/templates${suffix}`);
 }
@@ -2983,7 +2985,8 @@ export async function fetchTemplate(id: string) {
 }
 
 export async function useTemplate(templateId: string) {
-  return apiRequest<{ workflowId: string; name: string }>(`/api/templates/${templateId}/use`, {
+  // `companions`: the workflows the template brought along (a sub-workflow it calls), created next to it.
+  return apiRequest<{ workflowId: string; name: string; companions?: Array<{ workflowId: string; name: string }> }>(`/api/templates/${templateId}/use`, {
     method: "POST"
   });
 }

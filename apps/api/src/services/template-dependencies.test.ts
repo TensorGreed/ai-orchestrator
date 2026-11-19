@@ -193,4 +193,14 @@ describe("the built-in templates and their model", () => {
       { kind: "provider", label: "Ollama (local model server)", envVar: undefined }
     ]);
   });
+
+  it("does not count the built-in vector stores (in-memory, knowledge base) as a dependency", () => {
+    expect(computeTemplateDependencies(wf([{ type: "rag_retrieve", config: { vectorStoreId: "in-memory-vector-store" } }]))).toEqual([]);
+    expect(computeTemplateDependencies(wf([{ type: "rag_retrieve", config: { vectorStoreId: "knowledge-base" } }]))).toEqual([]);
+  });
+
+  it("counts the dependencies of the companion workflows a template brings", () => {
+    const template = { ...wf([{ type: "execute_workflow", config: { workflowId: "child" } }]), companions: [wf([{ type: "slack_send_message" }])] };
+    expect(computeTemplateDependencies(template)).toEqual([{ kind: "connector", label: "Slack", envVar: undefined }]);
+  });
 });
