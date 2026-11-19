@@ -3,14 +3,28 @@ import { defaultReleaseGate } from "@ai-orchestrator/shared";
 import { gateAdmissionBanner, gateFormFrom, gateLocks, gateSettingsFromForm, gateStatsLines, releasePillLabel, releaseVerdictTone, workflowDeleteDenial } from "./release";
 
 describe("release helpers", () => {
-  it("labels the version pill by what production runs", () => {
+  it("labels the version pill by what production triggers run today", () => {
+    const base = { draftVersion: 4, publishedVersion: null, aheadBy: 0, gateEnabled: false, gateEnforced: false } as never;
     expect(releasePillLabel(null).text).toBe("Publish");
-    expect(releasePillLabel({ draftVersion: null, publishedVersion: null, aheadBy: 0, gateEnabled: false, gateEnforced: false }).text).toBe("Not saved");
-    expect(releasePillLabel({ draftVersion: 4, publishedVersion: null, aheadBy: 0, gateEnabled: false, gateEnforced: false })).toMatchObject({ text: "v4 · not published", tone: "draft" });
-    expect(releasePillLabel({ draftVersion: 4, publishedVersion: 4, aheadBy: 0, gateEnabled: true, gateEnforced: false })).toMatchObject({ text: "v4 live", tone: "live" });
-    const ahead = releasePillLabel({ draftVersion: 5, publishedVersion: 4, aheadBy: 1, gateEnabled: true, gateEnforced: false });
-    expect(ahead).toMatchObject({ text: "v4 live · draft +1", tone: "ahead" });
+    expect(releasePillLabel({ draftVersion: null, publishedVersion: null, aheadBy: 0, gateEnabled: false, gateEnforced: false } as never).text).toBe("Not saved");
+    const draft = releasePillLabel(base);
+    expect(draft).toMatchObject({ text: "Live: draft", tone: "draft" });
+    expect(draft.title).toBe("Production triggers (webhooks, schedules, forms, chat and MCP calls) run the latest save (v4) until a version is published");
+    expect(releasePillLabel({ draftVersion: 4, publishedVersion: 4, aheadBy: 0, gateEnabled: true, gateEnforced: false } as never)).toMatchObject({ text: "Live: version 4", tone: "live" });
+    const ahead = releasePillLabel({ draftVersion: 5, publishedVersion: 4, aheadBy: 1, gateEnabled: true, gateEnforced: false } as never);
+    expect(ahead).toMatchObject({ text: "Live: version 4 · draft +1", tone: "ahead" });
     expect(ahead.title).toContain("1 newer saved version");
+  });
+
+  it("says when production runs nothing: the gate refuses, or live triggers are paused on unfinished settings", () => {
+    const refused = releasePillLabel({ draftVersion: 2, publishedVersion: null, aheadBy: 0, gateEnabled: true, gateEnforced: false, productionRefused: true } as never);
+    expect(refused).toMatchObject({ text: "Live: off", tone: "draft" });
+    const pausedDraft = releasePillLabel({ draftVersion: 2, publishedVersion: null, aheadBy: 0, gateEnabled: false, gateEnforced: false } as never, true);
+    expect(pausedDraft.text).toBe("Live: paused");
+    expect(pausedDraft.title).toMatch(/unfinished settings\. Finish them and save\.$/);
+    expect(releasePillLabel({ draftVersion: 3, publishedVersion: 2, aheadBy: 1, gateEnabled: false, gateEnforced: false } as never, true).title).toMatch(/save, then publish\.$/);
+    // Paused is only said of a saved workflow.
+    expect(releasePillLabel({ draftVersion: null, publishedVersion: null, aheadBy: 0, gateEnabled: false, gateEnforced: false } as never, true).text).toBe("Not saved");
   });
 
   it("round-trips a gate through the form, with limits left empty meaning none", () => {

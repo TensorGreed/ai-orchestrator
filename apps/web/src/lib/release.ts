@@ -5,40 +5,49 @@ import type { ReleaseGateRepeatSelection, ReleaseGateStats, ReleaseGateView, Rel
 
 export type PillTone = "live" | "ahead" | "draft" | "unknown";
 
-/** The editor's version pill: what production runs and how far the draft is ahead of it. */
-export function releasePillLabel(state: ReleaseStateView | null): { text: string; tone: PillTone; title: string } {
+const LIVE_TRIGGERS = "Production triggers (webhooks, schedules, forms, chat and MCP calls)";
+
+/**
+ * The editor's version pill: what production triggers run today ("Live: draft", "Live: version N") and how far the
+ * draft is ahead of it. `livePaused`: production's version has unfinished settings, so its triggers start no run.
+ */
+export function releasePillLabel(state: ReleaseStateView | null, livePaused = false): { text: string; tone: PillTone; title: string } {
   if (!state) return { text: "Publish", tone: "unknown", title: "Publish a saved version to production" };
   if (state.productionRefused) {
     return {
-      text: state.draftVersion ? `v${state.draftVersion} · not published` : "Not published",
+      text: "Live: off",
       tone: "draft",
       title: "The release gate is on and no version is published: production refuses runs until a version passes the gate, is approved or an admin overrides"
     };
   }
-  if (state.publishedVersion === null && state.unpublishedAt) {
+  if (state.publishedVersion === null && state.draftVersion === null) {
+    return { text: "Not saved", tone: "draft", title: "Save the workflow; production triggers then run the latest save until a version is published" };
+  }
+  if (livePaused) {
     return {
-      text: state.draftVersion ? `v${state.draftVersion} · unpublished` : "Unpublished",
+      text: "Live: paused",
       tone: "draft",
-      title: state.gateEnabled
-        ? "Unpublished: production runs the latest save, which the release gate does not check, until a version is published again"
-        : "Unpublished: production runs the latest save until a version is published again"
+      title: `${LIVE_TRIGGERS} start no run: the version production runs has unfinished settings. Finish them and save${state.publishedVersion === null ? "" : ", then publish"}.`
     };
   }
   if (state.publishedVersion === null) {
+    const draft = state.draftVersion === null ? "the latest save" : `the latest save (v${state.draftVersion})`;
     return {
-      text: state.draftVersion ? `v${state.draftVersion} · not published` : "Not saved",
+      text: "Live: draft",
       tone: "draft",
-      title: "Production runs the latest save until a version is published"
+      title: state.unpublishedAt
+        ? `Unpublished: ${LIVE_TRIGGERS.toLowerCase()} run ${draft}${state.gateEnabled ? ", which the release gate does not check," : ""} until a version is published again`
+        : `${LIVE_TRIGGERS} run ${draft} until a version is published`
     };
   }
   if (state.aheadBy > 0) {
     return {
-      text: `v${state.publishedVersion} live · draft +${state.aheadBy}`,
+      text: `Live: version ${state.publishedVersion} · draft +${state.aheadBy}`,
       tone: "ahead",
-      title: `Production runs v${state.publishedVersion}; the draft has ${state.aheadBy} newer saved version${state.aheadBy === 1 ? "" : "s"}`
+      title: `${LIVE_TRIGGERS} run version ${state.publishedVersion}; the draft has ${state.aheadBy} newer saved version${state.aheadBy === 1 ? "" : "s"}`
     };
   }
-  return { text: `v${state.publishedVersion} live`, tone: "live", title: `Production runs v${state.publishedVersion}, the latest save` };
+  return { text: `Live: version ${state.publishedVersion}`, tone: "live", title: `${LIVE_TRIGGERS} run version ${state.publishedVersion}, the latest save` };
 }
 
 const VERDICT_LABELS: Record<ReleaseVerdict, string> = {

@@ -1896,7 +1896,13 @@ function StudioApp() {
   }, [currentWorkflow.id]);
 
   // What the saved workflow still lacks (a draft saves with unfinished node settings), for the editor's notice.
-  const [draftIssues, setDraftIssues] = useState<{ workflowId: string; issues: WorkflowValidationIssue[]; liveTriggersPaused: boolean } | null>(null);
+  // Dismissing hides the notice; the version pill still says when live triggers are paused.
+  const [draftIssues, setDraftIssues] = useState<{
+    workflowId: string;
+    issues: WorkflowValidationIssue[];
+    liveTriggersPaused: boolean;
+    dismissed?: boolean;
+  } | null>(null);
   // A workflow stored before error settings were checked can hold invalid values: runs ignore them, but a save (and so
   // the editor's Run) refuses them. One click strips them from every node, keeping each node's valid values.
   const removeInvalidErrorConfigs = useCallback(() => {
@@ -5410,6 +5416,7 @@ function StudioApp() {
                 refreshKey={releaseRefreshKey}
                 canPublish={canManageWorkflows}
                 isAdmin={authUser.role === "admin"}
+                livePaused={draftIssues?.workflowId === currentWorkflow.id && draftIssues.liveTriggersPaused}
                 onOpenGates={() => {
                   setEvaluationsTab("gates");
                   setActiveMode("evaluations");
@@ -5475,14 +5482,14 @@ function StudioApp() {
             </div>
           )}
           {error && <div className="error-banner global-banner">{error}</div>}
-          {activeMode === "editor" && draftIssues && draftIssues.workflowId === currentWorkflow.id ? (
+          {activeMode === "editor" && draftIssues && !draftIssues.dismissed && draftIssues.workflowId === currentWorkflow.id ? (
             <DraftWarnings
               issues={draftIssues.issues}
               liveTriggersPaused={draftIssues.liveTriggersPaused}
               nodeLabel={(nodeId) => (nodes as EditorNode[]).find((node) => node.id === nodeId)?.data.label}
               onSelectNode={openNodeConfig}
               onRemoveInvalidErrorConfig={removeInvalidErrorConfigs}
-              onDismiss={() => setDraftIssues(null)}
+              onDismiss={() => setDraftIssues((current) => (current ? { ...current, dismissed: true } : current))}
             />
           ) : null}
           {secretMessage && <div className="info-banner global-banner">{secretMessage}</div>}

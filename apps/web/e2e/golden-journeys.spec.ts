@@ -300,7 +300,7 @@ test.describe("golden journeys", () => {
     await page.getByLabel("Workflow", { exact: true }).selectOption(workflowId);
     await sidebarItem(page, "Editor").click();
     const pill = page.getByRole("button", { name: /^Release:/ });
-    await expect(pill).toHaveText(/v2 · not published/);
+    await expect(pill).toHaveText(/Live: draft/);
     await pill.click();
     const dialog = page.getByRole("dialog", { name: "Publish to production" });
     await dialog.getByLabel("Version").selectOption("1");
@@ -308,7 +308,7 @@ test.describe("golden journeys", () => {
     await dialog.getByRole("button", { name: "Publish v1" }).click();
     await expect(dialog.getByText(/Published v1/)).toBeVisible();
     await dialog.getByRole("button", { name: "Close" }).click();
-    await expect(pill).toHaveText(/v1 live · draft \+1/);
+    await expect(pill).toHaveText(/Live: version 1 · draft \+1/);
 
     const prod = await page.request.post(`${API_URL}/webhook/${hookPath}`, { data: {} });
     expect(await prod.json()).toMatchObject({ output: { result: "first" } });
@@ -341,14 +341,14 @@ test.describe("golden journeys", () => {
     await page.getByLabel("Workflow", { exact: true }).selectOption(workflowId);
     await sidebarItem(page, "Editor").click();
     const pill = page.getByRole("button", { name: /^Release:/ });
-    await expect(pill).toHaveText(/v2 · not published/);
+    await expect(pill).toHaveText(/Live: draft/);
     await pill.click();
     const dialog = page.getByRole("dialog", { name: "Publish to production" });
     await dialog.getByLabel("Version").selectOption("1");
     await dialog.getByRole("button", { name: "Publish v1" }).click();
     await expect(dialog.getByText(/Published v1/)).toBeVisible();
     await dialog.getByRole("button", { name: "Close" }).click();
-    await expect(pill).toHaveText(/v1 live · draft \+1/);
+    await expect(pill).toHaveText(/Live: version 1 · draft \+1/);
     expect(await production()).toMatchObject({ output: { result: "published" } });
 
     // Unpublish v1: the confirmation names it and says production runs the draft.
@@ -361,7 +361,7 @@ test.describe("golden journeys", () => {
     await expect(confirm).toBeHidden();
     await expect(dialog.getByRole("status")).toContainText("Unpublished.");
     await dialog.getByRole("button", { name: "Close" }).click();
-    await expect(pill).toHaveText(/v2 · unpublished/);
+    await expect(pill).toHaveText(/Live: draft/);
     expect(await production()).toMatchObject({ output: { result: "draft" } });
 
     const history = (await (await page.request.get(`/api/workflows/${workflowId}/releases`)).json()) as { releases: Array<{ verdict: string; version: number; reason: string | null }>; publishedVersion: number | null };
