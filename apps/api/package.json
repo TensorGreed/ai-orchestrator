@@ -21,8 +21,8 @@
     "@ai-orchestrator/community-sdk": "workspace:*",
     "@ai-orchestrator/connector-sdk": "workspace:*",
     "@ai-orchestrator/guard-sdk": "workspace:*",
-    "@ai-orchestrator/otel": "workspace:*",
     "@ai-orchestrator/mcp-sdk": "workspace:*",
+    "@ai-orchestrator/otel": "workspace:*",
     "@ai-orchestrator/provider-sdk": "workspace:*",
     "@ai-orchestrator/shared": "workspace:*",
     "@ai-orchestrator/workflow-engine": "workspace:*",
@@ -39,6 +39,7 @@
     "node-cron": "^4.6.0",
     "pg": "^8.23.1",
     "tsx": "^4.23.15",
+    "yaml": "2.9.1",
     "zod": "^4.6.7"
   },
   "devDependencies": {

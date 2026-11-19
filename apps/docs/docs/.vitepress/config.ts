@@ -284,6 +284,7 @@ export default defineConfig({
         text: "Nodes",
         items: [
           { text: "Core Nodes", link: "/nodes/core-nodes" },
+          { text: "Your Integrations (MCP tools, APIs)", link: "/nodes/integrations" },
           { text: "Azure Nodes", link: "/nodes/azure-nodes" },
           { text: "Chart (Vega-Lite)", link: "/nodes/chart" },
           { text: "Web Browse (Playwright)", link: "/nodes/web-browse" },

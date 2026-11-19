@@ -32,6 +32,7 @@ Directly invokes an MCP tool outside the agent loop.
 | `resourceUri` | `string` | no | — |
 | `toolName` | `string` | yes | — |
 | `argsTemplate` | `string` | no | — |
+| `argValues` | `object` | no | — |
 | `connection` | `object` | no | — |
 
 **Example config**

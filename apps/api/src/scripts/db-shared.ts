@@ -116,6 +116,7 @@ export const EXPORTED_TABLES = [
   "custom_roles",
   // Config / vars
   "variables",
+  "openapi_specs",
   "git_configs",
   "notification_configs",
   "log_stream_destinations",

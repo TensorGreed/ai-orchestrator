@@ -423,6 +423,7 @@ import { NetworkControls, hasApiKeyBearer, installNetworkHook, registerNetworkSe
 import { registerAiGatewayRoutes, type AiGatewayModelCheck } from "./ai-gateway-routes.js";
 import { registerAiGatewayAdminRoutes } from "./ai-gateway-admin-routes.js";
 import { registerMcpOnboardingRoutes } from "./mcp-onboarding-routes.js";
+import { registerIntegrationCatalogRoutes } from "./integration-catalog-routes.js";
 import {
   buildClientMetadataDocument,
   carryIssuerBinding,
@@ -15898,6 +15899,33 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       return;
     }
     return { presets: mcpCatalogService.presets(), catalog: mcpCatalogService.status() };
+  });
+
+  // Integration catalog: registered MCP servers' tools and stored OpenAPI specs as palette entries.
+  registerIntegrationCatalogRoutes({
+    app,
+    store,
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    can: async (user, projectId, permission) => await rbacService.can(user, projectId, permission),
+    auditUser: async (request, user, event) => await audit(request, user, event),
+    fetchSpec: (url, init) => guardedFetch(url, init, { config: outboundGuard, resolver: nodeDnsResolver, maxRedirects: 3 }),
+    hiddenAdapterIds: new Set([WORKFLOW_TOOL_ADAPTER_ID]),
+    listCallableMcpTools: async (server, user, projectId) => {
+      const snapshot = server.currentSnapshotId ? await store.getMcpToolSnapshot(server.currentSnapshotId) : null;
+      if (!snapshot) return [];
+      const marked = markMcpTools(snapshot.tools, {
+        rules: await store.listMcpToolPolicies(),
+        classifications: await store.listMcpToolClassifications(server.id),
+        role: user.role,
+        projectId,
+        adapterId: server.adapterId,
+        registryServerId: server.id,
+        serverLabel: server.name
+      });
+      return marked
+        .filter((tool) => tool.access.allowed)
+        .map((tool) => ({ name: tool.name, ...(typeof tool.description === "string" ? { description: tool.description } : {}) }));
+    }
   });
 
   // Phase 10.6 — config import, catalog status and the playground.

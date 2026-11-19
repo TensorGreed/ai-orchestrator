@@ -91,3 +91,10 @@ describe("NodePalette search", () => {
     expect(screen.getAllByRole("option")[1]).toHaveAttribute("aria-selected", "true");
   });
 });
+
+describe("NodePalette footer", () => {
+  it("shows the footer under the list", () => {
+    render(<NodePalette title="Add a node" subtitle="" sections={[]} onPick={vi.fn()} onClose={vi.fn()} footer={<button type="button">Add an API…</button>} />);
+    expect(screen.getByRole("button", { name: "Add an API…" })).toBeInTheDocument();
+  });
+});

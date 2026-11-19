@@ -65,6 +65,7 @@ import type {
   McpPlaygroundCallResponse
 } from "@ai-orchestrator/shared";
 import type { DocumentScanRequest, DocumentScanResult } from "@ai-orchestrator/shared";
+import type { CatalogPaletteEntry, CatalogSourceSummary, OpenApiOperation } from "@ai-orchestrator/shared";
 import { EVAL_RUN_FINISHED_STATUSES } from "@ai-orchestrator/shared";
 import type { GuardEntityEngineInfo } from "@ai-orchestrator/shared";
 import type { WorkflowDiff } from "@ai-orchestrator/shared";
@@ -5265,4 +5266,65 @@ export async function fetchAiGatewayUsage(query: { window?: "24h" | "7d" | "30d"
   for (const [key, value] of Object.entries(query)) if (value) params.set(key, value);
   const suffix = params.toString() ? `?${params.toString()}` : "";
   return apiRequest<AiGatewayUsageSummary>(`/api/ai-gateway/usage${suffix}`);
+}
+
+// ---------------------------------------------------------------------------
+// Integration catalog: MCP server tools and OpenAPI operations in the palette
+// ---------------------------------------------------------------------------
+
+export interface OpenApiSpecView {
+  id: string;
+  projectId: string;
+  name: string;
+  sourceUrl: string | null;
+  baseUrl: string;
+  title: string;
+  version: string;
+  operationCount: number;
+  warnings: string[];
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  fetchedAt: string;
+  operations?: OpenApiOperation[];
+}
+
+export async function fetchIntegrationCatalog(projectId?: string | null) {
+  const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+  return apiRequest<{ projectId: string; entries: CatalogPaletteEntry[]; sources: CatalogSourceSummary[] }>(`/api/catalog${qs}`);
+}
+
+export async function fetchOpenApiSpecs(projectId?: string | null) {
+  const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+  return apiRequest<{ specs: OpenApiSpecView[] }>(`/api/catalog/openapi-specs${qs}`);
+}
+
+export async function fetchOpenApiSpec(id: string) {
+  return apiRequest<{ spec: OpenApiSpecView & { operations: OpenApiOperation[] } }>(`/api/catalog/openapi-specs/${encodeURIComponent(id)}`);
+}
+
+export async function createOpenApiSpec(payload: { projectId?: string | null; name?: string; url?: string; specText?: string; baseUrl?: string }) {
+  const { projectId, ...rest } = payload;
+  return apiRequest<{ spec: OpenApiSpecView }>("/api/catalog/openapi-specs", {
+    method: "POST",
+    body: JSON.stringify({ ...rest, ...(projectId ? { projectId } : {}) })
+  });
+}
+
+export async function updateOpenApiSpec(id: string, payload: { name?: string; baseUrl?: string }) {
+  return apiRequest<{ spec: OpenApiSpecView }>(`/api/catalog/openapi-specs/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function refreshOpenApiSpec(id: string, specText?: string) {
+  return apiRequest<{ spec: OpenApiSpecView; added: string[]; removed: string[] }>(`/api/catalog/openapi-specs/${encodeURIComponent(id)}/refresh`, {
+    method: "POST",
+    body: JSON.stringify(specText ? { specText } : {})
+  });
+}
+
+export async function deleteOpenApiSpec(id: string) {
+  return apiRequest<{ ok: boolean }>(`/api/catalog/openapi-specs/${encodeURIComponent(id)}`, { method: "DELETE" });
 }

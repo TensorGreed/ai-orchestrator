@@ -198,7 +198,7 @@ import { NO_CODE_SANDBOX_PLAN, codeNodesDisabledError, runJavaScriptCode, runPyt
 import { runWithSandboxOwner } from "./quickjs-sandbox";
 import { ownUsage, ownUsageOf, runAsUsageOwner, withoutUsage } from "./usage-ownership";
 import { sortWorkflowNodes, validateWorkflowGraph, computeDepthLevels } from "./validation";
-import { ErrorCategory, MODEL_NOT_ALLOWED_CODE, PUBLIC_RUN_ERROR_CODES, WorkflowError, filterModeOf, isMergeMode, loopCollectsResults, remediationForCategory } from "@ai-orchestrator/shared";
+import { ErrorCategory, MODEL_NOT_ALLOWED_CODE, PUBLIC_RUN_ERROR_CODES, WorkflowError, filterModeOf, isMergeMode, loopCollectsResults, readHttpSecretAuth, remediationForCategory } from "@ai-orchestrator/shared";
 import { AgentGuardInterrupt, RUNTIME_INTERNAL_TOOL_NAMES, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
 import { ApprovalHandoffSignal, approvedHandoffKeysFromState, isApprovalHandoffSignal, withoutReservedKeys, type ApprovalHandoffRequest } from "./approval-handoff";
 import { executeGuardNodeStep } from "./guard-node";
@@ -4772,13 +4772,38 @@ async function executeNodeHandler(
         requestHeaders.set(key, String(value));
       }
 
+      // The URL sent: the rendered URL, plus the secret when it goes in the query. Messages and activity name renderedUrl.
+      let requestUrl = renderedUrl;
+      // A secret in the query or in a header the redirect handling does not know stays with this origin.
+      let secretStaysOnOrigin = false;
       const secretRef = toRecord(config.secretRef);
       if (typeof secretRef.secretId === "string" && secretRef.secretId.trim()) {
         const secretValue = await dependencies.resolveSecret({ secretId: secretRef.secretId.trim() });
         if (!secretValue) {
           throw new Error("HTTP Request node secretRef is set but secret value could not be resolved.");
         }
-        requestHeaders.set("Authorization", `Bearer ${secretValue}`);
+        // Unset or malformed (validation reports it): a bearer token, as before secretAuth existed.
+        const secretAuth = readHttpSecretAuth(config.secretAuth);
+        const auth = secretAuth && typeof secretAuth !== "string" ? secretAuth : { type: "bearer" as const };
+        if (auth.type === "basic") {
+          requestHeaders.set("Authorization", `Basic ${Buffer.from(secretValue, "utf8").toString("base64")}`);
+        } else if (auth.type === "header") {
+          requestHeaders.set(auth.name, secretValue);
+          secretStaysOnOrigin = true;
+        } else if (auth.type === "query") {
+          secretStaysOnOrigin = true;
+          try {
+            // Appended to the query as written, so the URL's other parameters keep their encoding.
+            const withKey = new URL(renderedUrl);
+            withKey.hash = "";
+            const pair = `${encodeURIComponent(auth.name)}=${encodeURIComponent(secretValue)}`;
+            requestUrl = `${withKey.origin}${withKey.pathname}${withKey.search ? `${withKey.search}&` : "?"}${pair}`;
+          } catch {
+            throw new Error(`HTTP Request ${safeMethod} ${urlForActivity(renderedUrl)}: the URL is not valid, so the secret could not be added to its query.`);
+          }
+        } else {
+          requestHeaders.set("Authorization", `Bearer ${secretValue}`);
+        }
       }
 
       const bodyTemplate = typeof config.bodyTemplate === "string" ? config.bodyTemplate : "";
@@ -4811,11 +4836,22 @@ async function executeNodeHandler(
           applyJsonContentType(requestHeaders, renderedBody);
         }
 
-        const response = await guardedFetch(renderedUrl, requestInit, {
+        const response = await guardedFetch(requestUrl, requestInit, {
           config: dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD,
           ...(dependencies.outboundDnsResolver ? { resolver: dependencies.outboundDnsResolver } : {}),
           // Phase 16 — a redirect is judged again, by the strictest hop of the chain so far.
-          ...(outbound?.onRedirect ? { onRedirect: outbound.onRedirect } : {})
+          ...(outbound?.onRedirect || secretStaysOnOrigin
+            ? {
+                onRedirect: async (next: string) => {
+                  if (secretStaysOnOrigin && new URL(next).origin !== new URL(requestUrl).origin) {
+                    throw new Error(
+                      `HTTP Request ${safeMethod} ${urlForActivity(renderedUrl)} was redirected to another site (${urlForActivity(next)}); the redirect was not followed, so the secret stays with the original site.`
+                    );
+                  }
+                  await outbound?.onRedirect?.(next);
+                }
+              }
+            : {})
         });
         const responseHeaders: Record<string, string> = {};
         response.headers.forEach((value, key) => {

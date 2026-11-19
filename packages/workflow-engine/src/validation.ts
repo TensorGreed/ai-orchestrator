@@ -11,6 +11,7 @@ import {
   OUTPUT_GUARDRAIL_CHECK_VALUES,
   parseIpAllowlist,
   parseStatusList,
+  readHttpSecretAuth,
   repairWorkflowErrorConfigs,
   workflowSchema,
   type Workflow,
@@ -157,6 +158,17 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
           message: "Something is connected to this node's Error output, but On Error is not set to use it, so it never runs. Set On Error to \"Execute Fallback Branch\".",
           nodeId: node.id,
           severity: "warning"
+        });
+      }
+    }
+
+    if (node.type === "http_request" && config.secretAuth !== undefined) {
+      const auth = readHttpSecretAuth(config.secretAuth);
+      if (typeof auth === "string") {
+        issues.push({
+          code: "invalid_http_secret_auth",
+          message: `HTTP Request secret sending is invalid: ${auth}.`,
+          nodeId: node.id
         });
       }
     }

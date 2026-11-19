@@ -86,6 +86,15 @@ the envelope `GET /api/executions` uses:
 - `GET /api/definitions`
 - `POST /api/connectors/test`
 - `POST /api/mcp/discover-tools` (optional `projectId`; each tool carries `classification` and an `access` mark for the caller's role)
+- `GET /api/catalog?projectId=` (builders with read access to the project): the palette's **Your integrations**
+  entries, `{ entries: [{ key, kind, label, description, sourceName, sourceId, itemId, nodeType, nodeConfig }], sources }`.
+  MCP entries come from each registered server's last probe, with tool policy applied; API entries from the
+  project's stored OpenAPI specs. See [Your integrations](../nodes/integrations.md).
+- `GET|POST /api/catalog/openapi-specs` (`projectId`; POST `{ url | specText, name?, baseUrl? }`, builders with write
+  access to the project; a URL goes through the outbound checks, at most 2 MB, 15 s), `GET|PATCH|DELETE
+  /api/catalog/openapi-specs/:id` (PATCH `{ name?, baseUrl? }`), `POST /api/catalog/openapi-specs/:id/refresh`
+  (optional `{ specText }` for an uploaded spec; answers `added` and `removed` operation ids). A spec in a project you
+  cannot read answers 404.
 
 ## MCP server registry
 
