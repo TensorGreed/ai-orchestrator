@@ -185,6 +185,20 @@ test.describe("import and team", () => {
         await expect(clear).toHaveAttribute("aria-disabled", "true");
         await clear.click({ force: true });
         await expect(as.page.locator(".react-flow__node")).toHaveCount(3);
+        // Nodes cannot be moved either (a drag pans the canvas: the node keeps its place next to the others).
+        const line = as.page.locator(".react-flow__node").filter({ hasText: "Line" });
+        const start = as.page.locator(".react-flow__node").filter({ hasText: "Start" });
+        const offset = async () => {
+          const [a, b] = [await line.boundingBox(), await start.boundingBox()];
+          return { x: Math.round(a!.x - b!.x), y: Math.round(a!.y - b!.y) };
+        };
+        const before = await offset();
+        const box = (await line.boundingBox())!;
+        await line.hover();
+        await as.page.mouse.down();
+        await as.page.mouse.move(box.x + 160, box.y + 120, { steps: 6 });
+        await as.page.mouse.up();
+        expect(await offset()).toEqual(before);
         await as.page.screenshot({ path: path.join(SHOT_DIR, "viewer-editor.png") });
         expect(as.ollama).toEqual([]);
       } finally {
