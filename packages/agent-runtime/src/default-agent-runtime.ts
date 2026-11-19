@@ -18,7 +18,7 @@ import {
   type ScopedInstrumentationSpan
 } from "@ai-orchestrator/shared";
 import type { AgentGuardCheck, AgentRuntimeAdapter, AgentRuntimeContext, AgentRuntimeEvent, AgentToolRuntime, InternalToolResult } from "./types";
-import { AgentGuardInterrupt, createToolErrorResult, isAgentGuardInterrupt } from "./types";
+import { AgentGuardInterrupt, createToolErrorResult, isAgentGuardInterrupt, stopsAgentRun } from "./types";
 
 /**
  * Hands a tool call's arguments or result to its span when the span captures content (off by default). The span's
@@ -1806,6 +1806,8 @@ ${effectiveSystemPrompt}`;
                 throw error;
               }
               toolTrace.outcome = "error";
+              // The builder's error, not the model's: it fails the node rather than becoming a tool message.
+              if (stopsAgentRun(error)) throw error;
               toolTrace.thrown = error;
               const rawError =
                 error instanceof Error ? error.message : typeof error === "string" ? error : "Tool call failed";
@@ -1959,6 +1961,9 @@ ${effectiveSystemPrompt}`;
       }
       // 12.6 — a model the allowlist refuses fails the node with its typed error, not an answer.
       if (error instanceof Error && (error as Error & { code?: unknown }).code === MODEL_NOT_ALLOWED_CODE) {
+        throw error;
+      }
+      if (stopsAgentRun(error)) {
         throw error;
       }
       // A stopped or timed-out run leaves the loop as is too: the caller

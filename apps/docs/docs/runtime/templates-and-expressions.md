@@ -83,6 +83,7 @@ The error names the template, for example `Template {{customer.id}} has no value
 
 - IF conditions follow the setting: a condition that tests whether a field is there, such as `{{ $json.coupon }}`, fails when it is missing. Write the test out instead: `{{ $json.coupon !== undefined }}`.
 - A sub-workflow uses its own setting, not its caller's.
+- Templates you write fail the node wherever they are, including an MCP Tool node's arguments, an agent's server prompt arguments and a Supervisor worker's own prompts (the Supervisor fails with it). Arguments an agent's model generates are not templates: a `{{ }}` in them is sent as it is, and a tool that fails returns its error to the model.
 - When [content rules](/product/content-rules) check a node's outbound settings before it sends, the check itself renders without strict templates (it reads settings the node may not use). The node then fails on a path without a value in a setting it sends; an expression in such a setting is not evaluated a second time.
 
 A path only walks objects and arrays: on a text, `{{answer.length}}` renders empty. Write it as an expression instead, such as `{{ answer.trim().length }}`.

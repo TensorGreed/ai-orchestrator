@@ -152,7 +152,7 @@ test.describe("writing templates", () => {
     await page.screenshot({ path: path.join(SHOT_DIR, "04-strict-failure.png") });
   });
 
-  test("a node added from the palette gets an id made from its label", async ({ page }) => {
+  test("a node added from the palette gets an id made from its label, never one a saved version used", async ({ page }) => {
     const id = `wf-e2e-ids-${Date.now()}`;
     made.push(id);
     const workflow = {
@@ -163,8 +163,13 @@ test.describe("writing templates", () => {
       nodes: [{ id: "start", type: "text_input", name: "Start", position: position(100), config: { text: "hello" } }],
       edges: []
     };
-    expect((await page.request.post("/api/workflows", { data: workflow })).ok()).toBeTruthy();
+    // An earlier saved version had an HTTP Request node with the id `http_request`; it was removed since.
+    const earlier = { ...workflow, nodes: [...workflow.nodes, { id: "http_request", type: "http_request", name: "HTTP Request", position: position(400), config: { method: "GET", urlTemplate: "https://example.com" } }] };
+    expect((await page.request.post("/api/workflows", { data: earlier })).ok()).toBeTruthy();
+    expect((await page.request.put(`/api/workflows/${id}`, { data: workflow })).ok()).toBeTruthy();
+    const nodeIdsLoaded = page.waitForResponse((response) => response.url().endsWith(`/api/workflows/${id}/node-ids`));
     await openEditor(page, id);
+    await nodeIdsLoaded;
     for (let index = 0; index < 2; index += 1) {
       await page.getByRole("button", { name: /Add node/ }).first().click();
       await page.getByRole("textbox", { name: "Search nodes" }).fill("HTTP Request");
@@ -173,6 +178,6 @@ test.describe("writing templates", () => {
     }
     await save(page);
     const stored = (await (await page.request.get(`/api/workflows/${id}`)).json()) as { nodes: Array<{ id: string; type: string }> };
-    expect(stored.nodes.filter((node) => node.type === "http_request").map((node) => node.id).sort()).toEqual(["http_request", "http_request_2"]);
+    expect(stored.nodes.filter((node) => node.type === "http_request").map((node) => node.id).sort()).toEqual(["http_request_2", "http_request_3"]);
   });
 });

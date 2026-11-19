@@ -3087,6 +3087,14 @@ export const openApiSpec = {
     },
 
     // ── Expressions ─────────────────────────────────────────────────────────
+    "/api/workflows/{id}/node-ids": {
+      get: {
+        tags: ["Workflows"],
+        summary: "Node ids the workflow uses now or used in a stored version (the editor avoids them for new nodes)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "{ nodeIds: string[] }" }, "404": { description: "Workflow not found" } }
+      }
+    },
     "/api/expressions/preview": {
       post: {
         tags: ["Workflows"],

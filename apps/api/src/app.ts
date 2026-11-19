@@ -10262,6 +10262,18 @@ export async function createApp(
     return { versions: await workflowVersionService.list(request.params.id) };
   });
 
+  // Every node id the workflow uses now or used in a stored version: the editor gives new nodes other ids, so a new
+  // node never takes the id of a removed one that run history, approvals or replays still name.
+  app.get<{ Params: { id: string } }>("/api/workflows/:id/node-ids", async (request, reply) => {
+    const user = await requireRole(request, reply, ["viewer"]);
+    if (!user) return;
+    const access = await runAccess.workflow(user, request.params.id, "workflow:read");
+    if (!access.ok) return denyRunAccess(reply, access);
+    const ids = new Set(await workflowVersionService.nodeIds(request.params.id));
+    for (const node of access.workflow.nodes) ids.add(node.id);
+    return { nodeIds: [...ids].sort() };
+  });
+
   app.get<{ Params: { id: string; version: string } }>(
     "/api/workflows/:id/versions/:version",
     async (request, reply) => {

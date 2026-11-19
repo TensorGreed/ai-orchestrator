@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { NodePalette, type PaletteDefinition, type PaletteSection } from "./NodePalette";
@@ -66,5 +66,28 @@ describe("NodePalette search", () => {
     render(<NodePalette title="Add a node" subtitle="" sections={sections} onPick={vi.fn()} onClose={vi.fn()} />);
     expect(screen.getAllByRole("listbox").map((list) => list.getAttribute("aria-label"))).toEqual(["Triggers", "AI", "Flow", "Core"]);
     expect(screen.queryByText("Best match")).toBeNull();
+  });
+
+  // The palette opens under the pointer of the + that opened it, so a row starts highlighted; Enter right after typing
+  // used to read that row's index against the new, shorter list and did nothing (or added the wrong node).
+  it("adds the best match on Enter after a row was highlighted with the pointer", async () => {
+    const onPick = vi.fn();
+    render(<NodePalette title="Add a node" subtitle="" sections={sections} onPick={onPick} onClose={vi.fn()} />);
+    fireEvent.mouseMove(screen.getAllByRole("option")[5]!, { clientX: 40, clientY: 200 });
+    expect(screen.getAllByRole("option")[5]).toHaveAttribute("aria-selected", "true");
+    await userEvent.type(screen.getByLabelText("Search nodes"), "if{Enter}");
+    expect(onPick).toHaveBeenCalledWith(expect.objectContaining({ label: "IF" }));
+  });
+
+  it("keeps the best match highlighted when the list changes under a resting pointer", async () => {
+    render(<NodePalette title="Add a node" subtitle="" sections={sections} onPick={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.mouseMove(screen.getAllByRole("option")[1]!, { clientX: 40, clientY: 80 });
+    await userEvent.type(screen.getByLabelText("Search nodes"), "o");
+    // The browser reports the same pointer position over whatever row is under it now: no highlight change.
+    fireEvent.mouseMove(screen.getAllByRole("option")[1]!, { clientX: 40, clientY: 80 });
+    expect(screen.getAllByRole("option")[0]).toHaveAttribute("aria-selected", "true");
+    // A real move does highlight.
+    fireEvent.mouseMove(screen.getAllByRole("option")[1]!, { clientX: 40, clientY: 96 });
+    expect(screen.getAllByRole("option")[1]).toHaveAttribute("aria-selected", "true");
   });
 });

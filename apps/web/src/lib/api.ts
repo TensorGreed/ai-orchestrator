@@ -1338,6 +1338,11 @@ export async function fetchProviderModels(payload: {
   });
 }
 
+/** Every node id the saved workflow uses now or used in a stored version. */
+export async function fetchWorkflowNodeIds(workflowId: string) {
+  return apiRequest<{ nodeIds: string[] }>(`/api/workflows/${encodeURIComponent(workflowId)}/node-ids`);
+}
+
 export async function previewExpression(payload: {
   expression: string;
   mode?: "expression" | "template" | "condition";

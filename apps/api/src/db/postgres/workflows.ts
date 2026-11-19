@@ -666,6 +666,11 @@ export async function listWorkflowVersions(ctx: PgContext, workflowId: string, l
   }));
 }
 
+export async function listWorkflowVersionJson(ctx: PgContext, workflowId: string): ReturnType<Store["listWorkflowVersionJson"]> {
+  const rows = await ctx.query<{ workflow_json: string }>(`SELECT workflow_json FROM workflow_versions WHERE workflow_id = $1`, [workflowId]);
+  return rows.map((row) => toStr(row.workflow_json));
+}
+
 export async function getWorkflowVersion(ctx: PgContext, workflowId: string, version: number): ReturnType<Store["getWorkflowVersion"]> {
   const row = await ctx.queryOne<WorkflowVersionRow>(
     `SELECT id, workflow_id, version, workflow_json, created_by, change_note, created_at

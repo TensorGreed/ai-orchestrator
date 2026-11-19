@@ -1305,6 +1305,8 @@ export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentR
     changeNote: string | null;
     createdAt: string;
   }>>;
+  /** The workflow JSON of every stored version of a workflow (one query), for the node ids they used. */
+  listWorkflowVersionJson(workflowId: string): Promise<string[]>;
   getWorkflowVersion(workflowId: string, version: number): Promise<{
     id: string;
     workflowId: string;

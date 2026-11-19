@@ -25,6 +25,8 @@ const OPTIONAL_RUN_FIELDS = new Set(["system_prompt", "user_prompt", "session_id
  */
 export class TemplateValueMissingError extends WorkflowError {
   readonly code = TEMPLATE_VALUE_MISSING_CODE;
+  /** A worker's template that has no value fails the supervisor too, instead of becoming a tool error for its model. */
+  readonly stopsAgent = true;
   constructor(
     readonly body: string,
     readonly reason: "missing" | "expression_failed"
