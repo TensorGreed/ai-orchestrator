@@ -27,6 +27,9 @@ function sseResponse(events: string[]): Response {
   return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
 }
 
+/** A finish frame: a stream must carry an answer (an empty one is a failure), so request-shape tests end with this. */
+const STOP_FRAME = JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] });
+
 function stubFetch(...responses: Response[]) {
   const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
   vi.stubGlobal(
@@ -140,7 +143,7 @@ describe("OpenAI-family request parameters", () => {
         JSON.stringify({ choices: [], usage: { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 } }),
         "[DONE]"
       ]),
-      sseResponse(["[DONE]"])
+      sseResponse([STOP_FRAME, "[DONE]"])
     );
     const chunks = await collect(
       new OpenAICloudProviderAdapter().generateStream(
@@ -164,7 +167,7 @@ describe("OpenAI-family request parameters", () => {
   it("Azure keeps a workflow run's body: no options, so an image in the message is not sent", async () => {
     const provider = { providerId: "azure_openai", model: "dep1", baseUrl: "https://x.openai.azure.com" };
     const messages: ChatMessage[] = [{ role: "user", content: "look", images: [{ data: "AAAA", mimeType: "image/png" }] }];
-    const calls = stubFetch(jsonResponse(200, { choices: [{ finish_reason: "stop", message: { content: "ok" } }] }), sseResponse(["[DONE]"]));
+    const calls = stubFetch(jsonResponse(200, { choices: [{ finish_reason: "stop", message: { content: "ok" } }] }), sseResponse([STOP_FRAME, "[DONE]"]));
     await new AzureOpenAIProviderAdapter().generate({ provider, messages }, ctx);
     await collect(new AzureOpenAIProviderAdapter().generateStream({ provider, messages }, ctx));
     expect(calls[0]!.body).toEqual({ messages: [{ role: "user", content: "look" }], temperature: 0.2 });
@@ -172,7 +175,7 @@ describe("OpenAI-family request parameters", () => {
   });
 
   it("Azure streams with the key order a workflow run always sent", async () => {
-    const calls = stubFetch(sseResponse(["[DONE]"]));
+    const calls = stubFetch(sseResponse([STOP_FRAME, "[DONE]"]));
     await collect(
       new AzureOpenAIProviderAdapter().generateStream(
         { provider: { providerId: "azure_openai", model: "dep1", baseUrl: "https://x.openai.azure.com", maxTokens: 20 }, messages: [{ role: "user", content: "hi" }], tools: [tool] },

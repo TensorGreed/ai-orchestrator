@@ -152,6 +152,15 @@ export function TemplateGallery({ onWorkflowCreated, initialCategory }: Template
                 </div>
               ) : tpl.dependencies && tpl.dependencies.length > 0 ? (
                 <div className="tpl-card-deps" data-testid={`tpl-deps-${tpl.id}`}>
+                  {tpl.dependencies.some((dep) => dep.kind === "provider") ? (
+                    <span
+                      className="tpl-dep-pill tpl-dep-pill-needs-model"
+                      data-testid={`tpl-needs-model-${tpl.id}`}
+                      title="Set a provider on the model node before running, or switch it to the built-in Echo model to try the flow."
+                    >
+                      Needs a model
+                    </span>
+                  ) : null}
                   <span className="tpl-deps-eyebrow">Requires</span>
                   {tpl.dependencies.map((dep) => (
                     <span

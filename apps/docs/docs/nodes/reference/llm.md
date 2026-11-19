@@ -234,9 +234,8 @@ Executes a model completion call.
 ```json
 {
   "provider": {
-    "providerId": "ollama",
-    "model": "llama3.1",
-    "baseUrl": "http://localhost:11434/v1"
+    "providerId": "echo",
+    "model": "echo"
   },
   "promptKey": "prompt",
   "systemPromptKey": "system_prompt"

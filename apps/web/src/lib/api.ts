@@ -1079,6 +1079,8 @@ export async function fetchDefinitions() {
     providers: unknown[];
     connectors: unknown[];
     mcpServers: Array<{ id: string; label: string; description: string }>;
+    /** Hosted model providers whose API key the server's environment sets (builders only). */
+    envModelProviders?: string[];
   }>("/api/definitions");
 }
 

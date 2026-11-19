@@ -2515,6 +2515,11 @@ button.tag-chip:hover {
   color: var(--ok);
 }
 
+.tpl-dep-pill-needs-model {
+  font-weight: 600;
+  border-color: var(--warn);
+}
+
 .tpl-dep-envvar {
   font-family: var(--font-mono);
   opacity: 0.85;

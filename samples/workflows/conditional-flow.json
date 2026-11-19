@@ -26,9 +26,8 @@
         "position": { "x": 380, "y": 180 },
         "config": {
           "provider": {
-            "providerId": "ollama",
-            "baseUrl": "http://localhost:11434/v1",
-            "model": "llama3.1",
+            "providerId": "echo",
+            "model": "echo",
             "temperature": 0.2
           }
         }

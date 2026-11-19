@@ -30,7 +30,18 @@ import {
   type MCPExecutionContext,
   type McpSandboxPolicy
 } from "@ai-orchestrator/mcp-sdk";
-import { createDefaultEmbeddingRegistry, createDefaultProviderRegistry, isModelNotAllowedError, type ProviderRegistry } from "@ai-orchestrator/provider-sdk";
+import {
+  createDefaultEmbeddingRegistry,
+  createDefaultProviderRegistry,
+  createGatedEmbeddingRegistry,
+  createGatedProviderRegistry,
+  envKeyMayGoTo,
+  isModelNotAllowedError,
+  type EmbeddingCallGate,
+  type ModelCallGate,
+  type ProviderRegistry
+} from "@ai-orchestrator/provider-sdk";
+import { createModelEgress, ModelRedirectRefusedError } from "./services/model-egress.js";
 import {
   agentWebhookPayloadSchema,
   CONTENT_RULES_TOOLS_ADAPTER_ID,
@@ -273,6 +284,7 @@ import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { registerUserInviteRoutes } from "./user-invite-routes.js";
 import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
+import { envModelProviders } from "@ai-orchestrator/shared";
 import {
   CONTENT_FILTER_CODE,
   RESPONSE_WITHHELD_MESSAGE,
@@ -356,8 +368,10 @@ import {
   expressionSandboxLimits,
   nodeDnsResolver,
   guardedFetch,
+  OutboundUrlBlockedError,
   type CodeSandboxPlan,
   type OutboundGuardConfig,
+  type RagFetch,
   type SubWorkflowAdmission,
   type SubWorkflowAdmissionRequest,
   type SubWorkflowUsage,
@@ -949,7 +963,9 @@ function toDurationMs(startedAt: string, completedAt: string): number | undefine
 // Returns null if the embedderId is unknown or required config is missing.
 async function buildEmbedderFromKbConfig(
   kb: { embedderId: string; embedderConfig: Record<string, unknown> },
-  secretService: SecretService
+  secretService: SecretService,
+  /** The fetch its requests go through (checked and pinned for a URL the knowledge base names). */
+  fetcher?: RagFetch
 ): Promise<EmbeddingAdapter | null> {
   const cfg = kb.embedderConfig ?? {};
   const secretRef = (cfg.secretRef ?? cfg.embeddingSecretRef) as SecretReference | undefined;
@@ -959,12 +975,15 @@ async function buildEmbedderFromKbConfig(
       return new TokenEmbeddingAdapter();
     case "openai-embedder":
       return new OpenAIEmbeddingAdapter({
-        apiKey: apiKey ?? process.env.OPENAI_API_KEY ?? "",
+        // The deployment key only goes to OpenAI's own endpoint (or one the operator allows), not to a KB's base URL.
+        apiKey: apiKey ?? (envKeyMayGoTo("openai", typeof cfg.baseUrl === "string" ? cfg.baseUrl : undefined) ? process.env.OPENAI_API_KEY : undefined) ?? "",
         baseUrl: typeof cfg.baseUrl === "string" ? cfg.baseUrl : undefined,
-        model: typeof cfg.model === "string" ? cfg.model : undefined
+        model: typeof cfg.model === "string" ? cfg.model : undefined,
+        ...(fetcher ? { fetcher } : {})
       });
     case "azure-openai-embedder":
       return new AzureOpenAIEmbeddingAdapter({
+        ...(fetcher ? { fetcher } : {}),
         endpoint: typeof cfg.endpoint === "string" ? cfg.endpoint : process.env.AZURE_OPENAI_ENDPOINT ?? "",
         deployment:
           typeof cfg.deployment === "string" && cfg.deployment.trim()
@@ -973,7 +992,12 @@ async function buildEmbedderFromKbConfig(
               ? cfg.model
               : "text-embedding-3-small",
         apiVersion: typeof cfg.apiVersion === "string" ? cfg.apiVersion : process.env.AZURE_OPENAI_API_VERSION,
-        apiKey: apiKey ?? process.env.AZURE_OPENAI_API_KEY ?? ""
+        apiKey:
+          apiKey ??
+          (envKeyMayGoTo("azure_openai", typeof cfg.endpoint === "string" ? cfg.endpoint : process.env.AZURE_OPENAI_ENDPOINT)
+            ? process.env.AZURE_OPENAI_API_KEY
+            : undefined) ??
+          ""
       });
     case "cohere-embedder":
       return new CohereEmbeddingAdapter({
@@ -1518,6 +1542,8 @@ export interface CreateAppOptions {
    * fetch that replaces the pinned one. The outbound checks still run on every URL and redirect.
    */
   documentScanNetwork?: { resolver?: DnsResolver; fetchImpl?: typeof fetch };
+  /** The resolver model and embedding calls' outbound checks and pinned connections use (tests). */
+  modelNetwork?: { resolver?: DnsResolver };
   /** The names and addresses service (CONTENT_RULES_NER_ENDPOINT): the DNS resolver and, for tests only, a fetch that replaces the pinned one. */
   nerEndpointNetwork?: { resolver?: DnsResolver; fetchImpl?: typeof fetch };
 }
@@ -1760,9 +1786,27 @@ export async function createApp(
   await modelAllowlistService.start();
   app.addHook("onClose", async () => modelAllowlistService.stop());
   // Instrumented at the base too, so a call through any other view (a tape miss, a recorded run) is recorded once.
-  const baseProviderRegistry = modelTelemetry.providers(createDefaultProviderRegistry());
+  // A base URL or endpoint a model node, provider test, /v1 route or embedding call names is checked and the call is
+  // pinned to the checked addresses (services/model-egress.ts). Provider defaults and operator env endpoints are not.
+  const providerOutboundGuard: OutboundGuardConfig = { denyPrivate: config.OUTBOUND_DENY_PRIVATE, allowlist: config.OUTBOUND_ALLOWLIST };
+  const modelEgress = createModelEgress({ guard: providerOutboundGuard, resolver: options.modelNetwork?.resolver ?? nodeDnsResolver });
+  const providerEgressGate: ModelCallGate = async (call, context) => await modelEgress.contextFor(call.provider, context);
+  const embeddingEgressGate: EmbeddingCallGate = async (call, context) => await modelEgress.contextFor(call.provider, context);
+  /** The fetch for a knowledge base embedder's or a model listing's URL: pinned and checked unless the operator set it. */
+  const modelUrlFetch = async (url: string, init: RequestInit = {}): Promise<Response> => {
+    if (!modelEgress.isOperatorUrl(url)) return await modelEgress.fetch(url, init);
+    // Operator endpoints are not checked or pinned, but still never followed through a redirect (undici would carry
+    // api-key and x-api-key headers across origins).
+    const response = await fetch(url, { ...init, redirect: "manual" });
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new ModelRedirectRefusedError();
+    }
+    return response;
+  };
+  const baseProviderRegistry = modelTelemetry.providers(createGatedProviderRegistry(createDefaultProviderRegistry(), providerEgressGate));
   // The embedding adapters /v1 and the runs' output checks call (instrumented the same way).
-  const runEmbeddingRegistry = modelTelemetry.embeddings(createDefaultEmbeddingRegistry());
+  const runEmbeddingRegistry = modelTelemetry.embeddings(createGatedEmbeddingRegistry(createDefaultEmbeddingRegistry(), embeddingEgressGate));
   const providerRegistry = modelAllowlistService.registry(baseProviderRegistry, { projectId: null, source: "deployment" });
   /** The allowlist scope of a run of `workflow` (a workflow with no project uses the default project's list). */
   type ModelRun = { executionId?: string; runKey?: string; sourceExecutionId?: string };
@@ -2705,7 +2749,8 @@ export async function createApp(
           // 12.6 — checked against the model allowlist of the workflow's project (a tape replay: see above).
           providerRegistry: tapeReplay ? runModelRegistry : modelScopedRun(mergedWorkflow, runModelRegistry, runModelScope),
           checkEmbeddingModel: modelScopedEmbeddings(mergedWorkflow, runModelScope),
-          ...(modelTelemetry.active ? { embeddingProviderRegistry: runEmbeddingRegistry } : {}),
+          // Always the gated registry (instrumented when telemetry is on), so content rule embeddings are checked and pinned.
+          embeddingProviderRegistry: runEmbeddingRegistry,
           connectorRegistry,
           mcpRegistry: runPlan?.registry ?? mcpRegistry,
           agentRuntime,
@@ -2911,7 +2956,8 @@ export async function createApp(
                   // 12.6 — the error handler's model calls are checked for its own project, audited once per failed run.
                   providerRegistry: modelScopedRun(errorWf, baseProviderRegistry, errorModelRun),
                   checkEmbeddingModel: modelScopedEmbeddings(errorWf, errorModelRun),
-                  ...(modelTelemetry.active ? { embeddingProviderRegistry: runEmbeddingRegistry } : {}),
+                  // Always the gated registry (instrumented when telemetry is on), so content rule embeddings are checked and pinned.
+                  embeddingProviderRegistry: runEmbeddingRegistry,
                   scopeSubWorkflow: modelScopedSubWorkflows(errorScoped.scopeSubWorkflow, baseProviderRegistry, errorModelRun),
                   // The error handler is guarded under its own bindings, like any other run.
                   guard: guardService.runtimeFor({
@@ -7745,7 +7791,7 @@ export async function createApp(
    * registry (an `embeddings` span and the token and duration metrics); the embedder itself is unchanged.
    */
   const kbEmbedder = async (kb: { embedderId: string; embedderConfig: Record<string, unknown> }): Promise<EmbeddingAdapter | null> => {
-    const embedder = await buildEmbedderFromKbConfig(kb, secretService);
+    const embedder = await buildEmbedderFromKbConfig(kb, secretService, modelUrlFetch);
     if (!embedder || !modelTelemetry.active) return embedder;
     return registryEmbeddingAdapter(embedder, {
       registry: runEmbeddingRegistry,
@@ -10851,7 +10897,10 @@ export async function createApp(
       nodes: nodeDefinitions,
       providers: providerRegistry.listDefinitions(),
       connectors: connectorRegistry.listDefinitions(),
-      mcpServers: mcpRegistry.listDefinitions()
+      mcpServers: mcpRegistry.listDefinitions(),
+      // The hosted providers whose API key the server's environment sets, so a new model node a builder adds starts
+      // on one of them instead of the built-in Echo provider. Provider ids only, never a key; builders only.
+      ...(hasRequiredRole(user, ["builder"]) ? { envModelProviders: envModelProviders(process.env) } : {})
     };
   });
 
@@ -11995,6 +12044,12 @@ export async function createApp(
     }
 
     const { providerId, secretRef, baseUrl, extra } = parsed.data;
+    // A base URL from the request is the caller's choice: it goes through the outbound URL checks (pinned, and auth
+    // headers are dropped on a cross-origin redirect), and a deployment env key is never sent to it unless it is the
+    // provider's own endpoint or one the operator allows (envKeyMayGoTo).
+    const listFetch = modelUrlFetch;
+    const envKeyFor = (envName: string, target: string | undefined) =>
+      envKeyMayGoTo(providerId, target) ? process.env[envName] : undefined;
 
     try {
       if (providerId === "gemini") {
@@ -12012,11 +12067,11 @@ export async function createApp(
       }
 
       if (providerId === "openai") {
-        const apiKey = (await resolveSecretForUser(user)(secretRef)) || process.env.OPENAI_API_KEY;
+        const apiKey = (await resolveSecretForUser(user)(secretRef)) || envKeyFor("OPENAI_API_KEY", baseUrl);
         if (!apiKey) return { models: [] };
         const modelBaseUrl = (baseUrl || "https://api.openai.com/v1").replace(/\/+$/, "");
         const modelEndpoint = modelBaseUrl.endsWith("/models") ? modelBaseUrl : `${modelBaseUrl}/models`;
-        const res = await fetch(modelEndpoint, {
+        const res = await listFetch(modelEndpoint, {
           headers: { "Authorization": `Bearer ${apiKey}` }
         });
         if (!res.ok) return { models: [] };
@@ -12029,11 +12084,11 @@ export async function createApp(
       }
 
       if (providerId === "anthropic") {
-        const apiKey = (await resolveSecretForUser(user)(secretRef)) || process.env.ANTHROPIC_API_KEY;
+        const apiKey = (await resolveSecretForUser(user)(secretRef)) || envKeyFor("ANTHROPIC_API_KEY", baseUrl);
         if (!apiKey) return { models: [] };
         const modelBaseUrl = (baseUrl || "https://api.anthropic.com/v1").replace(/\/+$/, "");
         const modelEndpoint = modelBaseUrl.endsWith("/models") ? modelBaseUrl : `${modelBaseUrl}/models`;
-        const res = await fetch(modelEndpoint, {
+        const res = await listFetch(modelEndpoint, {
           headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01" }
         });
         if (!res.ok) return { models: [] };
@@ -12044,8 +12099,11 @@ export async function createApp(
       }
 
       if (providerId === "ollama") {
-        const ollamaBase = (baseUrl ?? process.env.OLLAMA_BASE_URL ?? "http://localhost:11434/v1").replace(/\/v1\/?$/, "");
-        const res = await fetch(`${ollamaBase}/api/tags`);
+        // Only an Ollama the node or the server names: listing never falls back to probing a local daemon.
+        const configuredBase = baseUrl?.trim() || process.env.OLLAMA_BASE_URL?.trim();
+        if (!configuredBase) return { models: [] };
+        const ollamaBase = configuredBase.replace(/\/v1\/?$/, "");
+        const res = await listFetch(`${ollamaBase}/api/tags`);
         if (!res.ok) return { models: [] };
         const json = await res.json() as { models?: Array<{ name: string; modified_at?: string }> };
         return {
@@ -12060,7 +12118,7 @@ export async function createApp(
         if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
         const modelBaseUrl = baseUrl.replace(/\/+$/, "");
         const modelEndpoint = modelBaseUrl.endsWith("/models") ? modelBaseUrl : `${modelBaseUrl}/models`;
-        const res = await fetch(modelEndpoint, { headers });
+        const res = await listFetch(modelEndpoint, { headers });
         if (!res.ok) return { models: [] };
         const json = await res.json() as { data?: Array<{ id: string }> };
         return { models: (json.data ?? []).map(m => ({ id: m.id, label: m.id })) };
@@ -12068,17 +12126,21 @@ export async function createApp(
 
       if (providerId === "azure_openai") {
         const endpoint = (baseUrl ?? process.env.AZURE_OPENAI_ENDPOINT ?? "").replace(/\/+$/, "");
-        const apiKey = (await resolveSecretForUser(user)(secretRef)) || process.env.AZURE_OPENAI_API_KEY;
+        const apiKey = (await resolveSecretForUser(user)(secretRef)) || envKeyFor("AZURE_OPENAI_API_KEY", endpoint);
         if (!endpoint || !apiKey) return { models: [] };
         const apiVersion = (typeof extra?.apiVersion === "string" && extra.apiVersion.trim()) ? extra.apiVersion.trim() : "2024-10-21";
-        const res = await fetch(`${endpoint}/openai/models?api-version=${apiVersion}`, {
+        const res = await listFetch(`${endpoint}/openai/models?api-version=${apiVersion}`, {
           headers: { "api-key": apiKey }
         });
         if (!res.ok) return { models: [] };
         const json = await res.json() as { data?: Array<{ id: string }> };
         return { models: (json.data ?? []).map(m => ({ id: m.id, label: m.id })) };
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof OutboundUrlBlockedError) {
+        reply.code(400);
+        return { models: [], error: error.message };
+      }
       return { models: [] };
     }
 
@@ -16864,6 +16926,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         error: "Request body is too large",
         limitBytes: config.API_BODY_LIMIT_BYTES
       });
+      return;
+    }
+
+    // A model or embedding endpoint the outbound URL checks refuse, or a redirect a model call will not follow: the
+    // caller's configuration, not a server fault.
+    if (error instanceof OutboundUrlBlockedError || error instanceof ModelRedirectRefusedError) {
+      reply.code(400).send({ error: secretService.redact(error.message) });
       return;
     }
 
