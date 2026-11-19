@@ -1,5 +1,14 @@
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { computeTemplateDependencies } from "./template-dependencies";
+
+const SAMPLES_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../samples/workflows");
+
+function sampleDependencies(fileName: string) {
+  return computeTemplateDependencies(JSON.parse(fs.readFileSync(path.join(SAMPLES_DIR, fileName), "utf8")));
+}
 
 function wf(nodes: Array<{ type: string; config?: Record<string, unknown> }>) {
   return {
@@ -149,6 +158,39 @@ describe("computeTemplateDependencies", () => {
     );
     expect(deps).toEqual([
       { kind: "provider", label: "some_future_provider", envVar: undefined }
+    ]);
+  });
+});
+
+describe("the built-in templates and their model", () => {
+  it.each(["agentic-mcp-flow.json", "conditional-flow.json", "rag-flow.json", "basic-flow.json", "mcp-agent-quickstart-flow.json"])(
+    "%s runs on the built-in Echo model: it needs no model",
+    (fileName) => {
+      expect(sampleDependencies(fileName).filter((dep) => dep.kind === "provider")).toEqual([]);
+    }
+  );
+
+  it.each(["structured-output-flow.json", "two-turn-report-code-helper-flow.json", "vscode-l2m-coding-agent-flow.json"])(
+    "%s says it needs a model",
+    (fileName) => {
+      expect(sampleDependencies(fileName).some((dep) => dep.kind === "provider")).toBe(true);
+    }
+  );
+
+  it("no built-in template sends a node to a local Ollama unless it says it needs a model", () => {
+    for (const fileName of fs.readdirSync(SAMPLES_DIR).filter((name) => name.endsWith(".json"))) {
+      const raw = fs.readFileSync(path.join(SAMPLES_DIR, fileName), "utf8");
+      if (!raw.includes("11434")) continue;
+      expect(sampleDependencies(fileName), fileName).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "provider", label: "Ollama (local model server)" })]));
+    }
+  });
+
+  it("counts a dedicated chat model node as a model dependency", () => {
+    expect(computeTemplateDependencies(wf([{ type: "openai_chat_model", config: { model: "gpt-4o-mini" } }]))).toEqual([
+      { kind: "provider", label: "OpenAI", envVar: "OPENAI_API_KEY" }
+    ]);
+    expect(computeTemplateDependencies(wf([{ type: "ollama_chat_model", config: { model: "llama3.1" } }]))).toEqual([
+      { kind: "provider", label: "Ollama (local model server)", envVar: undefined }
     ]);
   });
 });

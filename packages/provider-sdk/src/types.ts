@@ -30,7 +30,16 @@ export interface ProviderExecutionContext {
    * deployment turned propagation to model providers on (off by default); adapters pass it to `resilientFetch`.
    */
   traceHeaders?: Readonly<Record<string, string>>;
+  /**
+   * The fetch the adapter's requests go through, in place of the global one. The API sets it for a base URL a node or
+   * request names, to a fetch pinned to the addresses the outbound URL checks vetted. Adapters pass it to
+   * `resilientFetch`.
+   */
+  fetch?: ProviderFetch;
 }
+
+/** A fetch an adapter's requests go through (see `ProviderExecutionContext.fetch`). */
+export type ProviderFetch = (url: string, init: RequestInit) => Promise<Response>;
 
 export interface ProviderCallSite {
   nodeId?: string;

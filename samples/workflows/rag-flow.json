@@ -60,9 +60,8 @@
         "position": { "x": 1270, "y": 160 },
         "config": {
           "provider": {
-            "providerId": "ollama",
-            "baseUrl": "http://localhost:11434/v1",
-            "model": "llama3.1",
+            "providerId": "echo",
+            "model": "echo",
             "temperature": 0.1
           },
           "promptKey": "prompt"

@@ -7,6 +7,8 @@ import {
   guardRevealNodeConfigSchema,
   OUTPUT_GUARDRAIL_CHECK_VALUES,
   parseIpAllowlist,
+  parseStatusList,
+  repairWorkflowErrorConfigs,
   workflowSchema,
   type Workflow,
   type WorkflowValidationIssue,
@@ -133,6 +135,38 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
 
   for (const node of workflow.nodes) {
     const config = (node.config ?? {}) as Record<string, unknown>;
+
+    // On Error = branch sends a failure to the node's `error` output (Try/Catch has its own catch output; a Switch case may be named "error").
+    if (node.type !== "try_catch" && node.type !== "switch_node") {
+      const errorOutputConnected = workflow.edges.some((edge) => edge.source === node.id && edge.sourceHandle === "error" && isExecutionEdge(edge));
+      if (config.onError === "branch" && !errorOutputConnected) {
+        issues.push({
+          code: "error_output_not_connected",
+          message: "On Error is set to the error output, but nothing is connected to this node's Error output, so a failure stops the run. Connect the Error output.",
+          nodeId: node.id,
+          severity: "warning"
+        });
+      }
+      if (config.onError !== "branch" && errorOutputConnected) {
+        issues.push({
+          code: "error_output_unused",
+          message: "Something is connected to this node's Error output, but On Error is not set to use it, so it never runs. Set On Error to \"Execute Fallback Branch\".",
+          nodeId: node.id,
+          severity: "warning"
+        });
+      }
+    }
+
+    if (node.type === "http_request" && config.retryOnStatus !== undefined) {
+      const { invalid } = parseStatusList(config.retryOnStatus);
+      if (invalid.length > 0) {
+        issues.push({
+          code: "invalid_http_retry_on_status",
+          message: `HTTP Request "Retry on status" has entries that are not status codes: ${invalid.slice(0, 5).join(", ")}. Use codes (503), classes (5xx) or ranges (500-504).`,
+          nodeId: node.id
+        });
+      }
+    }
 
     if (node.type === "schedule_trigger") {
       const cronExpression = typeof config.cronExpression === "string" ? config.cronExpression.trim() : "";
@@ -1355,7 +1389,9 @@ function validateGuardPlacement(workflow: Workflow): WorkflowValidationIssue[] {
 }
 
 export function validateWorkflowGraph(rawWorkflow: unknown): WorkflowValidationResult {
-  const parsed = workflowSchema.safeParse(rawWorkflow);
+  // A workflow stored before errorConfig was checked still validates and runs: its invalid fields are ignored, with a warning.
+  const { workflow: repairedWorkflow, repaired } = repairWorkflowErrorConfigs(rawWorkflow);
+  const parsed = workflowSchema.safeParse(repairedWorkflow);
   if (!parsed.success) {
     return {
       valid: false,
@@ -1367,7 +1403,12 @@ export function validateWorkflowGraph(rawWorkflow: unknown): WorkflowValidationR
   }
 
   const workflow = parsed.data;
-  const issues: WorkflowValidationIssue[] = [];
+  const issues: WorkflowValidationIssue[] = repaired.map(({ nodeId, invalidFields }) => ({
+    code: "invalid_error_config",
+    message: `This node's error settings (errorConfig) have invalid values (${invalidFields.join(", ")}), which are ignored, and the workflow cannot be saved until they are removed. Open the node's Settings tab and remove them.`,
+    nodeId,
+    severity: "warning" as const
+  }));
   const nodeIds = new Set<string>();
 
   for (const node of workflow.nodes) {
@@ -1407,9 +1448,11 @@ export function validateWorkflowGraph(rawWorkflow: unknown): WorkflowValidationR
 
   const outputNodes = workflow.nodes.filter((node) => node.type === "output");
   if (!outputNodes.length) {
+    // An Output node is optional: without one, a run's result is the output of the last node that ran.
     issues.push({
       code: "missing_output_node",
-      message: "Workflow must include at least one Output node."
+      message: "No Output node: the run's result is the output of the last node that runs.",
+      severity: "warning"
     });
   }
 
@@ -1428,6 +1471,67 @@ export function validateWorkflowGraph(rawWorkflow: unknown): WorkflowValidationR
     issues,
     orderedNodeIds: topology.order
   };
+}
+
+/**
+ * Issues a saved draft may carry: settings a builder has not filled in yet on nodes that do nothing until a run reaches
+ * them. Each still fails a run that reaches validation, so a draft that saves with one of these cannot run until it is
+ * fixed. Everything else (a broken graph, trigger and authentication settings, approval, content-rule and attachment
+ * rules, and any code not listed here) keeps blocking a save, because a saved workflow's triggers are live.
+ */
+const DRAFT_SAVEABLE_ISSUE_CODES = new Set([
+  "missing_template",
+  "missing_switch_value",
+  "missing_switch_cases",
+  "missing_set_node_assignments",
+  "invalid_set_node_assignment_key",
+  "invalid_set_node_assignment_template",
+  "missing_qdrant_operation",
+  "missing_output_parser_schema",
+  "missing_merge_combine_key",
+  "merge_requires_multiple_parents",
+  "missing_mcp_tool_config",
+  "missing_mcp_resource_config",
+  "missing_loop_item_variable",
+  "missing_loop_input_key",
+  "missing_llm_provider",
+  "missing_if_condition",
+  "missing_http_request_url_template",
+  "invalid_http_retry_on_status",
+  "missing_gemini_model",
+  "missing_execute_workflow_id",
+  "missing_workflow_tool_id",
+  "missing_connector_id",
+  "missing_code_node_script",
+  "missing_chat_model_model",
+  "missing_chat_gateway_base_url",
+  "missing_agent_chat_model",
+  "missing_azure_openai_secret",
+  "missing_azure_openai_endpoint",
+  "missing_azure_openai_deployment",
+  "missing_azure_embedding_secret",
+  "missing_azure_embedding_config",
+  "missing_azure_storage_operation",
+  "missing_azure_monitor_operation",
+  "missing_azure_cosmos_operation",
+  "missing_azure_ai_search_operation",
+  "missing_input_validator_rules"
+]);
+
+/**
+ * The unfinished node settings a saved draft may have (each stops a run): production does not serve such a version
+ * from its live triggers.
+ */
+export function unfinishedDraftIssues(validation: WorkflowValidationResult): WorkflowValidationIssue[] {
+  return validation.issues.filter((issue) => issue.severity !== "warning" && DRAFT_SAVEABLE_ISSUE_CODES.has(issue.code));
+}
+
+/**
+ * The issues that stop a workflow from being saved: every error except the unfinished-node settings a draft may keep.
+ * Warnings never block. The editor shows the rest as warnings, and a run still refuses the workflow until they are fixed.
+ */
+export function saveBlockingIssues(validation: WorkflowValidationResult): WorkflowValidationIssue[] {
+  return validation.issues.filter((issue) => issue.severity !== "warning" && !DRAFT_SAVEABLE_ISSUE_CODES.has(issue.code));
 }
 
 export function sortWorkflowNodes(workflow: Workflow): string[] {

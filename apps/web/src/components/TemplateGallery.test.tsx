@@ -96,6 +96,16 @@ describe("TemplateGallery", () => {
     expect(depsContainer).toHaveTextContent("OPENAI_API_KEY");
     expect(depsContainer).toHaveTextContent("Pinecone");
     expect(depsContainer).toHaveTextContent("PINECONE_API_KEY");
+    expect(screen.getByTestId("tpl-needs-model-tpl-needs-openai")).toHaveTextContent("Needs a model");
+  });
+
+  it("does not say a template needs a model when it only needs other setup", async () => {
+    vi.mocked(api.fetchTemplates).mockResolvedValue({
+      templates: [{ ...makeTemplate(), id: "tpl-pinecone", name: "Pinecone flow", dependencies: [{ kind: "vector_store", label: "Pinecone" }] }]
+    });
+    render(<TemplateGallery onWorkflowCreated={vi.fn()} />);
+    await screen.findByText("Pinecone flow");
+    expect(screen.queryByTestId("tpl-needs-model-tpl-pinecone")).toBeNull();
   });
 
   it("renders the 'no setup' pill when dependencies is an empty array", async () => {

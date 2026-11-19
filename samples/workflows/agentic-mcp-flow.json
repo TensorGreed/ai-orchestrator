@@ -39,9 +39,8 @@
         "position": { "x": 520, "y": 340 },
         "config": {
           "provider": {
-            "providerId": "ollama",
-            "baseUrl": "http://localhost:11434/v1",
-            "model": "qwen2.5:7b",
+            "providerId": "echo",
+            "model": "echo",
             "temperature": 0.2
           },
           "promptKey": "prompt",

@@ -1,5 +1,6 @@
 import type { LLMCallResponse, LLMProviderConfig } from "@ai-orchestrator/shared";
 import type { LLMStreamChunk, ProviderCallRequest, ProviderExecutionContext } from "../types";
+import { envKeyMayGoTo } from "../default-base-urls";
 import { providerHttpError, readResponseJson, readResponseText, resilientFetch, streamIdleTimeoutMs } from "../resilient-fetch";
 import {
   applyOpenAIParameters,
@@ -46,13 +47,20 @@ export async function resolveOpenAICompatibleEndpoint(
   }
 
   const secretValue = await context.resolveSecret(provider.secretRef);
+  // The deployment's env key only goes to the provider's own endpoint (or one the operator allows), never to a base
+  // URL a node or a request chose.
+  const envKey = options.defaultApiKeyEnv && envKeyMayGoTo(options.id, provider.baseUrl) ? process.env[options.defaultApiKeyEnv] : undefined;
   const apiKey =
     secretValue ||
     (typeof provider.extra?.apiKey === "string" ? provider.extra.apiKey : undefined) ||
-    (options.defaultApiKeyEnv ? process.env[options.defaultApiKeyEnv] : undefined);
+    envKey;
 
   if (options.requiresApiKey && !apiKey) {
-    throw new Error(`Provider ${options.id} requires an API key via secretRef or ${options.defaultApiKeyEnv}`);
+    throw new Error(
+      provider.baseUrl && options.defaultApiKeyEnv && !envKeyMayGoTo(options.id, provider.baseUrl)
+        ? `Provider ${options.id} requires an API key secret for a custom base URL: ${options.defaultApiKeyEnv} is only sent to the provider's own endpoint`
+        : `Provider ${options.id} requires an API key via secretRef or ${options.defaultApiKeyEnv}`
+    );
   }
   return { baseUrl, apiKey, headers: buildAuthHeaders(apiKey) };
 }
@@ -99,7 +107,7 @@ export async function callOpenAICompatible(
       body: JSON.stringify(connection.payload),
       signal: context.signal
     },
-    { timeoutMs, maxRetries, provider: options.id, onRetry: context.onRetry, traceHeaders: context.traceHeaders }
+    { timeoutMs, maxRetries, provider: options.id, onRetry: context.onRetry, traceHeaders: context.traceHeaders, fetch: context.fetch }
   );
 
   const bodyRead = { timeoutMs, signal: context.signal, provider: options.id };
@@ -142,7 +150,7 @@ export async function* callOpenAICompatibleStream(
       }),
       signal: context.signal
     },
-    { timeoutMs, maxRetries, provider: options.id, onRetry: context.onRetry, traceHeaders: context.traceHeaders }
+    { timeoutMs, maxRetries, provider: options.id, onRetry: context.onRetry, traceHeaders: context.traceHeaders, fetch: context.fetch }
   );
 
   if (!response.ok) {

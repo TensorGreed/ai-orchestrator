@@ -59,7 +59,7 @@ the envelope `GET /api/executions` uses:
 - `GET /api/workflows`
 - `GET /api/workflows/:id`
 - `POST /api/workflows`
-- `PUT /api/workflows/:id`
+- `PUT /api/workflows/:id` (both, and `POST /api/workflows/import`, save a draft: `400` only for a broken graph or a trigger, authentication, approval, content-rule or attachment setting; unfinished node settings save and `POST /api/workflows/:id/validate` lists them. The `400`'s `error` and `validation.issues` list only what blocks the save)
 - `DELETE /api/workflows/:id` (while the workflow's release gate is on and enforced, only an admin: others get `403`, audited as `release.workflow_delete.refused`)
 - `POST /api/workflows/:id/duplicate`
 - `POST /api/workflows/import`
@@ -69,6 +69,7 @@ the envelope `GET /api/executions` uses:
 - `POST /api/workflows/:id/validate`
 - `POST /api/workflows/:id/execute` (`record: true` records the run's MCP calls into a cassette; the result carries `mcpCassette`)
 - `POST /api/workflows/:id/execute/stream` — SSE: `node_start`, `node_complete`, `llm_delta`, `node_progress` (MCP progress: `nodeId`, `toolName`, `serverId`, `registryServerId`, `progress`, `total`, `percent`, `message`, `at`), `result`
+- On the production channel (an API key), `/execute`, `/execute/stream` and `POST /api/webhooks/execute(/stream)` answer `409` when production refuses the workflow; when the version production would run has unfinished settings the body is `{ error, code: "workflow_unfinished" }`. A run that fails because a sub-workflow it calls is refused that way carries `errorCode: "workflow_unfinished"` on the run and the node (and `code` in a webhook's answer).
 
 ## Execution history
 
@@ -362,8 +363,8 @@ See [Approval gates](../product/approvals.md). Release requests (Phase 15.4) app
 
 ## Webhooks
 
-- `POST /api/webhooks/execute`
-- `ANY /webhook/:path`
+- `POST /api/webhooks/execute` and `POST /api/webhooks/execute/stream` (builder; `{ workflow_id?, webhook_path?, session_id?, system_prompt?, user_prompt?, variables?, customData?, payload? }`). `payload` is the request body the run's webhook receives (what <span v-pre>`{{webhook.<field>}}`</span> reads), with the prompt fields on top of it, as a call to `/webhook/:path` gets them; without it the body holds the prompt fields only.
+- `ANY /webhook/:path` (production: answers `409` with `code: "workflow_unfinished"`, and starts no run, while the version production would run has unfinished node settings)
 - `ANY /webhook-test/:path`
 
 ### Content rules on responses (`content_filter`)

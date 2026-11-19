@@ -130,7 +130,11 @@ const baseNodeDefinitions: NodeDefinition[] = [
         bodyTemplate: { type: "string" },
         responseType: { type: "string", enum: ["json", "text"] },
         secretRef: { type: "object" },
-        timeoutMs: { type: "number" }
+        timeoutMs: { type: "number" },
+        // Fail on a status outside 200–299 (new nodes: true; unset: only its retried statuses, when the node asks for retries).
+        failOnHttpError: { type: "boolean" },
+        // Statuses retried when failing on them: codes, Nxx classes, ranges ("429, 5xx" when empty).
+        retryOnStatus: { type: "string" }
       },
       required: ["method", "urlTemplate"]
     },
@@ -140,7 +144,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
       headersTemplate: "{\n  \"Accept\": \"application/json\"\n}",
       bodyTemplate: "{}",
       responseType: "json",
-      timeoutMs: 15000
+      timeoutMs: 15000,
+      failOnHttpError: true
     }
   },
   {
@@ -297,7 +302,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
       required: ["provider"]
     },
     sampleConfig: {
-      provider: { providerId: "ollama", model: "llama3.1", baseUrl: "http://localhost:11434/v1" },
+      provider: { providerId: "echo", model: "echo" },
       promptKey: "prompt",
       systemPromptKey: "system_prompt"
     }
@@ -1656,7 +1661,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
       type: "object",
       properties: { responseTemplate: { type: "string" }, outputKey: { type: "string" } }
     },
-    sampleConfig: { responseTemplate: "{{answer}}", outputKey: "result" }
+    sampleConfig: { outputKey: "result" }
   },
   {
     type: "sub_workflow_trigger",

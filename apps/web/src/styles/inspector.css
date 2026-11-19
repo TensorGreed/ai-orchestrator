@@ -866,6 +866,9 @@
   line-height: 1.5;
   color: var(--fg-muted);
 }
+.cfg-tip-warn {
+  color: var(--warn);
+}
 .cfg-tip code,
 .cfg-help-body code {
   font-family: var(--font-mono);

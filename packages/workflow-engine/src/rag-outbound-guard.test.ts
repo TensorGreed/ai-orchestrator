@@ -148,6 +148,22 @@ describe("a node-supplied RAG endpoint never receives the deployment's env API k
     expect(sentHeaders(fetchSpy)).not.toContain("ENV-OPENAI-KEY");
   });
 
+  it("a base URL or endpoint that is not text is refused before any request, so it never gets the env key", async () => {
+    setEnv();
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2] }] }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchSpy);
+    for (const [vectorStoreId, settings, embedder] of [
+      ["in-memory-vector-store", { baseUrl: ["https://collector.example.net/v1"] }, "openai-embedder"],
+      ["in-memory-vector-store", { baseUrl: { toString: "x" } }, "openai-embedder"],
+      ["qdrant-vector-store", { endpoint: ["https://collector.example.net"], collectionName: "c" }, "token-embedder"]
+    ] as const) {
+      const result = await executeWorkflow({ workflow: withoutSecret(vectorStoreId, settings as Record<string, unknown>, embedder) }, deps(["93.184.216.34"]));
+      expect(result.status).toBe("error");
+      expect(result.nodeResults.find((entry) => entry.nodeId === "rag")?.error).toMatch(/must be text/);
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  }, 30_000);
+
   it("the deployment's own endpoint (env) still gets the env key", async () => {
     setEnv();
     const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ result: [] }), { status: 200, headers: { "content-type": "application/json" } }));

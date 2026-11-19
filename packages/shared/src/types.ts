@@ -235,6 +235,11 @@ export interface WorkflowSettings {
    * runs and memory without reading every run. Unset: nothing is stored.
    */
   dataProtection?: { subjectRefs?: string[] };
+  /**
+   * The request body the editor's "Webhook run" sends (what `{{webhook.<field>}}` reads). Stored with the workflow and
+   * shown to everyone who can read it, so fields named like credentials are refused. At most 64 KB of JSON.
+   */
+  testWebhookPayload?: Record<string, unknown>;
 }
 
 export interface WriteToolApprovalSettings {
@@ -347,6 +352,12 @@ export type NodeExecutionStatus =
 
 export type WorkflowExecutionStatus = "success" | "error" | "partial" | "waiting_approval" | "canceled";
 
+/** A run whose called workflow's live version is unfinished (a paused trigger): a stable code for API callers. */
+export const WORKFLOW_UNFINISHED_CODE = "workflow_unfinished";
+
+/** Error codes a run passes on to API callers (`errorCode`, a webhook's `code`). Other codes stay internal. */
+export const PUBLIC_RUN_ERROR_CODES: ReadonlySet<string> = new Set([WORKFLOW_UNFINISHED_CODE]);
+
 export interface NodeExecutionResult {
   nodeId: string;
   status: NodeExecutionStatus;
@@ -359,6 +370,8 @@ export interface NodeExecutionResult {
   warnings?: string[];
   retriedNodes?: Array<{ nodeId: string; attempts: number; nodeType: string }>;
   errorCategory?: string;
+  /** A stable code for errors callers may act on (such as `workflow_unfinished`), when the error has one. */
+  errorCode?: string;
   /** One-sentence human-readable hint on how to recover from this error.
    *  Auto-derived from errorCategory by the executor; surfaced in the UI
    *  below the raw error message so users don't have to read source. */
@@ -473,6 +486,8 @@ export interface WorkflowExecutionResult {
   /** Same shape as NodeExecutionResult.errorCategory, attached to the
    *  workflow when execution stopped on a node error. */
   errorCategory?: string;
+  /** Same shape as NodeExecutionResult.errorCode, attached to the workflow when execution stopped on a node error. */
+  errorCode?: string;
   /** Same shape as NodeExecutionResult.errorRemediation, attached to the
    *  workflow when execution stopped on a node error. */
   errorRemediation?: string;
@@ -705,6 +720,8 @@ export interface WorkflowValidationResult {
   valid: boolean;
   issues: WorkflowValidationIssue[];
   orderedNodeIds?: string[];
+  /** A saved workflow's check only: production's version has unfinished settings, so its live triggers do not run it. */
+  liveTriggersPaused?: boolean;
 }
 
 export interface SecretReference {

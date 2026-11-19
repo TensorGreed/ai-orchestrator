@@ -30,7 +30,19 @@ import {
   type MCPExecutionContext,
   type McpSandboxPolicy
 } from "@ai-orchestrator/mcp-sdk";
-import { createDefaultEmbeddingRegistry, createDefaultProviderRegistry, isModelNotAllowedError, type ProviderRegistry } from "@ai-orchestrator/provider-sdk";
+import {
+  createDefaultEmbeddingRegistry,
+  createDefaultProviderRegistry,
+  createGatedEmbeddingRegistry,
+  createGatedProviderRegistry,
+  envKeyMayGoTo,
+  isModelNotAllowedError,
+  readResponseJson,
+  type EmbeddingCallGate,
+  type ModelCallGate,
+  type ProviderRegistry
+} from "@ai-orchestrator/provider-sdk";
+import { createModelEgress, ModelRedirectRefusedError } from "./services/model-egress.js";
 import {
   agentWebhookPayloadSchema,
   CONTENT_RULES_TOOLS_ADAPTER_ID,
@@ -76,7 +88,7 @@ import {
   WorkflowError,
   WORKFLOW_TOOL_ADAPTER_ID
 } from "@ai-orchestrator/shared";
-import { BUDGET_SCOPE_TYPES, isBudgetScopeType, readTraceCarrier, type BudgetScopeType } from "@ai-orchestrator/shared";
+import { BUDGET_SCOPE_TYPES, isBudgetScopeType, readTraceCarrier, repairWorkflowErrorConfigs, type BudgetScopeType } from "@ai-orchestrator/shared";
 import { CREDENTIAL_EXPIRING_EVENT, credentialRotateBodySchema, KEY_ROTATION_GRACE_HOURS } from "@ai-orchestrator/shared";
 import { CREDENTIAL_EXPIRY_SWEEP_INTERVAL_MS, CredentialExpiryService } from "./services/credential-expiry-service.js";
 import {
@@ -93,6 +105,7 @@ import {
   evaluateConditionTemplate,
   runWithSandboxOwner,
   validateWorkflowGraph,
+  saveBlockingIssues,
   KnowledgeBaseVectorStoreAdapter,
   TokenEmbeddingAdapter,
   OpenAIEmbeddingAdapter,
@@ -272,6 +285,7 @@ import { registerEvalRoutes } from "./eval-routes.js";
 import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { registerUserInviteRoutes } from "./user-invite-routes.js";
 import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
+import { envModelProviders } from "@ai-orchestrator/shared";
 import {
   CONTENT_FILTER_CODE,
   RESPONSE_WITHHELD_MESSAGE,
@@ -298,7 +312,7 @@ import { registerDataDestinationRoutes } from "./data-destination-routes.js";
 import { DataDestinationService } from "./services/data-destination-service.js";
 import { ModelAllowlistService, type ModelAllowlistScope } from "./services/model-allowlist-service.js";
 import { registerModelAllowlistRoutes } from "./model-allowlist-routes.js";
-import { DEACTIVATED_MESSAGE, ReleaseService, withUniqueTriggerPaths } from "./services/release-service.js";
+import { DEACTIVATED_MESSAGE, ReleaseService, productionRefusalBody, withUniqueTriggerPaths } from "./services/release-service.js";
 import { GateAdmissionService } from "./services/gate-admission-service.js";
 import { STUCK_JOB_MARGIN_MS } from "./db/queue-timeouts.js";
 import { ApprovalResumeRunner, ApprovalService, approvalDecisionOf, approvalPersonCheck, type ApprovalResumeJob } from "./services/approval-service.js";
@@ -355,8 +369,10 @@ import {
   expressionSandboxLimits,
   nodeDnsResolver,
   guardedFetch,
+  OutboundUrlBlockedError,
   type CodeSandboxPlan,
   type OutboundGuardConfig,
+  type RagFetch,
   type SubWorkflowAdmission,
   type SubWorkflowAdmissionRequest,
   type SubWorkflowUsage,
@@ -948,7 +964,9 @@ function toDurationMs(startedAt: string, completedAt: string): number | undefine
 // Returns null if the embedderId is unknown or required config is missing.
 async function buildEmbedderFromKbConfig(
   kb: { embedderId: string; embedderConfig: Record<string, unknown> },
-  secretService: SecretService
+  secretService: SecretService,
+  /** The fetch its requests go through (checked and pinned for a URL the knowledge base names). */
+  fetcher?: RagFetch
 ): Promise<EmbeddingAdapter | null> {
   const cfg = kb.embedderConfig ?? {};
   const secretRef = (cfg.secretRef ?? cfg.embeddingSecretRef) as SecretReference | undefined;
@@ -958,12 +976,15 @@ async function buildEmbedderFromKbConfig(
       return new TokenEmbeddingAdapter();
     case "openai-embedder":
       return new OpenAIEmbeddingAdapter({
-        apiKey: apiKey ?? process.env.OPENAI_API_KEY ?? "",
+        // The deployment key only goes to OpenAI's own endpoint (or one the operator allows), not to a KB's base URL.
+        apiKey: apiKey ?? (envKeyMayGoTo("openai", typeof cfg.baseUrl === "string" ? cfg.baseUrl : undefined) ? process.env.OPENAI_API_KEY : undefined) ?? "",
         baseUrl: typeof cfg.baseUrl === "string" ? cfg.baseUrl : undefined,
-        model: typeof cfg.model === "string" ? cfg.model : undefined
+        model: typeof cfg.model === "string" ? cfg.model : undefined,
+        ...(fetcher ? { fetcher } : {})
       });
     case "azure-openai-embedder":
       return new AzureOpenAIEmbeddingAdapter({
+        ...(fetcher ? { fetcher } : {}),
         endpoint: typeof cfg.endpoint === "string" ? cfg.endpoint : process.env.AZURE_OPENAI_ENDPOINT ?? "",
         deployment:
           typeof cfg.deployment === "string" && cfg.deployment.trim()
@@ -972,7 +993,12 @@ async function buildEmbedderFromKbConfig(
               ? cfg.model
               : "text-embedding-3-small",
         apiVersion: typeof cfg.apiVersion === "string" ? cfg.apiVersion : process.env.AZURE_OPENAI_API_VERSION,
-        apiKey: apiKey ?? process.env.AZURE_OPENAI_API_KEY ?? ""
+        apiKey:
+          apiKey ??
+          (envKeyMayGoTo("azure_openai", typeof cfg.endpoint === "string" ? cfg.endpoint : process.env.AZURE_OPENAI_ENDPOINT)
+            ? process.env.AZURE_OPENAI_API_KEY
+            : undefined) ??
+          ""
       });
     case "cohere-embedder":
       return new CohereEmbeddingAdapter({
@@ -1517,6 +1543,8 @@ export interface CreateAppOptions {
    * fetch that replaces the pinned one. The outbound checks still run on every URL and redirect.
    */
   documentScanNetwork?: { resolver?: DnsResolver; fetchImpl?: typeof fetch };
+  /** The resolver model and embedding calls' outbound checks and pinned connections use (tests). */
+  modelNetwork?: { resolver?: DnsResolver };
   /** The names and addresses service (CONTENT_RULES_NER_ENDPOINT): the DNS resolver and, for tests only, a fetch that replaces the pinned one. */
   nerEndpointNetwork?: { resolver?: DnsResolver; fetchImpl?: typeof fetch };
 }
@@ -1759,9 +1787,27 @@ export async function createApp(
   await modelAllowlistService.start();
   app.addHook("onClose", async () => modelAllowlistService.stop());
   // Instrumented at the base too, so a call through any other view (a tape miss, a recorded run) is recorded once.
-  const baseProviderRegistry = modelTelemetry.providers(createDefaultProviderRegistry());
+  // A base URL or endpoint a model node, provider test, /v1 route or embedding call names is checked and the call is
+  // pinned to the checked addresses (services/model-egress.ts). Provider defaults and operator env endpoints are not.
+  const providerOutboundGuard: OutboundGuardConfig = { denyPrivate: config.OUTBOUND_DENY_PRIVATE, allowlist: config.OUTBOUND_ALLOWLIST };
+  const modelEgress = createModelEgress({ guard: providerOutboundGuard, resolver: options.modelNetwork?.resolver ?? nodeDnsResolver });
+  const providerEgressGate: ModelCallGate = async (call, context) => await modelEgress.contextFor(call.provider, context);
+  const embeddingEgressGate: EmbeddingCallGate = async (call, context) => await modelEgress.contextFor(call.provider, context);
+  /** The fetch for a knowledge base embedder's or a model listing's URL: pinned and checked unless the operator set it. */
+  const modelUrlFetch = async (url: string, init: RequestInit = {}): Promise<Response> => {
+    if (!modelEgress.isOperatorUrl(url)) return await modelEgress.fetch(url, init);
+    // Operator endpoints are not checked or pinned, but still never followed through a redirect (undici would carry
+    // api-key and x-api-key headers across origins).
+    const response = await fetch(url, { ...init, redirect: "manual" });
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new ModelRedirectRefusedError();
+    }
+    return response;
+  };
+  const baseProviderRegistry = modelTelemetry.providers(createGatedProviderRegistry(createDefaultProviderRegistry(), providerEgressGate));
   // The embedding adapters /v1 and the runs' output checks call (instrumented the same way).
-  const runEmbeddingRegistry = modelTelemetry.embeddings(createDefaultEmbeddingRegistry());
+  const runEmbeddingRegistry = modelTelemetry.embeddings(createGatedEmbeddingRegistry(createDefaultEmbeddingRegistry(), embeddingEgressGate));
   const providerRegistry = modelAllowlistService.registry(baseProviderRegistry, { projectId: null, source: "deployment" });
   /** The allowlist scope of a run of `workflow` (a workflow with no project uses the default project's list). */
   type ModelRun = { executionId?: string; runKey?: string; sourceExecutionId?: string };
@@ -2704,7 +2750,8 @@ export async function createApp(
           // 12.6 — checked against the model allowlist of the workflow's project (a tape replay: see above).
           providerRegistry: tapeReplay ? runModelRegistry : modelScopedRun(mergedWorkflow, runModelRegistry, runModelScope),
           checkEmbeddingModel: modelScopedEmbeddings(mergedWorkflow, runModelScope),
-          ...(modelTelemetry.active ? { embeddingProviderRegistry: runEmbeddingRegistry } : {}),
+          // Always the gated registry (instrumented when telemetry is on), so content rule embeddings are checked and pinned.
+          embeddingProviderRegistry: runEmbeddingRegistry,
           connectorRegistry,
           mcpRegistry: runPlan?.registry ?? mcpRegistry,
           agentRuntime,
@@ -2910,7 +2957,8 @@ export async function createApp(
                   // 12.6 — the error handler's model calls are checked for its own project, audited once per failed run.
                   providerRegistry: modelScopedRun(errorWf, baseProviderRegistry, errorModelRun),
                   checkEmbeddingModel: modelScopedEmbeddings(errorWf, errorModelRun),
-                  ...(modelTelemetry.active ? { embeddingProviderRegistry: runEmbeddingRegistry } : {}),
+                  // Always the gated registry (instrumented when telemetry is on), so content rule embeddings are checked and pinned.
+                  embeddingProviderRegistry: runEmbeddingRegistry,
                   scopeSubWorkflow: modelScopedSubWorkflows(errorScoped.scopeSubWorkflow, baseProviderRegistry, errorModelRun),
                   // The error handler is guarded under its own bindings, like any other run.
                   guard: guardService.runtimeFor({
@@ -4542,7 +4590,8 @@ export async function createApp(
 
   if (schedulerService) {
     // A scheduler test double that only fires schedules has no loader.
-    schedulerService.setWorkflowLoader?.(async (workflowId) => await productionWorkflow(workflowId));
+    // Registered from an unfinished version too: its ticks are then skipped (and noted once), not lost on finishing.
+    schedulerService.setWorkflowLoader?.(async (workflowId) => await productionTriggerWorkflow(workflowId));
     // A schedule fire is its own trace: the timer would otherwise inherit the context of the request that saved it.
     schedulerService.setExecutionHandler((input) => runInstrumentation.withNewTrace(() => executeScheduledWorkflow(input)));
     app.addHook("onClose", async () => {
@@ -4620,7 +4669,7 @@ export async function createApp(
   };
 
   if (triggerService) {
-    triggerService.setWorkflowLoader(async (workflowId) => await productionWorkflow(workflowId));
+    triggerService.setWorkflowLoader(async (workflowId) => await productionTriggerWorkflow(workflowId));
     triggerService.setExecutionHandler(async (payload) => await runInstrumentation.withNewTrace(() => executeTriggeredWorkflow(payload)));
     triggerService.setSecretResolver((ref) => secretService.resolveSecret(ref));
     triggerService.setOutboundGuard(outboundGuard, nodeDnsResolver);
@@ -6023,11 +6072,14 @@ export async function createApp(
   });
   /** The workflow production traffic runs: the published version when there is one, else the draft. */
   const productionWorkflow = async (workflowId: string): Promise<Workflow | null> => await releaseService.resolveRunnableWorkflow(workflowId, "production");
+  /** What schedules and app triggers register from: production's version, unfinished or not (an unfinished one's fires are skipped). */
+  const productionTriggerWorkflow = async (workflowId: string): Promise<Workflow | null> =>
+    await releaseService.resolveRunnableWorkflow(workflowId, "production", { includeUnfinished: true });
   /** Phase 15.4 — what a production entry point answers when it has no workflow to run: why production refuses it (409), or 404. */
-  const productionMissing = async (reply: FastifyReply, workflowId: string): Promise<{ error: string }> => {
+  const productionMissing = async (reply: FastifyReply, workflowId: string): Promise<{ error: string; code?: string }> => {
     const refusal = await releaseService.productionRefusal(workflowId);
     reply.code(refusal ? 409 : 404);
-    return { error: refusal ?? "Workflow not found" };
+    return productionRefusalBody(refusal, "Workflow not found");
   };
   /** Phase 15.4 — the deactivated gated workflow whose published version has a node matching `matches`, for a "deactivated" answer. */
   const deactivatedMatch = async (matches: (workflow: Workflow) => boolean): Promise<Workflow | null> => {
@@ -7739,7 +7791,7 @@ export async function createApp(
    * registry (an `embeddings` span and the token and duration metrics); the embedder itself is unchanged.
    */
   const kbEmbedder = async (kb: { embedderId: string; embedderConfig: Record<string, unknown> }): Promise<EmbeddingAdapter | null> => {
-    const embedder = await buildEmbedderFromKbConfig(kb, secretService);
+    const embedder = await buildEmbedderFromKbConfig(kb, secretService, modelUrlFetch);
     if (!embedder || !modelTelemetry.active) return embedder;
     return registryEmbeddingAdapter(embedder, {
       registry: runEmbeddingRegistry,
@@ -10845,7 +10897,10 @@ export async function createApp(
       nodes: nodeDefinitions,
       providers: providerRegistry.listDefinitions(),
       connectors: connectorRegistry.listDefinitions(),
-      mcpServers: mcpRegistry.listDefinitions()
+      mcpServers: mcpRegistry.listDefinitions(),
+      // The hosted providers whose API key the server's environment sets, so a new model node a builder adds starts
+      // on one of them instead of the built-in Echo provider. Provider ids only, never a key; builders only.
+      ...(hasRequiredRole(user, ["builder"]) ? { envModelProviders: envModelProviders(process.env) } : {})
     };
   });
 
@@ -10972,12 +11027,14 @@ export async function createApp(
       };
     }
 
+    // A draft saves with unfinished node settings (the editor shows them as warnings); a broken graph does not.
     const validation = validateWorkflowGraph(parsed.data);
-    if (!validation.valid) {
+    const blocking = saveBlockingIssues(validation);
+    if (blocking.length > 0) {
       reply.code(400);
       return {
-        error: `Workflow validation failed: ${validation.issues.map((issue) => issue.message).join("; ")}`,
-        validation
+        error: `Workflow validation failed: ${blocking.map((issue) => issue.message).join("; ")}`,
+        validation: { ...validation, issues: blocking }
       };
     }
 
@@ -11019,12 +11076,14 @@ export async function createApp(
       return { error: "Workflow ID mismatch between path and payload" };
     }
 
+    // A draft saves with unfinished node settings (the editor shows them as warnings); a broken graph does not.
     const validation = validateWorkflowGraph(parsed.data);
-    if (!validation.valid) {
+    const blocking = saveBlockingIssues(validation);
+    if (blocking.length > 0) {
       reply.code(400);
       return {
-        error: `Workflow validation failed: ${validation.issues.map((issue) => issue.message).join("; ")}`,
-        validation
+        error: `Workflow validation failed: ${blocking.map((issue) => issue.message).join("; ")}`,
+        validation: { ...validation, issues: blocking }
       };
     }
 
@@ -11240,14 +11299,16 @@ export async function createApp(
     try {
       const workflow = parsed.data.json
         ? importWorkflowFromJson(parsed.data.json)
-        : workflowSchema.parse(parsed.data.workflow);
+        : // Like the JSON path: invalid stored error settings are left out (and reported by validation), not refused.
+          workflowSchema.parse(repairWorkflowErrorConfigs(parsed.data.workflow).workflow);
 
       const validation = validateWorkflowGraph(workflow);
-      if (!validation.valid) {
+      const blocking = saveBlockingIssues(validation);
+      if (blocking.length > 0) {
         reply.code(400);
         return {
-          error: `Workflow validation failed: ${validation.issues.map((issue) => issue.message).join("; ")}`,
-          validation
+          error: `Workflow validation failed: ${blocking.map((issue) => issue.message).join("; ")}`,
+          validation: { ...validation, issues: blocking }
         };
       }
 
@@ -11338,11 +11399,12 @@ export async function createApp(
     };
 
     const validation = validateWorkflowGraph(workflow);
-    if (!validation.valid) {
+    const blocking = saveBlockingIssues(validation);
+    if (blocking.length > 0) {
       reply.code(400);
       return {
-        error: `Converted workflow failed validation: ${validation.issues.map((issue) => issue.message).join("; ")}`,
-        validation,
+        error: `Converted workflow failed validation: ${blocking.map((issue) => issue.message).join("; ")}`,
+        validation: { ...validation, issues: blocking },
         report: conversion.report
       };
     }
@@ -11404,7 +11466,10 @@ export async function createApp(
     const validation = validateWorkflowGraph(workflow);
     // 12.6 — a model the allowlist refuses is a warning: the workflow saves and validates, its runs fail at that node.
     const modelWarnings = await modelAllowlistService.warningsFor(workflow);
-    return modelWarnings.length > 0 ? { ...validation, issues: [...validation.issues, ...modelWarnings] } : validation;
+    const result = modelWarnings.length > 0 ? { ...validation, issues: [...validation.issues, ...modelWarnings] } : validation;
+    // Production's version has unfinished settings: its webhooks, schedules and app triggers do not run it.
+    const liveTriggersPaused = (await releaseService.unfinishedProductionWorkflow(workflow.id)) !== null;
+    return { ...result, liveTriggersPaused };
   });
 
   // ---------------------------------------------------------------------------
@@ -11980,14 +12045,28 @@ export async function createApp(
     }
 
     const { providerId, secretRef, baseUrl, extra } = parsed.data;
+    // A base URL from the request is the caller's choice: it goes through the outbound URL checks (pinned, and auth
+    // headers are dropped on a cross-origin redirect), and a deployment env key is never sent to it unless it is the
+    // provider's own endpoint or one the operator allows (envKeyMayGoTo).
+    // A listing is small: it gets a time limit and the same 8 MB body cap as model calls.
+    const LIST_TIMEOUT_MS = 15_000;
+    const listFetch = async (url: string, init: RequestInit = {}) => await modelUrlFetch(url, { ...init, signal: AbortSignal.timeout(LIST_TIMEOUT_MS) });
+    const readList = async <T>(res: Response): Promise<T> => await readResponseJson<T>(res, { timeoutMs: LIST_TIMEOUT_MS, provider: providerId });
+    const envKeyFor = (envName: string, target: string | undefined) =>
+      envKeyMayGoTo(providerId, target) ? process.env[envName] : undefined;
 
     try {
       if (providerId === "gemini") {
         const apiKey = (await resolveSecretForUser(user)(secretRef)) || process.env.GEMINI_API_KEY;
         if (!apiKey) return { models: [] };
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+        // The key goes in a header (not the URL), and a redirect is not followed.
+        const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models", {
+          headers: { "x-goog-api-key": apiKey },
+          redirect: "manual",
+          signal: AbortSignal.timeout(LIST_TIMEOUT_MS)
+        });
         if (!res.ok) return { models: [] };
-        const json = await res.json() as { models?: Array<{ name?: string; displayName?: string; supportedGenerationMethods?: string[] }> };
+        const json = await readList<{ models?: Array<{ name?: string; displayName?: string; supportedGenerationMethods?: string[] }> }>(res);
         return {
           models: (json.models ?? [])
             .filter(m => m.supportedGenerationMethods?.includes("generateContent"))
@@ -11997,15 +12076,15 @@ export async function createApp(
       }
 
       if (providerId === "openai") {
-        const apiKey = (await resolveSecretForUser(user)(secretRef)) || process.env.OPENAI_API_KEY;
+        const apiKey = (await resolveSecretForUser(user)(secretRef)) || envKeyFor("OPENAI_API_KEY", baseUrl);
         if (!apiKey) return { models: [] };
         const modelBaseUrl = (baseUrl || "https://api.openai.com/v1").replace(/\/+$/, "");
         const modelEndpoint = modelBaseUrl.endsWith("/models") ? modelBaseUrl : `${modelBaseUrl}/models`;
-        const res = await fetch(modelEndpoint, {
+        const res = await listFetch(modelEndpoint, {
           headers: { "Authorization": `Bearer ${apiKey}` }
         });
         if (!res.ok) return { models: [] };
-        const json = await res.json() as { data?: Array<{ id: string; owned_by?: string }> };
+        const json = await readList<{ data?: Array<{ id: string; owned_by?: string }> }>(res);
         const listedModels = json.data ?? [];
         const chatModels = (baseUrl ? listedModels : listedModels
           .filter(m => /^(gpt-|o[1-9]|chatgpt-)/.test(m.id) && !m.id.includes("instruct") && !m.id.includes("realtime") && !m.id.includes("audio") && !m.id.includes("transcribe")))
@@ -12014,25 +12093,28 @@ export async function createApp(
       }
 
       if (providerId === "anthropic") {
-        const apiKey = (await resolveSecretForUser(user)(secretRef)) || process.env.ANTHROPIC_API_KEY;
+        const apiKey = (await resolveSecretForUser(user)(secretRef)) || envKeyFor("ANTHROPIC_API_KEY", baseUrl);
         if (!apiKey) return { models: [] };
         const modelBaseUrl = (baseUrl || "https://api.anthropic.com/v1").replace(/\/+$/, "");
         const modelEndpoint = modelBaseUrl.endsWith("/models") ? modelBaseUrl : `${modelBaseUrl}/models`;
-        const res = await fetch(modelEndpoint, {
+        const res = await listFetch(modelEndpoint, {
           headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01" }
         });
         if (!res.ok) return { models: [] };
-        const json = await res.json() as { data?: Array<{ id: string; display_name?: string }> };
+        const json = await readList<{ data?: Array<{ id: string; display_name?: string }> }>(res);
         return {
           models: (json.data ?? []).map(m => ({ id: m.id, label: m.display_name ?? m.id }))
         };
       }
 
       if (providerId === "ollama") {
-        const ollamaBase = (baseUrl ?? process.env.OLLAMA_BASE_URL ?? "http://localhost:11434/v1").replace(/\/v1\/?$/, "");
-        const res = await fetch(`${ollamaBase}/api/tags`);
+        // Only an Ollama the node or the server names: listing never falls back to probing a local daemon.
+        const configuredBase = baseUrl?.trim() || process.env.OLLAMA_BASE_URL?.trim();
+        if (!configuredBase) return { models: [] };
+        const ollamaBase = configuredBase.replace(/\/v1\/?$/, "");
+        const res = await listFetch(`${ollamaBase}/api/tags`);
         if (!res.ok) return { models: [] };
-        const json = await res.json() as { models?: Array<{ name: string; modified_at?: string }> };
+        const json = await readList<{ models?: Array<{ name: string; modified_at?: string }> }>(res);
         return {
           models: (json.models ?? []).map(m => ({ id: m.name, label: m.name }))
         };
@@ -12045,25 +12127,29 @@ export async function createApp(
         if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
         const modelBaseUrl = baseUrl.replace(/\/+$/, "");
         const modelEndpoint = modelBaseUrl.endsWith("/models") ? modelBaseUrl : `${modelBaseUrl}/models`;
-        const res = await fetch(modelEndpoint, { headers });
+        const res = await listFetch(modelEndpoint, { headers });
         if (!res.ok) return { models: [] };
-        const json = await res.json() as { data?: Array<{ id: string }> };
+        const json = await readList<{ data?: Array<{ id: string }> }>(res);
         return { models: (json.data ?? []).map(m => ({ id: m.id, label: m.id })) };
       }
 
       if (providerId === "azure_openai") {
         const endpoint = (baseUrl ?? process.env.AZURE_OPENAI_ENDPOINT ?? "").replace(/\/+$/, "");
-        const apiKey = (await resolveSecretForUser(user)(secretRef)) || process.env.AZURE_OPENAI_API_KEY;
+        const apiKey = (await resolveSecretForUser(user)(secretRef)) || envKeyFor("AZURE_OPENAI_API_KEY", endpoint);
         if (!endpoint || !apiKey) return { models: [] };
         const apiVersion = (typeof extra?.apiVersion === "string" && extra.apiVersion.trim()) ? extra.apiVersion.trim() : "2024-10-21";
-        const res = await fetch(`${endpoint}/openai/models?api-version=${apiVersion}`, {
+        const res = await listFetch(`${endpoint}/openai/models?api-version=${apiVersion}`, {
           headers: { "api-key": apiKey }
         });
         if (!res.ok) return { models: [] };
-        const json = await res.json() as { data?: Array<{ id: string }> };
+        const json = await readList<{ data?: Array<{ id: string }> }>(res);
         return { models: (json.data ?? []).map(m => ({ id: m.id, label: m.id })) };
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof OutboundUrlBlockedError) {
+        reply.code(400);
+        return { models: [], error: error.message };
+      }
       return { models: [] };
     }
 
@@ -12157,6 +12243,27 @@ export async function createApp(
     requireRole: (request, reply, roles) => requireRole(request, reply, roles)
   });
 
+  /**
+   * What a webhook run started from the API receives as its webhook body: the request's `payload` (the editor's test
+   * payload) with the run's prompt fields on top, as a call to the webhook URL gets them; without one, the prompt fields only.
+   */
+  const agentWebhookRunPayload = (data: z.infer<typeof agentWebhookPayloadSchema>): Record<string, unknown> =>
+    data.payload
+      ? {
+          ...data.payload,
+          ...(data.system_prompt !== undefined ? { system_prompt: data.system_prompt } : {}),
+          ...(data.user_prompt !== undefined ? { user_prompt: data.user_prompt } : {}),
+          ...(data.session_id !== undefined ? { session_id: data.session_id } : {}),
+          ...(data.variables !== undefined ? { variables: data.variables } : {})
+        }
+      : { system_prompt: data.system_prompt, user_prompt: data.user_prompt, session_id: data.session_id, variables: data.variables };
+
+  /** The run's stored request input: the payload's fields at the top level, as a webhook call stores its body, so a replay sends them again. */
+  const agentWebhookRequestInput = (data: z.infer<typeof agentWebhookPayloadSchema>): Record<string, unknown> => {
+    const { payload, ...rest } = data;
+    return payload ? { ...payload, ...rest } : rest;
+  };
+
   app.post<{ Body: unknown }>("/api/webhooks/execute", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) {
@@ -12185,7 +12292,7 @@ export async function createApp(
       const named = parsed.data.workflow_id;
       const refusal = named && (await runAccess.workflow(user, named, "workflow:read")).ok ? await releaseService.productionRefusal(named) : null;
       reply.code(refusal ? 409 : 404);
-      return { error: refusal ?? "No workflows available" };
+      return productionRefusalBody(refusal, "No workflows available");
     }
     const executeAccess = await runAccess.workflow(user, workflow.id, "workflow:execute");
     if (!executeAccess.ok) return denyRunAccess(reply, executeAccess);
@@ -12198,12 +12305,7 @@ export async function createApp(
           channel: "production",
           policyActor: user,
           workflow,
-          webhookPayload: {
-            system_prompt: parsed.data.system_prompt,
-            user_prompt: parsed.data.user_prompt,
-            session_id: parsed.data.session_id,
-            variables: parsed.data.variables
-          },
+          webhookPayload: agentWebhookRunPayload(parsed.data),
           variables: parsed.data.variables,
           systemPrompt: parsed.data.system_prompt,
           userPrompt: parsed.data.user_prompt,
@@ -12218,8 +12320,8 @@ export async function createApp(
           triggerType: "webhook_api",
           triggeredBy: user.email
         },
-        progress: { requestInput: parsed.data, customData: parsed.data.customData },
-        history: { requestInput: parsed.data, customData: parsed.data.customData }
+        progress: { requestInput: agentWebhookRequestInput(parsed.data), customData: parsed.data.customData },
+        history: { requestInput: agentWebhookRequestInput(parsed.data), customData: parsed.data.customData }
       },
       { pool: dispatchPoolOf(workflow) }
     );
@@ -12684,7 +12786,7 @@ export async function createApp(
     }) ?? null;
   const findFormWorkflow = async (formPath: string): Promise<{ workflow: Workflow; node: WorkflowNode } | null> => {
     for (const summary of await store.listWorkflows()) {
-      const wf = await productionWorkflow(summary.id);
+      const wf = await productionTriggerWorkflow(summary.id);
       if (!wf) continue;
       const node = formNodeFor(wf, formPath);
       if (node) return { workflow: wf, node };
@@ -12787,6 +12889,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         // Session forms are for people who can see the workflow's project.
         const access = await runAccess.workflow(user, found.workflow.id, "workflow:read", "Form");
         if (!access.ok) return denyRunAccess(reply, access);
+      }
+      // Production's version has unfinished settings: the form still shows, a submission starts no run.
+      const paused = await releaseService.pausedRefusal(found.workflow);
+      if (paused) {
+        reply.code(409);
+        return { error: paused, code: "workflow_unfinished" };
       }
       const submission = asRecord(request.body);
       const executionId = crypto.randomUUID();
@@ -12921,7 +13029,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }) ?? null;
   const findMcpServerWorkflow = async (p: string): Promise<{ workflow: Workflow; node: WorkflowNode } | null> => {
     for (const summary of await store.listWorkflows()) {
-      const wf = await productionWorkflow(summary.id);
+      const wf = await productionTriggerWorkflow(summary.id);
       if (!wf) continue;
       const node = mcpServerNodeFor(wf, p);
       if (node) return { workflow: wf, node };
@@ -12964,6 +13072,12 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           reply.code(401);
           return { error: "Invalid bearer token" };
         }
+      }
+      // Production's version has unfinished settings: the tool is listed, a call starts no run.
+      const paused = await releaseService.pausedRefusal(found.workflow);
+      if (paused) {
+        reply.code(409);
+        return { error: paused, code: "workflow_unfinished" };
       }
       const body = asRecord(request.body);
       const args = asRecord(body.arguments ?? body.args ?? body);
@@ -13032,6 +13146,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     config,
     store,
     loadProductionWorkflow: productionWorkflow,
+    // An unfinished version stays listed; its calls answer `workflow_unfinished`, as the MCP trigger's do.
+    loadCatalogWorkflow: productionTriggerWorkflow,
     productionRefusal: async (id) => await releaseService.productionRefusal(id),
     mcpRegistry,
     providerRegistry,
@@ -13240,7 +13356,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const named = parsed.data.workflow_id;
       const refusal = named && (await runAccess.workflow(user, named, "workflow:read")).ok ? await releaseService.productionRefusal(named) : null;
       reply.code(refusal ? 409 : 404);
-      return { error: refusal ?? "No workflows available" };
+      return productionRefusalBody(refusal, "No workflows available");
     }
     const executeAccess = await runAccess.workflow(user, workflow.id, "workflow:execute");
     if (!executeAccess.ok) return denyRunAccess(reply, executeAccess);
@@ -13306,12 +13422,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             channel: "production",
             policyActor: user,
             workflow,
-            webhookPayload: {
-              system_prompt: parsed.data.system_prompt,
-              user_prompt: parsed.data.user_prompt,
-              session_id: parsed.data.session_id,
-              variables: parsed.data.variables
-            },
+            webhookPayload: agentWebhookRunPayload(parsed.data),
             variables: parsed.data.variables,
             systemPrompt: parsed.data.system_prompt,
             userPrompt: parsed.data.user_prompt,
@@ -13325,8 +13436,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             triggerType: "webhook_api_stream",
             triggeredBy: user.email
           },
-          progress: { requestInput: parsed.data },
-          history: { requestInput: parsed.data }
+          progress: { requestInput: agentWebhookRequestInput(parsed.data) },
+          history: { requestInput: agentWebhookRequestInput(parsed.data) }
         },
         { pool: dispatchPoolOf(workflow), closed: clientGone, admitted: true, passthrough: {
           onNodeStart: (event) => {
@@ -13368,7 +13479,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   const registerConfiguredWebhookRoute = (routePath: "/webhook/:path" | "/webhook-test/:path") => {
     const isTestRoute = routePath.startsWith("/webhook-test");
     // Phase 15.4 — /webhook/ is production traffic (the published version when there is one); /webhook-test/ runs the draft.
-    const loadForRoute = async (id: string) => (isTestRoute ? await store.getWorkflow(id) : await productionWorkflow(id));
+    // Production matches an unfinished version too, and answers 409 for it once the caller passed the trigger's checks.
+    const loadForRoute = async (id: string) => (isTestRoute ? await store.getWorkflow(id) : await productionTriggerWorkflow(id));
     app.route<{ Params: { path: string }; Body: unknown }>({
       method: ["DELETE", "GET", "OPTIONS", "PATCH", "POST", "PUT"],
       url: routePath,
@@ -13452,6 +13564,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         if (!authResult.ok) {
           reply.code(authResult.statusCode);
           return { error: authResult.message };
+        }
+
+        // Production's version has unfinished settings: its live triggers are paused, and no run is created.
+        const paused = isTestRoute ? null : await releaseService.pausedRefusal(match.workflow);
+        if (paused) {
+          reply.code(409);
+          return { error: paused, code: "workflow_unfinished", path: request.params.path };
         }
 
         let parsedInput = parseWebhookRunInput(request.body);
@@ -13713,6 +13832,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           output: result.output ?? null,
           // Phase 12 coverage — under response rules the error text (which can quote run data) stays in the history.
           error: result.status === "error" ? callerErrorOf(result, "Workflow execution failed") : undefined,
+          // A stable code for the failure, when it has one (`workflow_unfinished`: a sub-workflow production refuses).
+          ...(result.status === "error" && result.errorCode ? { code: result.errorCode } : {}),
           ...(result.status === "error" && responseRulesApply(result) ? { executionId } : {}),
           idempotency: security.idempotencyEnabled
             ? {
@@ -16818,6 +16939,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         error: "Request body is too large",
         limitBytes: config.API_BODY_LIMIT_BYTES
       });
+      return;
+    }
+
+    // A model or embedding endpoint the outbound URL checks refuse, or a redirect a model call will not follow: the
+    // caller's configuration, not a server fault.
+    if (error instanceof OutboundUrlBlockedError || error instanceof ModelRedirectRefusedError) {
+      reply.code(400).send({ error: secretService.redact(error.message) });
       return;
     }
 

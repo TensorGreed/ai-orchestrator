@@ -19,6 +19,7 @@ export * from "./scim";
 export * from "./destination-rules";
 
 export * from "./node-credentials";
+export * from "./node-retry";
 export * from "./audit-manifest";
 export * from "./schema-constants";
 export * from "./zip-archive";
@@ -52,3 +53,4 @@ export * from "./pinned-data-marks";
 export * from "./read-capped";
 export * from "./content-documents";
 export * from "./run-prompts";
+export * from "./model-defaults";

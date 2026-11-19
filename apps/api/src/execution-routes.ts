@@ -54,7 +54,7 @@ import { clusterCancelReason } from "./services/cluster-signals.js";
 import type { McpCassetteRunPlan, McpCassetteService } from "./services/mcp-cassette-service.js";
 import type { McpElicitationService } from "./services/mcp-elicitation-service.js";
 import type { CaptureSource } from "./services/replay-capture-service.js";
-import type { ReleaseService } from "./services/release-service.js";
+import { productionRefusalBody, type ReleaseService } from "./services/release-service.js";
 
 type WorkflowExecutePayload = z.infer<typeof workflowExecuteRequestSchema>;
 
@@ -176,7 +176,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const workflow = executeChannel.channel === "production" ? await productionWorkflow(access.workflow.id) : access.workflow;
     if (!workflow) {
       reply.code(409);
-      return { error: await releaseService.productionRefusal(access.workflow.id) ?? "Workflow not found" };
+      return productionRefusalBody(await releaseService.productionRefusal(access.workflow.id), "Workflow not found");
     }
 
     // Phase 8.3 — pre-execution budget check. Block-action budgets reject
@@ -286,7 +286,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const workflow = executeChannel.channel === "production" ? await productionWorkflow(access.workflow.id) : access.workflow;
     if (!workflow) {
       reply.code(409);
-      return { error: await releaseService.productionRefusal(access.workflow.id) ?? "Workflow not found" };
+      return productionRefusalBody(await releaseService.productionRefusal(access.workflow.id), "Workflow not found");
     }
 
     const parsed = workflowExecuteRequestSchema.safeParse(request.body ?? {});

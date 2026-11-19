@@ -33,6 +33,35 @@ exception: the configured host and port are allowed even under
 runs on the internal network. Metadata and link-local addresses stay refused,
 and redirects are never followed.
 
+A model's **base URL** set on a model node, in a provider test, on a `/v1`
+route, on an embedding call or a knowledge base embedder, or in the editor's
+**Load models** request goes through the same policy before the call, and a
+name that does not resolve is refused. The call is then pinned to the
+addresses that were checked, like HTTP Request: a name that answers
+differently on a second lookup cannot move the connection. The URL keeps its
+host name, so TLS (SNI and the certificate check) and the `Host` header are
+the name's. Model calls never follow redirects. Base URLs that come from the
+server's environment (`OLLAMA_BASE_URL`, `AZURE_OPENAI_ENDPOINT`,
+`EVAL_JUDGE_BASE_URL`, `PROVIDER_ENV_KEY_BASE_URLS`) and each provider's own
+default endpoint are neither checked nor pinned. That covers only URLs under
+the configured URL's path: another path on the same host, or a base URL with a
+query or fragment, is checked like any other. Ollama's built-in localhost
+default (used when neither the node nor `OLLAMA_BASE_URL` names one) is
+checked too, so with `OUTBOUND_DENY_PRIVATE` on, set `OLLAMA_BASE_URL`.
+
+A server model key (`OPENAI_API_KEY` and the rest) is only ever sent to that
+provider's own endpoint, to `AZURE_OPENAI_ENDPOINT` for Azure OpenAI, to a
+base URL under one listed in `PROVIDER_ENV_KEY_BASE_URLS` (same origin, and a
+path under the listed path, without percent-encoded `/`, `\` or `.` below
+it), or to `EVAL_JUDGE_BASE_URL` when
+`EVAL_JUDGE_ALLOW_ENV_CREDENTIALS` is on; a node with any other base URL must
+use a secret. A `PROVIDER_ENV_KEY_BASE_URLS` entry written
+`openai=https://gw.example/v1` is for that provider's key only. A bare URL
+gets the key of whichever provider a node picks with it, which is less
+strict: prefer per-provider entries. The two forms cannot be mixed in one
+value. `EVAL_JUDGE_BASE_URL` carries only the judge provider's key
+(`EVAL_JUDGE_PROVIDER_ID`).
+
 Concepts: [the lethal trifecta](/learn/security/lethal-trifecta) shows how URLs become a way for data to leave an agent.
 
 MCP HTTP servers do not go through these checks. For the OAuth discovery,
@@ -97,6 +126,7 @@ the `Host` header are unchanged.
 |---|---|---|
 | `OUTBOUND_DENY_PRIVATE` | `false` | Also block private ranges and localhost for the checked nodes. |
 | `OUTBOUND_ALLOWLIST` | empty | Comma-separated hosts or CIDRs allowed through under `OUTBOUND_DENY_PRIVATE`, e.g. `10.0.0.0/8,*.internal,db.corp:5432`. |
+| `PROVIDER_ENV_KEY_BASE_URLS` | empty | Comma-separated base URLs a server model key may also be sent to, besides each provider's own endpoint (for example your own model gateway). `openai=https://gw.example/v1` is for that provider's key only (providers: `openai`, `anthropic`, `azure_openai`, `gemini`); a bare URL is for any provider's key. |
 
 ## What is not covered
 
@@ -116,8 +146,15 @@ the `Host` header are unchanged.
   [Code execution](./code-execution.md#python-on-the-host).
 - **Other browser channels.** WebRTC, and requests a service worker makes,
   are not routed through the checks.
+- **Model providers from community packages** are checked like the built-in
+  ones, but their connection is pinned only if the adapter sends its requests
+  through the call context's `fetch`; one that uses its own HTTP client is
+  checked, not pinned.
+- **Ollama with no base URL** goes to `OLLAMA_BASE_URL`, or to
+  `http://localhost:11434` when that is unset, without a check (also under
+  `OUTBOUND_DENY_PRIVATE`): the default is the deployment's, not a node's.
 - **Deployment-level endpoints** are infrastructure settings and are not
-  checked: LLM provider base URLs, connector SDK endpoints, and RAG endpoints
+  checked: LLM provider base URLs from the environment, connector SDK endpoints, and RAG endpoints
   that come from environment variables (`QDRANT_ENDPOINT`, `CHROMA_ENDPOINT`
   and the like) rather than from a node. MCP HTTP servers and MCP OAuth
   discovery are not checked either (see above).

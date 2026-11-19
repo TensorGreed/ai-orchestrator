@@ -21,6 +21,15 @@ export const llmProviderConfigSchema = z.object({
   extra: z.record(z.string(), z.unknown()).optional()
 });
 
+/** A node's retry and continue settings (`errorConfig`). */
+export const nodeErrorConfigSchema = z.object({
+  continueOnFail: z.boolean().optional(),
+  retryOnFail: z.boolean().optional(),
+  maxRetries: z.number().int().min(0).optional(),
+  retryIntervalMs: z.number().min(0).optional(),
+  alwaysOutputData: z.boolean().optional()
+});
+
 export const workflowNodeSchema = z.object({
   id: z.string().min(1),
   type: z.enum([
@@ -188,8 +197,60 @@ export const workflowNodeSchema = z.object({
     }
   }),
   disabled: z.boolean().optional(),
-  color: z.string().optional()
+  color: z.string().optional(),
+  /** Per-node retry and continue settings (imported workflows and the JSON contract); the engine reads them before `config`. */
+  errorConfig: nodeErrorConfigSchema.optional()
 });
+
+export interface ErrorConfigRepair {
+  /** The settings that are valid; undefined when none are left. */
+  errorConfig?: z.infer<typeof nodeErrorConfigSchema>;
+  /** The fields that were invalid and are ignored (`errorConfig` itself when it is not an object). */
+  invalidFields: string[];
+}
+
+/**
+ * Splits a stored `errorConfig` into its valid settings and the fields that are not. A save refuses an invalid
+ * `errorConfig`, but a workflow stored before that check (or written straight to the store) may hold one: it still
+ * loads, runs and exports, with the invalid fields ignored.
+ */
+export function repairNodeErrorConfig(raw: unknown): ErrorConfigRepair {
+  if (raw === undefined) return { invalidFields: [] };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { invalidFields: ["errorConfig"] };
+  const record = raw as Record<string, unknown>;
+  const kept: Record<string, unknown> = {};
+  const invalidFields: string[] = [];
+  for (const [key, fieldSchema] of Object.entries(nodeErrorConfigSchema.shape)) {
+    if (!(key in record) || record[key] === undefined) continue;
+    if ((fieldSchema as z.ZodTypeAny).safeParse(record[key]).success) kept[key] = record[key];
+    else invalidFields.push(key);
+  }
+  return {
+    ...(Object.keys(kept).length > 0 ? { errorConfig: kept as z.infer<typeof nodeErrorConfigSchema> } : {}),
+    invalidFields
+  };
+}
+
+/**
+ * A copy of a raw workflow whose nodes keep only the valid fields of their `errorConfig`, with the nodes that had
+ * invalid ones. Anything that is not a workflow-shaped object comes back unchanged.
+ */
+export function repairWorkflowErrorConfigs<T>(raw: T): { workflow: T; repaired: Array<{ nodeId: string; invalidFields: string[] }> } {
+  const record = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
+  if (!record || !Array.isArray(record.nodes)) return { workflow: raw, repaired: [] };
+  const repaired: Array<{ nodeId: string; invalidFields: string[] }> = [];
+  const nodes = record.nodes.map((node: unknown) => {
+    if (!node || typeof node !== "object" || !("errorConfig" in node)) return node;
+    const nodeRecord = node as Record<string, unknown>;
+    const repair = repairNodeErrorConfig(nodeRecord.errorConfig);
+    if (repair.invalidFields.length === 0) return node;
+    repaired.push({ nodeId: String(nodeRecord.id ?? ""), invalidFields: repair.invalidFields });
+    const { errorConfig: _dropped, ...rest } = nodeRecord;
+    return repair.errorConfig ? { ...rest, errorConfig: repair.errorConfig } : rest;
+  });
+  if (repaired.length === 0) return { workflow: raw, repaired };
+  return { workflow: { ...record, nodes } as T, repaired };
+}
 
 export const workflowEdgeSchema = z.object({
   id: z.string().min(1),
@@ -202,6 +263,46 @@ export const workflowEdgeSchema = z.object({
 
 /** Phase 13.1 — a queue worker pool name: a letter or digit, then letters, digits, `_` or `-` (at most 63). */
 export const QUEUE_POOL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
+
+/** The largest test webhook payload a workflow keeps, as JSON text. */
+export const TEST_WEBHOOK_PAYLOAD_MAX_CHARS = 64 * 1024;
+
+/** Field names that hold credentials. A test payload is stored with the workflow and shown to its readers, so it refuses them. */
+const CREDENTIAL_FIELD_NAME =
+  /^(?:.*[_.-])?(?:password|passwd|pwd|passphrase|secret|token|api[_.-]?key|apikey|auth|authorization|credentials?|cookie|bearer|jwt|private[_-]?key|client[_-]?secret|access[_-]?key)s?(?:[_.-].*)?$/i;
+
+/** The field paths of a test payload whose names look like credentials (nested objects and arrays included). */
+export function testWebhookPayloadCredentialFields(value: unknown, path: string[] = []): string[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((item, index) => testWebhookPayloadCredentialFields(item, [...path, String(index)]));
+  }
+  if (!value || typeof value !== "object") return [];
+  return Object.entries(value as Record<string, unknown>).flatMap(([key, child]) => {
+    const childPath = [...path, key];
+    const words = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2");
+    return CREDENTIAL_FIELD_NAME.test(words) ? [childPath.join(".")] : testWebhookPayloadCredentialFields(child, childPath);
+  });
+}
+
+export const testWebhookPayloadSchema = z.record(z.string(), z.unknown()).superRefine((payload, ctx) => {
+  let size = 0;
+  try {
+    size = JSON.stringify(payload).length;
+  } catch {
+    ctx.addIssue({ code: "custom", message: "The test payload must be JSON" });
+    return;
+  }
+  if (size > TEST_WEBHOOK_PAYLOAD_MAX_CHARS) {
+    ctx.addIssue({ code: "custom", message: `The test payload is larger than ${TEST_WEBHOOK_PAYLOAD_MAX_CHARS / 1024} KB` });
+  }
+  const credentials = testWebhookPayloadCredentialFields(payload);
+  if (credentials.length > 0) {
+    ctx.addIssue({
+      code: "custom",
+      message: `The test payload is saved with the workflow, so it cannot hold credentials: remove ${credentials.join(", ")}`
+    });
+  }
+});
 
 export const workflowSettingsSchema = z
   .object({
@@ -220,7 +321,9 @@ export const workflowSettingsSchema = z
     /** Phase 11.2 — agents pause for approval before calling an MCP write tool. */
     writeToolApproval: writeToolApprovalSettingsSchema.optional(),
     /** 13.3 — subject references: which values of a run name the person it is about (stored as keyed hashes only). */
-    dataProtection: workflowDataProtectionSchema.optional()
+    dataProtection: workflowDataProtectionSchema.optional(),
+    /** The editor's test payload for "Webhook run". Stored with the workflow, so it must not hold credentials. */
+    testWebhookPayload: testWebhookPayloadSchema.optional()
   })
   .passthrough();
 
@@ -292,7 +395,9 @@ export const agentWebhookPayloadSchema = z.object({
   customData: z.record(z.string(), z.unknown()).transform((v) => stripReservedCustomData(v)).optional(),
   system_prompt: z.string().optional(),
   user_prompt: z.string().optional(),
-  variables: z.record(z.string(), z.unknown()).optional()
+  variables: z.record(z.string(), z.unknown()).optional(),
+  /** The request body a webhook run receives (the editor's test payload): what `{{webhook.<field>}}` reads. */
+  payload: z.record(z.string(), z.unknown()).optional()
 });
 
 export type WorkflowSchemaInput = z.input<typeof workflowSchema>;

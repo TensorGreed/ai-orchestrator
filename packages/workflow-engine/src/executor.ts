@@ -67,6 +67,13 @@ import {
   deriveWorkflowToolDescriptor,
   workflowToolServerKey,
   effectiveModelName,
+  DEFAULT_RETRY_MAX_DELAY_MS,
+  httpStatusFailsNode,
+  parseRetryAfterMs,
+  repairNodeErrorConfig,
+  type NodeErrorConfig,
+  retryDelayFor,
+  statusInList,
   type DataDestinationRow,
   type DestinationRef,
   type McpToolOpenWorldOverride
@@ -104,6 +111,7 @@ import type {
   WorkflowNode
 } from "@ai-orchestrator/shared";
 import { isAuxiliaryEdge, isExecutionEdge, DescendantCache } from "./graph";
+import { HttpStatusError, httpNetworkError, isNetworkFailure } from "./http-errors";
 import { finishNodeSpan, openNodeSpan, runAgentInSpan, runChildInSpan } from "./run-instrumentation";
 import {
   type RetrieverAdapter,
@@ -144,6 +152,7 @@ import {
 import { renderChart } from "./chart";
 import { workerDelegateToolName } from "./agent-tool-names";
 import { browseUrl, type WebBrowseOptions } from "./web-browse";
+import { applyJsonContentType } from "./http-content-type";
 import {
   DEFAULT_OUTBOUND_GUARD,
   assertOutboundUrlAllowed,
@@ -176,7 +185,7 @@ import { NO_CODE_SANDBOX_PLAN, codeNodesDisabledError, runJavaScriptCode, runPyt
 import { runWithSandboxOwner } from "./quickjs-sandbox";
 import { ownUsage, ownUsageOf, runAsUsageOwner, withoutUsage } from "./usage-ownership";
 import { sortWorkflowNodes, validateWorkflowGraph, computeDepthLevels } from "./validation";
-import { ErrorCategory, MODEL_NOT_ALLOWED_CODE, WorkflowError, remediationForCategory } from "@ai-orchestrator/shared";
+import { ErrorCategory, MODEL_NOT_ALLOWED_CODE, PUBLIC_RUN_ERROR_CODES, WorkflowError, remediationForCategory } from "@ai-orchestrator/shared";
 import { AgentGuardInterrupt, RUNTIME_INTERNAL_TOOL_NAMES, isAgentGuardInterrupt } from "@ai-orchestrator/agent-runtime";
 import { ApprovalHandoffSignal, approvedHandoffKeysFromState, isApprovalHandoffSignal, withoutReservedKeys, type ApprovalHandoffRequest } from "./approval-handoff";
 import { executeGuardNodeStep } from "./guard-node";
@@ -4696,6 +4705,7 @@ async function executeNodeHandler(
 
         if (safeMethod !== "GET" && safeMethod !== "DELETE" && renderedBody.trim()) {
           requestInit.body = renderedBody;
+          applyJsonContentType(requestHeaders, renderedBody);
         }
 
         const response = await guardedFetch(renderedUrl, requestInit, {
@@ -4708,6 +4718,20 @@ async function executeNodeHandler(
         response.headers.forEach((value, key) => {
           responseHeaders[key] = value;
         });
+
+        // 304 Not Modified answers a conditional request: it is not an error. An older node fails only on its retried statuses.
+        if (!response.ok && httpStatusFailsNode(response.status, config, nodeErrorConfigOf(node))) {
+          // The error body is not read into the run: it is outside content the error output would carry unlabelled.
+          await response.body?.cancel().catch(() => undefined);
+          throw HttpStatusError.fromResponse({
+            status: response.status,
+            statusText: response.statusText,
+            method: safeMethod,
+            safeUrl: urlForActivity(renderedUrl),
+            retryable: statusInList(response.status, config.retryOnStatus),
+            retryAfterMs: parseRetryAfterMs(response.headers.get("retry-after"))
+          });
+        }
 
         let parsedBody: unknown = null;
         if (responseType === "text") {
@@ -4731,7 +4755,16 @@ async function executeNodeHandler(
           if (dependencies.abortSignal?.aborted) {
             throw new WorkflowCanceledError(getAbortMessage(dependencies.abortSignal));
           }
-          throw new Error(`HTTP Request node timed out after ${timeoutMs}ms.`);
+          throw new WorkflowError(
+            `HTTP Request ${safeMethod} ${urlForActivity(renderedUrl)} timed out after ${timeoutMs}ms.`,
+            ErrorCategory.CONNECTOR_TRANSIENT,
+            true,
+            { timeoutMs },
+            "The server did not answer in time. Raise the node's Timeout, or check that the server is up; the node retries as set under Retries on Failure."
+          );
+        }
+        if (!(error instanceof HttpStatusError) && !(error instanceof OutboundUrlBlockedError) && isNetworkFailure(error)) {
+          throw httpNetworkError(error, safeMethod, urlForActivity(renderedUrl));
         }
         throw error;
       } finally {
@@ -5763,6 +5796,20 @@ async function executeNodeHandler(
       const embedderId = typeof config.embedderId === "string" ? config.embedderId : "token-embedder";
       const vectorStoreId = typeof config.vectorStoreId === "string" ? config.vectorStoreId : "in-memory-vector-store";
       const vectorStoreConfig = toRecord(config.vectorStoreConfig);
+      // An endpoint or base URL is text. Anything else set there is refused, so it can never be turned into a URL
+      // later while the node is treated as having none (and given the deployment's key).
+      for (const key of ["endpoint", "baseUrl"] as const) {
+        const value = vectorStoreConfig[key];
+        if (value !== undefined && value !== null && typeof value !== "string") {
+          throw new WorkflowError(
+            `The vector store setting "${key}" must be text.`,
+            ErrorCategory.NODE_CONFIG,
+            false,
+            { field: key },
+            `Set "${key}" in the node's vector store settings to a URL, or remove it.`
+          );
+        }
+      }
       // An endpoint or baseUrl set on the node (not a deployment env fallback) goes through the outbound URL checks.
       const nodeFetch = (key: "endpoint" | "baseUrl") =>
         typeof vectorStoreConfig[key] === "string" && String(vectorStoreConfig[key]).trim() ? guardedRagFetch(dependencies) : undefined;
@@ -5780,7 +5827,12 @@ async function executeNodeHandler(
         if (embedderId === "token-embedder") embedder = new TokenEmbeddingAdapter();
         else if (embedderId === "openai-embedder") {
            const apiKey = await ragKey("OPENAI_API_KEY", "baseUrl");
-           embedder = new OpenAIEmbeddingAdapter({ apiKey: apiKey || "", ...vectorStoreConfig, fetcher: nodeFetch("baseUrl") });
+           embedder = new OpenAIEmbeddingAdapter({
+             apiKey: apiKey || "",
+             baseUrl: typeof vectorStoreConfig.baseUrl === "string" && vectorStoreConfig.baseUrl.trim() ? vectorStoreConfig.baseUrl : undefined,
+             model: typeof vectorStoreConfig.model === "string" ? vectorStoreConfig.model : undefined,
+             fetcher: nodeFetch("baseUrl")
+           });
         } else if (embedderId === "azure-openai-embedder") {
            const apiKey = await ragKey("AZURE_OPENAI_API_KEY", "endpoint");
            const endpoint = typeof vectorStoreConfig.endpoint === "string" ? vectorStoreConfig.endpoint : process.env.AZURE_OPENAI_ENDPOINT;
@@ -8206,12 +8258,27 @@ async function executeNodeHandler(
       if (responseTemplate) {
         value = renderTemplate(responseTemplate, templateData);
       } else {
+        // No template: the node's answer, text or prompt; else the run's prompt when one was given (an empty one is not
+        // an answer); else what the parent node(s) sent; else everything. A flow without a prompt or an answer used to
+        // return "" here; it now returns its parent's output.
+        // Each value is read only when the ones before it are missing, so a run's labels come from what it returns.
+        const runPrompt = (key: string) => {
+          const prompt = readData(templateData, key);
+          return prompt === "" ? undefined : prompt;
+        };
+        const parentResult = () => {
+          const parentOutputs = toRecord(readData(templateData, "parent_outputs") ?? context.parentOutputs);
+          const parentIds = Object.keys(parentOutputs);
+          if (parentIds.length === 1) return parentOutputs[parentIds[0]!];
+          return parentIds.length > 1 ? parentOutputs : undefined;
+        };
         value =
           readData(templateData, "answer") ??
           readData(templateData, "text") ??
           readData(templateData, "prompt") ??
-          readData(templateData, "user_prompt") ??
-          readData(templateData, "system_prompt") ??
+          runPrompt("user_prompt") ??
+          runPrompt("system_prompt") ??
+          parentResult() ??
           readWholeData(templateData);
       }
 
@@ -8360,8 +8427,20 @@ async function executeNodeHandler(
 interface RetryConfig {
   enabled: boolean;
   maxAttempts: number;
+  /** The first wait; later waits grow by `backoffMultiplier`, with jitter, up to `maxDelayMs`. */
   delayMs: number;
   backoffMultiplier: number;
+  maxDelayMs: number;
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined;
+}
+
+/** The longest wait between retries: `retryMaxDelayMs` (editor) or `retry.maxDelayMs`, else 30 s. Never below the first wait. */
+function retryMaxDelay(config: Record<string, unknown>, delayMs: number): number {
+  const configured = nonNegativeInteger(config.retryMaxDelayMs) ?? nonNegativeInteger(toRecord(config.retry).maxDelayMs) ?? DEFAULT_RETRY_MAX_DELAY_MS;
+  return Math.max(configured, delayMs);
 }
 
 function getRetryConfig(config: Record<string, unknown>): RetryConfig | undefined {
@@ -8369,14 +8448,25 @@ function getRetryConfig(config: Record<string, unknown>): RetryConfig | undefine
   if (!retry || retry.enabled !== true) {
     return undefined;
   }
+  const delayMs = typeof retry.delayMs === "number" && retry.delayMs >= 0 ? Math.floor(retry.delayMs) : 1000;
   return {
     enabled: true,
     maxAttempts: typeof retry.maxAttempts === "number" && retry.maxAttempts >= 1 ? Math.floor(retry.maxAttempts) : 3,
-    delayMs: typeof retry.delayMs === "number" && retry.delayMs >= 0 ? Math.floor(retry.delayMs) : 1000,
-    backoffMultiplier: typeof retry.backoffMultiplier === "number" && retry.backoffMultiplier >= 1 ? retry.backoffMultiplier : 2
+    delayMs,
+    backoffMultiplier: typeof retry.backoffMultiplier === "number" && retry.backoffMultiplier >= 1 ? retry.backoffMultiplier : 2,
+    maxDelayMs: retryMaxDelay(config, delayMs)
   };
 }
 
+
+/** The output a node's failure is routed to when its On Error is "branch" (Try/Catch's catch output has the same id). */
+const ERROR_OUTPUT_HANDLE = "error";
+
+/** A parent item without the routing markers a branching parent leaves on it. */
+function withoutRoutingKeys(item: Record<string, unknown>): Record<string, unknown> {
+  const { _branchHandle: _handle, _branchHandleFallback: _fallback, ...rest } = item;
+  return rest;
+}
 
 const RETRYABLE_NODE_TYPES = new Set([
   "llm_call",
@@ -8409,27 +8499,44 @@ const RETRYABLE_NODE_TYPES = new Set([
   ...Array.from(TIER2_NODE_TYPES)
 ]);
 
+/** The node's `errorConfig` without fields a save would refuse (a workflow stored before that check may hold some). */
+function nodeErrorConfigOf(node: WorkflowNode): NodeErrorConfig | undefined {
+  return repairNodeErrorConfig(node.errorConfig).errorConfig;
+}
+
 function getRetryConfigForNode(node: WorkflowNode): RetryConfig | undefined {
+  const config = toRecord(node.config);
   // Check node-level errorConfig first
-  if (node.errorConfig?.retryOnFail === true) {
+  const errorConfig = nodeErrorConfigOf(node);
+  if (errorConfig?.retryOnFail === true) {
+    const delayMs = errorConfig.retryIntervalMs ?? 1000;
     return {
       enabled: true,
-      maxAttempts: (node.errorConfig.maxRetries ?? 2) + 1,
-      delayMs: node.errorConfig.retryIntervalMs ?? 1000,
-      backoffMultiplier: 2
+      maxAttempts: (errorConfig.maxRetries ?? 2) + 1,
+      delayMs,
+      backoffMultiplier: 2,
+      maxDelayMs: retryMaxDelay(config, delayMs)
     };
   }
-  const config = toRecord(node.config);
   const explicit = getRetryConfig(config);
   if (explicit) return explicit;
   const retry = toRecord(config.retry);
   if (retry && retry.enabled === false) return undefined;
+  // The editor's Retries on Failure and Delay between Retries (0 retries: the node runs once).
+  const retryCount = nonNegativeInteger(config.retryCount);
+  if (retryCount !== undefined) {
+    if (retryCount === 0) return undefined;
+    const delayMs = nonNegativeInteger(config.retryDelayMs) ?? 1000;
+    return { enabled: true, maxAttempts: retryCount + 1, delayMs, backoffMultiplier: 2, maxDelayMs: retryMaxDelay(config, delayMs) };
+  }
   if (RETRYABLE_NODE_TYPES.has(node.type)) {
+    const delayMs = node.type === "agent_orchestrator" || node.type === "supervisor_node" ? 3000 : 2000;
     return {
       enabled: true,
       maxAttempts: 2,
-      delayMs: node.type === "agent_orchestrator" || node.type === "supervisor_node" ? 3000 : 2000,
-      backoffMultiplier: 2
+      delayMs,
+      backoffMultiplier: 2,
+      maxDelayMs: retryMaxDelay(config, delayMs)
     };
   }
   return undefined;
@@ -8532,12 +8639,27 @@ async function executeNodeWithRetry(
       if (isDelegatedCredentialError(error) || /uses each user's own account/.test(lastError.message) || parseMcpRuntimeRejection(lastError.message)) {
         throw lastError;
       }
-      const errMsg = lastError.message.toLowerCase();
+      // An HTTP status that is not on the node's retry list fails at once (a 404 stays a 404).
+      if (error instanceof HttpStatusError && !error.retryable) {
+        throw error;
+      }
+      // An HTTP status or connection error carries the URL in its message, which can contain these words.
+      const namesRequest = error instanceof HttpStatusError || (error instanceof WorkflowError && error.category === ErrorCategory.CONNECTOR_TRANSIENT);
+      const errMsg = namesRequest ? "" : lastError.message.toLowerCase();
       if (errMsg.includes("quota") || errMsg.includes("billing") || errMsg.includes("limit: 0") || errMsg.includes("rate_limit_exceeded")) {
         throw lastError;
       }
       if (attempt < retry.maxAttempts) {
-        const delay = retry.delayMs * Math.pow(retry.backoffMultiplier, attempt - 1);
+        let delay = retryDelayFor(retry, attempt);
+        if (error instanceof HttpStatusError && error.retryAfterMs !== undefined) {
+          // The server said when to come back: sooner is pointless, and a wait past the cap is not made.
+          if (error.retryAfterMs > retry.maxDelayMs) {
+            throw error.final(
+              `the server asked to retry after ${Math.ceil(error.retryAfterMs / 1000)} s (Retry-After), longer than the node's maximum retry delay of ${retry.maxDelayMs} ms`
+            );
+          }
+          delay = Math.max(delay, error.retryAfterMs);
+        }
         emitNodeActivity(dependencies, node.id, {
           kind: "retry",
           scope: "node",
@@ -9346,6 +9468,13 @@ async function executeWorkflowRun(
   // When a branching node (if_node, switch_node, try_catch) runs, we add
   // all nodes on non-taken branches to this set.
   const skippedByBranch = new Set<string>(request.resumeState?.skippedByBranch ?? []);
+  /**
+   * Nodes skipped only because a node whose Error output reaches them succeeded. Another node's failure can still
+   * route to them (a shared error handler); a skip by an IF, a Switch or another branch is final.
+   */
+  const errorOutputOnlySkips = new Set<string>();
+  /** Nodes a failed node's Error output routed to: a later success of another node does not skip them. */
+  const errorOutputActivated = new Set<string>();
   const loopInlineExecutedNodes = new Set<string>();
 
   // try_catch error routing: maps try_catch nodeId -> error branch target nodeIds
@@ -9412,6 +9541,34 @@ async function executeWorkflowRun(
           for (const candidate of descendantCache.getNodeAndDescendants(target)) {
             if (!protectedNodes.has(candidate)) {
               skippedByBranch.add(candidate);
+              errorOutputOnlySkips.delete(candidate);
+            }
+          }
+        }
+      }
+    }
+
+    // The `error` output of any other node runs only when the node fails (On Error = branch).
+    if (node.type !== "try_catch" && activeBranch !== ERROR_OUTPUT_HANDLE && activeBranchFallback !== ERROR_OUTPUT_HANDLE) {
+      const errorTargets = branchTargets.get(node.id)?.get(ERROR_OUTPUT_HANDLE) ?? [];
+      if (errorTargets.length > 0) {
+        const takenTargets = workflow.edges
+          .filter(
+            (edge) =>
+              edge.source === node.id &&
+              isExecutionEdge(edge) &&
+              edge.sourceHandle !== ERROR_OUTPUT_HANDLE &&
+              (!edge.sourceHandle || !activeBranch || edge.sourceHandle === activeBranch || edge.sourceHandle === activeBranchFallback)
+          )
+          .map((edge) => edge.target);
+        const protectedNodes = descendantCache.getReachableFromRoots(takenTargets);
+        for (const target of errorTargets) {
+          for (const candidate of descendantCache.getNodeAndDescendants(target)) {
+            if (!protectedNodes.has(candidate) && !errorOutputActivated.has(candidate)) {
+              if (!skippedByBranch.has(candidate)) {
+                skippedByBranch.add(candidate);
+                errorOutputOnlySkips.add(candidate);
+              }
             }
           }
         }
@@ -9431,6 +9588,44 @@ async function executeWorkflowRun(
       }
       tryCatchScopes.set(node.id, { errorTargets, successDescendants });
     }
+  };
+
+  /**
+   * On Error = branch: the targets of the failed node's `error` output run and
+   * every other output (the main one included) is skipped, except nodes the
+   * error output also reaches. False when nothing is connected to `error`.
+   *
+   * A node another branch (an IF, a Switch) already skipped stays skipped, as
+   * when the branch runs after this node. Only a resumed approval clears skips
+   * on its error output (the state it was paused with, as before).
+   */
+  const routeFailureToErrorOutput = (nodeId: string, options: { clearSkips?: boolean } = {}): boolean => {
+    const errorTargets = branchTargets.get(nodeId)?.get(ERROR_OUTPUT_HANDLE) ?? [];
+    if (errorTargets.length === 0) {
+      return false;
+    }
+    const protectedNodes = descendantCache.getReachableFromRoots(errorTargets);
+    for (const target of errorTargets) {
+      for (const candidate of [target, ...descendantCache.getDescendants(target)]) {
+        if (options.clearSkips || errorOutputOnlySkips.has(candidate)) {
+          skippedByBranch.delete(candidate);
+          errorOutputOnlySkips.delete(candidate);
+        }
+        errorOutputActivated.add(candidate);
+      }
+    }
+    for (const edge of workflow.edges) {
+      if (edge.source !== nodeId || edge.sourceHandle === ERROR_OUTPUT_HANDLE || !isExecutionEdge(edge)) {
+        continue;
+      }
+      for (const candidate of descendantCache.getNodeAndDescendants(edge.target)) {
+        if (!protectedNodes.has(candidate)) {
+          skippedByBranch.add(candidate);
+          errorOutputOnlySkips.delete(candidate);
+        }
+      }
+    }
+    return true;
   };
 
   if (request.resumeState && request.approvalDecision) {
@@ -9527,6 +9722,8 @@ async function executeWorkflowRun(
       // Nothing more to record: the routed output or the re-run carries on below.
     } else if (request.approvalDecision.decision === "approve") {
       nodeOutputs.set(waitingNode.id, decisionPayload);
+      // An approval is a success: the node's Error output (On Error = branch) does not run.
+      applySuccessfulNodeRouting(waitingNode, decisionPayload);
       // Phase 16 — the decision comes from a person.
       labelState.set(waitingNode.id, unionLabels([labelState.get(waitingNode.id), labelsOf(["user"])]));
       endorseApproval(waitingNode.id, "human_approval", request.approvalDecision.actedBy, decidedAt, shownAtPause);
@@ -9560,6 +9757,7 @@ async function executeWorkflowRun(
           for (const desc of scope.successDescendants) {
             if (desc !== waitingNode.id) {
               skippedByBranch.add(desc);
+              errorOutputOnlySkips.delete(desc);
             }
           }
           for (const errorTarget of scope.errorTargets) {
@@ -9592,28 +9790,7 @@ async function executeWorkflowRun(
           });
           hadContinuedErrors = true;
         } else if (onError === "branch" && branchTargets.has(waitingNode.id)) {
-          const handleMap = branchTargets.get(waitingNode.id)!;
-          const errorBranchTargets = handleMap.get("error") ?? [];
-          if (errorBranchTargets.length > 0) {
-            const protectedNodes = descendantCache.getReachableFromRoots(errorBranchTargets);
-            for (const [handle, targets] of handleMap.entries()) {
-              if (handle === "error") {
-                for (const target of targets) {
-                  skippedByBranch.delete(target);
-                  for (const desc of descendantCache.getDescendants(target)) {
-                    skippedByBranch.delete(desc);
-                  }
-                }
-              } else {
-                for (const target of targets) {
-                  for (const candidate of descendantCache.getNodeAndDescendants(target)) {
-                    if (!protectedNodes.has(candidate)) {
-                      skippedByBranch.add(candidate);
-                    }
-                  }
-                }
-              }
-            }
+          if (routeFailureToErrorOutput(waitingNode.id, { clearSkips: true })) {
             nodeOutputs.set(waitingNode.id, {
               ...decisionPayload,
               error: rejectionError
@@ -9992,7 +10169,7 @@ async function executeWorkflowRun(
     const startedAtNode = nowIso();
     const nodeConfig = toRecord(node.config);
     const requestedOnError: "stop" | "continue" | "branch" =
-      node.errorConfig?.continueOnFail === true ? "continue" : getOnError(nodeConfig);
+      nodeErrorConfigOf(node)?.continueOnFail === true ? "continue" : getOnError(nodeConfig);
     // Phase 11.2 — a failed Approval Gate or Human Approval (rejected with
     // nowhere to go, or a request that could not be rendered) never continues:
     // "continue" would run the next step with nobody asked. The error branch still works.
@@ -10091,7 +10268,10 @@ async function executeWorkflowRun(
         }
         const rawItems = Array.isArray(candidateItems) ? candidateItems : [candidateItems];
         const scopedItems = rawItems.slice(0, maxIterations);
-        const downstreamNodeIds = graphIndexes.outgoingExecution.get(node.id) ?? [];
+        // The loop's Error output is not part of its body: it runs only when the loop fails.
+        const downstreamNodeIds = [
+          ...new Set(workflow.edges.filter((edge) => edge.source === node.id && isExecutionEdge(edge) && edge.sourceHandle !== ERROR_OUTPUT_HANDLE).map((edge) => edge.target))
+        ];
         const downstreamNodes = downstreamNodeIds
           .map((childId) => graphIndexes.nodeById.get(childId))
           .filter((child): child is WorkflowNode => Boolean(child));
@@ -10268,6 +10448,7 @@ async function executeWorkflowRun(
 
         nodeOutputs.set(node.id, output);
         labelState.set(node.id, labelState.finalize(unionLabels([itemLabels, ...passLabels]), output));
+        applySuccessfulNodeRouting(node, output);
         nodeResults.push({
           nodeId: node.id,
           status: "success",
@@ -10454,23 +10635,30 @@ async function executeWorkflowRun(
           : remediationForCategory(errorCategoryName, providerError ? { providerId: providerError.provider } : undefined);
       const errorRetryable =
         error instanceof WorkflowError ? error.retryable : providerError?.retryable;
+      // A stable code the error carries (such as `workflow_unfinished` for a refused sub-workflow), for API callers.
+      // Only codes meant for callers: a network error's system code (ECONNREFUSED and the like) stays internal.
+      const metadataCode = error instanceof WorkflowError ? error.metadata?.code : undefined;
+      const errorCode = typeof metadataCode === "string" && PUBLIC_RUN_ERROR_CODES.has(metadataCode) ? metadataCode : undefined;
       const errorFields = {
         error: errorMessage,
         errorCategory: errorCategoryName,
+        ...(errorCode ? { errorCode } : {}),
         errorRemediation,
         retryable: errorRetryable,
         // Phase 12 coverage — check and retry model calls of a failed node still count in the run's usage.
         ...(nodeCheckUsage.length > 0 ? { output: withRecordedCheckUsage({}, nodeCheckUsage) } : {})
       };
 
-      // Check if this node is inside a try_catch scope
+      // Check if this node is inside a try_catch scope (a node's own connected Error output wins over an enclosing Try/Catch)
       let caughtByTryCatch = false;
-      for (const [tryCatchId, scope] of tryCatchScopes.entries()) {
+      const ownErrorOutput = onError === "branch" && (branchTargets.get(node.id)?.get(ERROR_OUTPUT_HANDLE)?.length ?? 0) > 0;
+      for (const [tryCatchId, scope] of ownErrorOutput ? [] : tryCatchScopes.entries()) {
         if (scope.successDescendants.has(node.id)) {
           // Skip remaining nodes in the success branch
           for (const desc of scope.successDescendants) {
             if (desc !== node.id) {
               skippedByBranch.add(desc);
+              errorOutputOnlySkips.delete(desc);
             }
           }
           // Un-skip error branch targets (they were initially skipped by branch routing)
@@ -10541,31 +10729,18 @@ async function executeWorkflowRun(
         }
 
         if (onError === "branch" && branchTargets.has(node.id)) {
-          const handleMap = branchTargets.get(node.id)!;
-          const errorBranchTargets = handleMap.get("error") ?? [];
-          if (errorBranchTargets.length > 0) {
-            const protectedNodes = descendantCache.getReachableFromRoots(errorBranchTargets);
-            // Skip non-error branches, un-skip error branch
-            for (const [handle, targets] of handleMap.entries()) {
-              if (handle === "error") {
-                for (const t of targets) {
-                  skippedByBranch.delete(t);
-                  for (const desc of descendantCache.getDescendants(t)) {
-                    skippedByBranch.delete(desc);
-                  }
-                }
-              } else {
-                for (const t of targets) {
-                  for (const candidate of descendantCache.getNodeAndDescendants(t)) {
-                    if (!protectedNodes.has(candidate)) {
-                      skippedByBranch.add(candidate);
-                    }
-                  }
-                }
-              }
-            }
-            nodeOutputs.set(node.id, { error: errorMessage });
-            labelState.set(node.id, labelScope.pendingLabels());
+          if (routeFailureToErrorOutput(node.id)) {
+            // The error output carries the item the node failed on (so the fallback reads the same fields) and the error.
+            nodeOutputs.set(node.id, {
+              ...withoutUsage(withoutRoutingKeys(merged)),
+              error: errorMessage,
+              errorCategory: errorCategoryName,
+              failedNodeId: node.id,
+              failedNodeType: node.type,
+              ...(error instanceof HttpStatusError ? { status: error.status } : {})
+            });
+            // The raw input item goes on: it keeps all of its input labels (nothing was declassified on the way out).
+            labelState.set(node.id, labelScope.inputLabels());
             nodeResults.push({
               nodeId: node.id,
               status: "error",
@@ -10648,6 +10823,7 @@ async function executeWorkflowRun(
           nodeResults,
           error: failedError,
           errorCategory: errorCategoryName,
+          ...(errorCode ? { errorCode } : {}),
           errorRemediation
         };
         // Phase 6.4 — the error can quote what the failed node read: a caller (a Workflow Tool) keeps those labels.
@@ -10662,9 +10838,19 @@ async function executeWorkflowRun(
     }
   }
 
+  // No Output node ran: the result is the output of the last node, in run order, that produced one (a skipped branch has none).
   if (finalOutput === undefined && nodeOrder.length > 0) {
-    finalOutput = nodeOutputs.get(nodeOrder[nodeOrder.length - 1]);
-    labelState.outputNodeId = nodeOrder[nodeOrder.length - 1];
+    let lastNodeId = nodeOrder[nodeOrder.length - 1];
+    // Only a workflow without an Output node looks further back: one whose Output was skipped keeps returning nothing.
+    const hasOutputNode = workflow.nodes.some((candidate) => candidate.type === "output");
+    for (let position = nodeOrder.length - 1; position >= 0 && !hasOutputNode; position -= 1) {
+      if (nodeOutputs.get(nodeOrder[position]!) !== undefined) {
+        lastNodeId = nodeOrder[position]!;
+        break;
+      }
+    }
+    finalOutput = nodeOutputs.get(lastNodeId);
+    labelState.outputNodeId = lastNodeId;
   }
 
   // Phase: agent_clarify — surface the clarification at the top of the

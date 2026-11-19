@@ -18,12 +18,16 @@ import {
   WORKFLOW_SCHEMA_VERSION,
   editorRunPrompts,
   nodeDefinitions,
+  pickDefaultModelProvider,
+  repairNodeErrorConfig,
+  withDefaultModelProvider,
   type Folder,
   type McpElicitationView,
   type Project,
   type ImportReport,
   type Workflow,
-  type WorkflowExecutionResult
+  type WorkflowExecutionResult,
+  type WorkflowValidationIssue
 } from "@ai-orchestrator/shared";
 import {
   ApiError,
@@ -109,7 +113,8 @@ import {
   type LiveNodeResult,
   type TraceStreamHandlers
 } from "./lib/run-trace";
-import { computeAttachmentSlots, orbitPositions } from "./lib/stages";
+import { ORBIT, attachedNodeIds, computeAttachmentSlots, orbitPositions } from "./lib/stages";
+import { chooseSourceHandle, findFreePosition, insertPositionAfter, planInsertConnection } from "./lib/canvas-insert";
 import { canvasRunPreview, hasTestData } from "./lib/run-data";
 import { newNodeConfig } from "./lib/trigger-paths";
 import {
@@ -170,6 +175,9 @@ import { WorkflowCardMenu } from "./components/WorkflowCardMenu";
 import { WorkflowCanvasArea, type ImportPanelBinding } from "./components/WorkflowCanvasArea";
 import { ExternalImportDialog, type ExternalImportSource } from "./components/ExternalImportDialog";
 import { SecretSaveWarnings } from "./components/SecretSaveWarnings";
+import { DraftWarnings } from "./components/DraftWarnings";
+import { WebhookTestPayloadDialog } from "./components/WebhookTestPayloadDialog";
+import { apiErrorText, draftIssueShown } from "./lib/draft-validation";
 import { canvasLabelBadge, type CanvasLabelBadge } from "./lib/taint-sources";
 import {
   forgetImportReport,
@@ -183,6 +191,8 @@ import { MfaGateCard } from "./components/MfaGateCard";
 import { StepUpPrompt } from "./components/StepUpPrompt";
 import { isPaletteDefinition, withAgentToolPresets } from "./lib/agent-tool-presets";
 import { paletteKey } from "./components/NodePalette";
+import { GraphHistory, movedNodeIds } from "./lib/graph-history";
+import { AUXILIARY_HANDLES, CHAT_MODEL_NODE_TYPES, validateConnection } from "./lib/connection-rules";
 import { BreakGlassBanner } from "./components/BreakGlassBanner";
 import { BreakGlassConfirmCard } from "./components/BreakGlassConfirmCard";
 import { breakGlassLinkFromHash, stripBreakGlassFragment, type BreakGlassLink } from "./lib/break-glass";
@@ -198,6 +208,13 @@ interface DefinitionNode {
 }
 
 type AgentAttachmentHandle = "chat_model" | "memory" | "tool" | "worker" | "guard" | "protection";
+
+/** The output a node added from the palette connects after, and where to put it when a connection was dropped. */
+interface PaletteInsertSource {
+  nodeId: string;
+  handle: string | null;
+  position?: { x: number; y: number };
+}
 
 interface NodeDrawerContext {
   title: string;
@@ -282,6 +299,8 @@ interface NodeClipboardNodePayload {
   relativePosition: { x: number; y: number };
   disabled?: boolean;
   color?: EditorNodeData["color"];
+  /** Node fields the editor keeps but does not edit (errorConfig, ...). */
+  nodeExtras?: Record<string, unknown>;
 }
 
 interface NodeClipboardEdgePayload {
@@ -308,25 +327,16 @@ const statusColors: Record<string, string> = {
   waiting_approval: "#a154f2",
   canceled: "#8a5a44"
 };
-const auxiliaryHandles = new Set(["chat_model", "memory", "tool", "worker", "guard", "protection"]);
-const chatModelNodeTypes: EditorNodeData["nodeType"][] = [
-  "openai_chat_model",
-  "anthropic_chat_model",
-  "ollama_chat_model",
-  "openai_compatible_chat_model",
-  "ai_gateway_chat_model",
-  "azure_openai_chat_model",
-  "google_gemini_chat_model",
-  "llm_call"
-];
-const chatModelDrawerNodeTypes = chatModelNodeTypes.filter((type) => type !== "llm_call");
-const agentPrimaryInputNodeTypes = new Set<EditorNodeData["nodeType"]>(["webhook_input", "text_input", "user_prompt"]);
+const auxiliaryHandles = AUXILIARY_HANDLES;
+const chatModelNodeTypes = CHAT_MODEL_NODE_TYPES;
+// LLM Call is offered too: its provider picker includes the built-in Echo model, which runs without a key.
+const chatModelDrawerNodeTypes = chatModelNodeTypes;
 
 function buildAgentAttachmentDrawerContext(sourceNodeId: string, sourceHandle: AgentAttachmentHandle): NodeDrawerContext {
   if (sourceHandle === "chat_model") {
     return {
       title: "Language Models",
-      description: "Choose a chat model to attach to this AI Agent.",
+      description: "Choose a chat model to attach to this AI Agent. LLM Call can use the built-in Echo model, no key needed.",
       allowedTypes: chatModelDrawerNodeTypes,
       sourceNodeId,
       sourceHandle
@@ -513,6 +523,13 @@ function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+/** The workflow with its "Webhook run" test payload set (an empty payload removes it). */
+function withTestWebhookPayload(workflow: Workflow, payload: Record<string, unknown>): Workflow {
+  const { testWebhookPayload: _previous, ...settings } = workflow.settings ?? {};
+  if (Object.keys(payload).length > 0) return { ...workflow, settings: { ...settings, testWebhookPayload: payload } };
+  return workflow.settings ? { ...workflow, settings } : workflow;
+}
+
 function storeLocalWipWorkflow(workflow: Workflow): void {
   storeTabWipWorkflow(workflow, MAX_LOCAL_WIP_CHARS);
 }
@@ -545,21 +562,6 @@ function dateTimeLocalToIso(value: string): string | undefined {
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
-}
-
-function getValidationMessages(payload?: Record<string, unknown>): string[] {
-  const validation = asRecord(payload?.validation);
-  const issues = validation?.issues;
-  if (!Array.isArray(issues)) {
-    return [];
-  }
-
-  return issues
-    .map((issue) => {
-      const issueRecord = asRecord(issue);
-      return issueRecord && typeof issueRecord.message === "string" ? issueRecord.message : "";
-    })
-    .filter((message) => message.length > 0);
 }
 
 function toWorkflowExecutionResult(detail: ExecutionHistoryDetail): WorkflowExecutionResult {
@@ -858,7 +860,8 @@ function decorateEdge(edge: Edge, nodes: EditorNode[]): Edge {
 
   const isAuxiliary = Boolean(attachmentStyle) || Boolean(isGenericAuxiliary);
   // Colours are tokens so both themes resolve them (see src/styles/tokens.css).
-  const stroke = attachmentStyle?.stroke ?? (isAuxiliary ? "var(--line-strong)" : "var(--edge)");
+  const isErrorOutputEdge = !isAuxiliary && edge.sourceHandle === "error";
+  const stroke = attachmentStyle?.stroke ?? (isAuxiliary ? "var(--line-strong)" : isErrorOutputEdge ? "var(--err)" : "var(--edge)");
 
   // Workers represent recursive Supervisor delegation — give them a slightly
   // thicker line so the hierarchy reads even in dense graphs.
@@ -877,7 +880,7 @@ function decorateEdge(edge: Edge, nodes: EditorNode[]): Edge {
     if (edge.sourceHandle === "true") label = "True";
     else if (edge.sourceHandle === "false") label = "False";
     else if (edge.sourceHandle === "success") label = "Try (Success)";
-    else if (edge.sourceHandle === "error") label = "Catch (Error)";
+    else if (edge.sourceHandle === "error") label = source?.data.nodeType === "try_catch" ? "Catch (Error)" : "Error";
     else if (edge.sourceHandle === "default") label = "Default";
     else if (source?.data.nodeType === "chat_intent_router") {
       const routerLabels: Record<string, string> = {
@@ -1162,6 +1165,7 @@ function StudioApp() {
   const [writeToolDialogOpen, setWriteToolDialogOpen] = useState(false);
   const [subjectRefsDialogOpen, setSubjectRefsDialogOpen] = useState(false);
   const [errorWorkflowDialogOpen, setErrorWorkflowDialogOpen] = useState(false);
+  const [webhookPayloadDialogOpen, setWebhookPayloadDialogOpen] = useState(false);
   const [shareWorkflowTarget, setShareWorkflowTarget] = useState<{
     id: string;
     name: string;
@@ -1170,6 +1174,8 @@ function StudioApp() {
 
   const [definitions, setDefinitions] = useState<DefinitionNode[]>(nodeDefinitions as unknown as DefinitionNode[]);
   const [mcpServerDefinitions, setMcpServerDefinitions] = useState<MCPServerDefinition[]>([]);
+  // Hosted model providers whose key the API server's environment sets (from /api/definitions, builders only).
+  const [envModelProviders, setEnvModelProviders] = useState<string[]>([]);
   const [secrets, setSecrets] = useState<SecretListItem[]>([]);
 
   const [loading, setLoading] = useState(false);
@@ -1238,6 +1244,8 @@ function StudioApp() {
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [showNodeDrawer, setShowNodeDrawer] = useState(false);
   const [nodeDrawerContext, setNodeDrawerContext] = useState<NodeDrawerContext | null>(null);
+  // The output a node picked in the palette is connected after (its `+`, or a connection dropped on the canvas).
+  const [paletteInsertSource, setPaletteInsertSource] = useState<PaletteInsertSource | null>(null);
   const [showShortcutsPanel, setShowShortcutsPanel] = useState(false);
   const [navDrawerOpen, setNavDrawerOpen] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">(() => {
@@ -1576,55 +1584,68 @@ function StudioApp() {
     }
   }, [theme]);
 
-  // Undo/redo history stack. Snapshot is (nodes, edges) pairs. We push on
-  // meaningful mutations (add/delete/duplicate/paste/config-update) via
-  // pushHistorySnapshot() from callsites; positional drag changes are NOT
-  // pushed on every frame (too noisy) — they're pushed once per drag end.
-  const historyStackRef = useRef<Array<{ nodes: EditorNode[]; edges: Edge[] }>>([]);
-  const redoStackRef = useRef<Array<{ nodes: EditorNode[]; edges: Edge[] }>>([]);
+  // One undo/redo history for every graph change (add, delete, move, connect, disconnect, Clear, paste, duplicate,
+  // config edits, Tidy): each call site pushes the graph as it was just before its change. A drag is one step,
+  // recorded when it ends and only when something moved.
+  const historyRef = useRef(new GraphHistory<EditorNode, Edge>(HISTORY_STACK_LIMIT));
   const suppressHistoryRef = useRef(false);
+  const dragStartSnapshotRef = useRef<{ nodes: EditorNode[]; edges: Edge[] } | null>(null);
 
   const pushHistorySnapshot = useCallback(() => {
     if (suppressHistoryRef.current) return;
-    historyStackRef.current.push({
-      nodes: cloneJson(nodes as EditorNode[]),
-      edges: cloneJson(edges as Edge[])
-    });
-    if (historyStackRef.current.length > HISTORY_STACK_LIMIT) {
-      historyStackRef.current.shift();
-    }
-    redoStackRef.current = [];
+    historyRef.current.push({ nodes: nodes as EditorNode[], edges: edges as Edge[] });
   }, [edges, nodes]);
 
+  const restoreHistorySnapshot = useCallback(
+    (snapshot: { nodes: EditorNode[]; edges: Edge[] } | null) => {
+      if (!snapshot) return;
+      suppressHistoryRef.current = true;
+      // A snapshot holds the graph, not the run: each node keeps the run status, preview and telemetry it shows now.
+      setNodes((current) => {
+        const live = new Map(current.map((node) => [node.id, node.data as EditorNodeData]));
+        return snapshot.nodes.map((node) => {
+          const now = live.get(node.id);
+          if (!now) return node;
+          const { executionStatus, executionPreview, telemetry, liveStartedAtMs, pinned, labelBadge } = now;
+          return { ...node, data: { ...node.data, executionStatus, executionPreview, telemetry, liveStartedAtMs, pinned, labelBadge } };
+        });
+      });
+      setEdges(snapshot.edges);
+      setTimeout(() => {
+        suppressHistoryRef.current = false;
+      }, 0);
+    },
+    [setEdges, setNodes]
+  );
+
   const undo = useCallback(() => {
-    const prev = historyStackRef.current.pop();
-    if (!prev) return;
-    redoStackRef.current.push({
-      nodes: cloneJson(nodes as EditorNode[]),
-      edges: cloneJson(edges as Edge[])
-    });
-    suppressHistoryRef.current = true;
-    setNodes(prev.nodes);
-    setEdges(prev.edges);
-    setTimeout(() => {
-      suppressHistoryRef.current = false;
-    }, 0);
-  }, [edges, nodes, setEdges, setNodes]);
+    restoreHistorySnapshot(historyRef.current.undo({ nodes: nodes as EditorNode[], edges: edges as Edge[] }));
+  }, [edges, nodes, restoreHistorySnapshot]);
 
   const redo = useCallback(() => {
-    const next = redoStackRef.current.pop();
-    if (!next) return;
-    historyStackRef.current.push({
-      nodes: cloneJson(nodes as EditorNode[]),
-      edges: cloneJson(edges as Edge[])
-    });
-    suppressHistoryRef.current = true;
-    setNodes(next.nodes);
-    setEdges(next.edges);
-    setTimeout(() => {
-      suppressHistoryRef.current = false;
-    }, 0);
-  }, [edges, nodes, setEdges, setNodes]);
+    restoreHistorySnapshot(historyRef.current.redo({ nodes: nodes as EditorNode[], edges: edges as Edge[] }));
+  }, [edges, nodes, restoreHistorySnapshot]);
+
+  // Undo never crosses into another workflow; reloading the same one (after a save) keeps its history.
+  useEffect(() => {
+    historyRef.current.clear();
+    dragStartSnapshotRef.current = null;
+  }, [currentWorkflow.id]);
+
+  const handleNodeDragStart = useCallback(() => {
+    if (dragStartSnapshotRef.current) return;
+    dragStartSnapshotRef.current = cloneJson({ nodes: nodes as EditorNode[], edges: edges as Edge[] });
+  }, [edges, nodes]);
+
+  const handleNodeDragStop = useCallback((draggedNodes: Array<Pick<EditorNode, "id" | "position">>) => {
+    const before = dragStartSnapshotRef.current;
+    dragStartSnapshotRef.current = null;
+    if (!before || suppressHistoryRef.current) return;
+    // A node on an agent's port snaps back onto its orbit, so dragging one changes nothing.
+    const attached = attachedNodeIds(computeAttachmentSlots(before.nodes, before.edges));
+    const moved = movedNodeIds(before.nodes, draggedNodes).filter((id) => !attached.has(id));
+    if (moved.length > 0) historyRef.current.push(before);
+  }, []);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -1666,7 +1687,8 @@ function StudioApp() {
               nodeType: node.data.nodeType,
               config: cloneJson(node.data.config ?? {}),
               disabled: node.data.disabled,
-              color: node.data.color
+              color: node.data.color,
+              ...(node.data.nodeExtras ? { nodeExtras: cloneJson(node.data.nodeExtras) } : {})
             }
           };
         });
@@ -1742,6 +1764,56 @@ function StudioApp() {
     pickRequestRef.current += 1;
   }, [currentWorkflow.id]);
 
+  // What the saved workflow still lacks (a draft saves with unfinished node settings), for the editor's notice.
+  const [draftIssues, setDraftIssues] = useState<{ workflowId: string; issues: WorkflowValidationIssue[]; liveTriggersPaused: boolean } | null>(null);
+  // A workflow stored before error settings were checked can hold invalid values: runs ignore them, but a save (and so
+  // the editor's Run) refuses them. One click strips them from every node, keeping each node's valid values.
+  const removeInvalidErrorConfigs = useCallback(() => {
+    pushHistorySnapshot();
+    setNodes((current) =>
+      current.map((node) => {
+        const extras = (node.data as EditorNodeData).nodeExtras;
+        const repair = repairNodeErrorConfig(extras?.errorConfig);
+        if (!extras || repair.invalidFields.length === 0) return node;
+        const { errorConfig: _invalid, ...rest } = extras;
+        const nodeExtras = repair.errorConfig ? { ...rest, errorConfig: repair.errorConfig } : rest;
+        const data = { ...(node.data as EditorNodeData) };
+        if (Object.keys(nodeExtras).length > 0) data.nodeExtras = nodeExtras;
+        else delete data.nodeExtras;
+        return { ...node, data };
+      })
+    );
+    setDraftIssues((current) =>
+      current ? { ...current, issues: current.issues.filter((issue) => issue.code !== "invalid_error_config") } : current
+    );
+  }, [pushHistorySnapshot, setNodes]);
+  const draftIssuesWorkflowIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    setDraftIssues((current) => (current && current.workflowId !== currentWorkflow.id ? null : current));
+    if (!authUser || !currentWorkflowExists) return;
+    let cancelled = false;
+    const workflowId = currentWorkflow.id;
+    // On open only what stops a run is shown; after a save, notes (such as "no Output node") too.
+    const afterSave = draftIssuesWorkflowIdRef.current === workflowId;
+    draftIssuesWorkflowIdRef.current = workflowId;
+    inBackground(() => validateStoredWorkflow(workflowId))
+      .then((validation) => {
+        if (cancelled) return;
+        const issues = (validation.issues ?? []).filter((issue) => draftIssueShown(issue, afterSave));
+        setDraftIssues({ workflowId, issues, liveTriggersPaused: validation.liveTriggersPaused === true });
+      })
+      .catch(() => {
+        // The notice is a hint: without it the editor works as before, and a run still reports what is missing.
+      });
+    return () => {
+      cancelled = true;
+    };
+    // A save gives the workflow a new updatedAt, so the notice follows each save.
+  }, [authUser, currentWorkflow.id, currentWorkflow.updatedAt, currentWorkflowExists]);
+
+  /** The workflow whose latest finished run was already offered to the canvas since it was opened (once per open). */
+  const restoredRunWorkflowIdRef = useRef<string | null>(null);
+
   // Starting a run (or any other busy action) follows the newest data again.
   useEffect(() => {
     if (busy) {
@@ -1786,6 +1858,9 @@ function StudioApp() {
         }
 
         const latest = history.items[0];
+        // Opening a workflow shows its latest run once, finished or not; clearing the logs afterwards keeps them clear.
+        const restoreOnOpen = restoredRunWorkflowIdRef.current !== currentWorkflow.id;
+        restoredRunWorkflowIdRef.current = currentWorkflow.id;
         if (!latest) {
           return;
         }
@@ -1804,14 +1879,15 @@ function StudioApp() {
           return;
         }
 
-        if (!sameExecution && !isInProgressStatus) {
+        const canvasEmpty = !latestResult || latestResult.workflowId !== currentWorkflow.id;
+        if (!sameExecution && !isInProgressStatus && !(restoreOnOpen && canvasEmpty)) {
           latestDebugExecutionIdRef.current = latest.id;
           return;
         }
 
         // New external execution detected (e.g., REST client / webhook call).
         // Reset previous debug trace immediately before loading full details.
-        if (!sameExecution) {
+        if (!sameExecution && isInProgressStatus) {
           setExecutionResult(
             createPartialExecutionResult(
               latest.workflowId || currentWorkflow.id,
@@ -1828,15 +1904,19 @@ function StudioApp() {
         }
 
         latestDebugExecutionIdRef.current = latest.id;
-        setExecutionResult(toWorkflowExecutionResult(detail));
+        const loaded = toWorkflowExecutionResult(detail);
+        // Restoring a finished run on open: a run started (or picked) meanwhile wins over it.
+        const restoring = !sameExecution && !isInProgressStatus;
+        setExecutionResult((current) => (restoring && current && current.workflowId === currentWorkflowIdRef.current ? current : loaded));
       } catch {
         // Polling failures should not interrupt editor usage.
       }
     };
 
+    // A just-opened workflow loads its latest run at once; later polls follow every two seconds.
     const firstPollTimerId = window.setTimeout(() => {
       void syncLatestExecution();
-    }, 2000);
+    }, restoredRunWorkflowIdRef.current === currentWorkflow.id ? 2000 : 0);
     const timerId = window.setInterval(() => {
       void syncLatestExecution();
     }, 2000);
@@ -2001,7 +2081,8 @@ function StudioApp() {
               y: node.position.y - minY
             },
             disabled: node.data.disabled,
-            color: node.data.color
+            color: node.data.color,
+            ...(node.data.nodeExtras ? { nodeExtras: cloneJson(node.data.nodeExtras) } : {})
           })),
           edges: edges
             .filter((edge) => selectedNodeIds.has(edge.source) && selectedNodeIds.has(edge.target))
@@ -2074,7 +2155,8 @@ function StudioApp() {
               nodeType: entry.nodeType,
               config: cloneJson(entry.config ?? {}),
               disabled: entry.disabled,
-              color: entry.color
+              color: entry.color,
+              ...(entry.nodeExtras && typeof entry.nodeExtras === "object" ? { nodeExtras: cloneJson(entry.nodeExtras) } : {})
             }
           };
         });
@@ -2118,10 +2200,12 @@ function StudioApp() {
 
   const handleDeleteEdgeById = useCallback(
     (edgeId: string) => {
+      if (!edges.some((edge) => edge.id === edgeId)) return;
+      pushHistorySnapshot();
       setEdges((currentEdges) => currentEdges.filter((edge) => edge.id !== edgeId));
       setError(null);
     },
-    [setEdges]
+    [edges, pushHistorySnapshot, setEdges]
   );
 
   const refreshSecrets = useCallback(async () => {
@@ -2196,6 +2280,9 @@ function StudioApp() {
       const editor = workflowToEditor(workflow);
       const decoratedEdges = editor.edges.map((edge) => decorateEdge(edge, editor.nodes as EditorNode[]));
 
+      // The graph is replaced from the server: undo must not bring back the graph from before.
+      historyRef.current.clear();
+      dragStartSnapshotRef.current = null;
       setCurrentWorkflow(workflow);
       setNodes(editor.nodes as EditorNode[]);
       setEdges(decoratedEdges);
@@ -2356,6 +2443,7 @@ function StudioApp() {
         }
         setDefinitions(definitionPayload.nodes);
         setMcpServerDefinitions(definitionPayload.mcpServers);
+        setEnvModelProviders(definitionPayload.envModelProviders ?? []);
       } catch (definitionError) {
         if (cancelled) {
           return;
@@ -2493,10 +2581,8 @@ function StudioApp() {
 
     let message = apiError instanceof Error ? apiError.message : fallbackMessage;
     if (apiError instanceof ApiError) {
-      const validationMessages = getValidationMessages(apiError.payload);
-      if (validationMessages.length) {
-        message = `${message}: ${validationMessages.join("; ")}`;
-      }
+      // The issues the message does not already list (a save error names them itself).
+      message = apiErrorText(message, apiError.payload);
     }
 
     setError(message);
@@ -2994,6 +3080,11 @@ function StudioApp() {
       return;
     }
 
+    // A new workflow not saved yet stays open.
+    if (unsavedNewWorkflowRef.current?.id === currentWorkflow.id) {
+      return;
+    }
+
     // An explicit open (Home card, palette, MCP pages) is still fetching; it decides what shows.
     if (pendingWorkflowLoadIdRef.current) {
       return;
@@ -3030,16 +3121,37 @@ function StudioApp() {
     return editorToWorkflow(currentWorkflow, nodes as EditorNode[], edges as Edge[]);
   }, [currentWorkflow, edges, nodes]);
 
-  const persistWorkflow = useCallback(async () => {
-    const workflow = buildCurrentWorkflow();
-    const saved = await saveWorkflow(workflow);
-    const workflows = await fetchWorkflows({ projectId: activeProjectId });
-    setWorkflowList(workflows);
-    setCurrentWorkflow(saved);
-    storeLocalWipWorkflow(saved);
-    // Phase 15.4 — a save is a new version: the version pill reloads.
-    setReleaseRefreshKey((key) => key + 1);
-    return saved;
+  /**
+   * The save in flight. Saves run one after another, and a save of the same content as the one in flight (Save
+   * clicked while a new workflow's first-edit save runs, a run that saves first) joins it: each save is a version.
+   */
+  const saveInFlightRef = useRef<{ content: string; promise: Promise<Workflow> } | null>(null);
+
+  const persistWorkflow = useCallback(async (adjust?: (workflow: Workflow) => Workflow) => {
+    const built = buildCurrentWorkflow();
+    const workflow = adjust ? adjust(built) : built;
+    const { updatedAt: _updatedAt, ...comparable } = workflow;
+    const content = JSON.stringify(comparable);
+    const previous = saveInFlightRef.current;
+    if (previous && previous.content === content) return await previous.promise;
+    const promise = (async () => {
+      if (previous) await previous.promise.catch(() => undefined);
+      const saved = await saveWorkflow(workflow);
+      const workflows = await fetchWorkflows({ projectId: activeProjectId });
+      setWorkflowList(workflows);
+      setCurrentWorkflow(saved);
+      storeLocalWipWorkflow(saved);
+      // Phase 15.4 — a save is a new version: the version pill reloads.
+      setReleaseRefreshKey((key) => key + 1);
+      return saved;
+    })();
+    const entry = { content, promise };
+    saveInFlightRef.current = entry;
+    try {
+      return await promise;
+    } finally {
+      if (saveInFlightRef.current === entry) saveInFlightRef.current = null;
+    }
   }, [buildCurrentWorkflow]);
 
   // The pill opens Evaluations on Release gates once; the next visit starts on Golden sets.
@@ -3407,18 +3519,20 @@ function StudioApp() {
     refreshExecutionHistory,
   ]);
 
-  const handleWebhookExecute = useCallback(async () => {
+  const handleWebhookExecute = useCallback(async (testPayload: Record<string, unknown>) => {
     let trace: TraceStreamHandlers | null = null;
     try {
       setBusy(true);
       setRunningExecutionId(null);
       setError(null);
       startVisualRun();
-      const saved = await persistWorkflow();
+      // The payload is kept in the workflow's settings, so the next "Webhook run" starts from it.
+      const saved = await persistWorkflow((workflow) => withTestWebhookPayload(workflow, testPayload));
       trace = createRunTraceHandlers(saved.id);
       const result = await runWebhookStream({
         workflow_id: saved.id,
-        ...buildWebhookExecutionPayload()
+        ...buildWebhookExecutionPayload(),
+        payload: testPayload
       }, {
         ...traceStreamCallbacks(trace, (event) => setError((current) => current ?? event.message)),
         onExecutionStarted: (event) => {
@@ -3778,61 +3892,97 @@ function StudioApp() {
     [closeExternalImport, importNativeText]
   );
 
-  const handleCreateWorkflow = useCallback(async () => {
+  /**
+   * A workflow made with "New workflow" lives only in the editor until its first edit (or a save or run): then it is
+   * saved. Opening another workflow first discards it, so abandoned clicks leave no empty workflows behind.
+   */
+  const unsavedNewWorkflowRef = useRef<{ id: string; baseline: string | null; saving: boolean } | null>(null);
+
+  const handleCreateWorkflow = useCallback(() => {
     if (!canManageWorkflows) {
       setError("You do not have permission to create workflows.");
       return;
     }
 
-    try {
-      setBusy(true);
-      setError(null);
-      const draft = createBlankWorkflow();
-      const userPromptNodeId = createNodeId("user_prompt");
-      const outputNodeId = createNodeId("output");
-      const savedDraft = await saveWorkflow({
-        ...draft,
-        name: `Workflow ${workflowList.length + 1}`,
-        nodes: [
-          {
-            id: userPromptNodeId,
-            type: "user_prompt",
-            name: "User Prompt",
-            position: { x: 140, y: 180 },
-            config: {
-              text: "What should I help with?"
-            }
-          },
-          {
-            id: outputNodeId,
-            type: "output",
-            name: "Output",
-            position: { x: 420, y: 180 },
-            config: {
-              responseTemplate: "{{user_prompt}}",
-              outputKey: "result"
-            }
+    setError(null);
+    const draft = createBlankWorkflow();
+    const userPromptNodeId = createNodeId("user_prompt");
+    const outputNodeId = createNodeId("output");
+    const workflow: Workflow = {
+      ...draft,
+      name: `Workflow ${workflowList.length + 1}`,
+      nodes: [
+        {
+          id: userPromptNodeId,
+          type: "user_prompt",
+          name: "User Prompt",
+          position: { x: 140, y: 180 },
+          config: {
+            text: "What should I help with?"
           }
-        ],
-        edges: [
-          {
-            id: createEdgeId(userPromptNodeId, outputNodeId),
-            source: userPromptNodeId,
-            target: outputNodeId
+        },
+        {
+          id: outputNodeId,
+          type: "output",
+          name: "Output",
+          position: { x: 420, y: 180 },
+          config: {
+            responseTemplate: "{{user_prompt}}",
+            outputKey: "result"
           }
-        ]
-      });
-      const workflows = await fetchWorkflows({ projectId: activeProjectId });
-      setWorkflowList(workflows);
-      hydrateWorkflow(savedDraft);
-      setActiveMode("editor");
-      storeLocalWipWorkflow(savedDraft);
-    } catch (createError) {
-      handleApiError(createError, "Failed to create workflow");
-    } finally {
-      setBusy(false);
+        }
+      ],
+      edges: [
+        {
+          id: createEdgeId(userPromptNodeId, outputNodeId),
+          source: userPromptNodeId,
+          target: outputNodeId
+        }
+      ]
+    };
+    unsavedNewWorkflowRef.current = { id: workflow.id, baseline: null, saving: false };
+    // Its first save shows every note, as any save does.
+    draftIssuesWorkflowIdRef.current = workflow.id;
+    // A slower load of another workflow must not replace the new one.
+    workflowLoadSeqRef.current += 1;
+    pendingWorkflowLoadIdRef.current = null;
+    hydrateWorkflow(workflow);
+    setActiveMode("editor");
+  }, [canManageWorkflows, hydrateWorkflow, workflowList.length]);
+
+  // The first edit of a new workflow saves it.
+  useEffect(() => {
+    const pending = unsavedNewWorkflowRef.current;
+    if (!pending) return;
+    if (pending.id !== currentWorkflow.id || currentWorkflowExists) {
+      // Saved by a save or a run, or left for another workflow.
+      unsavedNewWorkflowRef.current = null;
+      return;
     }
-  }, [canManageWorkflows, handleApiError, hydrateWorkflow, workflowList.length]);
+    let signature: string;
+    try {
+      const snapshot = editorToWorkflow(currentWorkflow, nodes as EditorNode[], edges as Edge[]);
+      signature = JSON.stringify({ name: snapshot.name, nodes: snapshot.nodes, edges: snapshot.edges });
+    } catch {
+      return;
+    }
+    if (pending.baseline === null) {
+      pending.baseline = signature;
+      return;
+    }
+    if (pending.saving || signature === pending.baseline) return;
+    pending.saving = true;
+    persistWorkflow()
+      .then(() => {
+        if (unsavedNewWorkflowRef.current === pending) unsavedNewWorkflowRef.current = null;
+      })
+      .catch((saveError: unknown) => {
+        // Tried again on the next edit; the error says why it did not save.
+        pending.saving = false;
+        pending.baseline = signature;
+        handleApiError(saveError, "Failed to save workflow");
+      });
+  }, [currentWorkflow, currentWorkflowExists, edges, handleApiError, nodes, persistWorkflow]);
 
   const handleDuplicateWorkflow = useCallback(
     async (workflowId: string) => {
@@ -4245,7 +4395,8 @@ function StudioApp() {
               nodeType: src.data.nodeType,
               config: cloneJson(src.data.config ?? {}),
               disabled: src.data.disabled,
-              color: src.data.color
+              color: src.data.color,
+              ...(src.data.nodeExtras ? { nodeExtras: cloneJson(src.data.nodeExtras) } : {})
             }
           };
           setNodes((current) => [
@@ -4294,6 +4445,7 @@ function StudioApp() {
       config: Record<string, unknown>;
       disabled?: boolean;
       color?: EditorNodeData["color"];
+      nodeExtras?: Record<string, unknown>;
     }) => {
       if (!editingNodeId) {
         return;
@@ -4302,20 +4454,21 @@ function StudioApp() {
       const normalizedLabel = payload.label.trim();
       pushHistorySnapshot();
       setNodes((existing) =>
-        existing.map((node) =>
-          node.id === editingNodeId
-            ? {
-                ...node,
-                data: {
-                  ...node.data,
-                  label: normalizedLabel || node.data.label,
-                  config: payload.config,
-                  disabled: payload.disabled,
-                  color: payload.color
-                }
-              }
-            : node
-        )
+        existing.map((node) => {
+          if (node.id !== editingNodeId) return node;
+          const data: EditorNodeData = {
+            ...node.data,
+            label: normalizedLabel || node.data.label,
+            config: payload.config,
+            disabled: payload.disabled,
+            color: payload.color
+          };
+          if (payload.nodeExtras) {
+            if (Object.keys(payload.nodeExtras).length > 0) data.nodeExtras = payload.nodeExtras;
+            else delete data.nodeExtras;
+          }
+          return { ...node, data };
+        })
       );
       setEditingNodeId(null);
       setError(null);
@@ -4328,12 +4481,62 @@ function StudioApp() {
     setShowNodeDrawer(true);
   }, []);
 
+  /** Pans the canvas, keeping the zoom, so a node placed at `position` is in view. */
+  const revealCanvasPosition = useCallback(
+    (position: { x: number; y: number }) => {
+      const bounds = flowWrapperRef.current?.getBoundingClientRect();
+      if (!reactFlowInstance || !bounds || bounds.width === 0 || bounds.height === 0) return;
+      const { x: panX, y: panY, zoom } = reactFlowInstance.getViewport();
+      const left = position.x * zoom + panX;
+      const top = position.y * zoom + panY;
+      const right = left + ORBIT.cardWidth * zoom;
+      const bottom = top + ORBIT.cardHeight * zoom;
+      const margin = 24;
+      if (left >= margin && top >= margin && right <= bounds.width - margin && bottom <= bounds.height - margin) return;
+      reactFlowInstance.setCenter(position.x + ORBIT.cardWidth / 2, position.y + ORBIT.cardHeight / 2, { zoom, duration: 240 });
+    },
+    [reactFlowInstance]
+  );
+
+  /**
+   * The node a new palette node connects after: the output whose `+` was used, else the one selected node (not a
+   * node on an agent's port, not a sticky note). Null when there is none.
+   */
+  const resolveInsertSource = useCallback(
+    (explicit: PaletteInsertSource | null): { node: EditorNode; handle: string | null; position?: { x: number; y: number } } | null => {
+      const attached = attachedNodeIds(computeAttachmentSlots(nodes as EditorNode[], edges));
+      if (explicit) {
+        const node = (nodes as EditorNode[]).find((candidate) => candidate.id === explicit.nodeId);
+        return node && !attached.has(node.id) ? { node, handle: explicit.handle, position: explicit.position } : null;
+      }
+      const selected = (nodes as EditorNode[]).filter((node) => node.selected);
+      if (selected.length !== 1) return null;
+      const node = selected[0]!;
+      if (node.data.nodeType === "sticky_note") return null;
+      if (attached.has(node.id)) return null;
+      return { node, handle: chooseSourceHandle(node, edges) };
+    },
+    [edges, nodes]
+  );
+
   const createNodeFromDefinition = useCallback(
-    (definition: DefinitionNode, position?: { x: number; y: number }, attachContext?: NodeDrawerContext | null) => {
+    (
+      definition: DefinitionNode,
+      position?: { x: number; y: number },
+      attachContext?: NodeDrawerContext | null,
+      insertSource?: PaletteInsertSource | null
+    ) => {
       const id = createNodeId(definition.type as EditorNodeData["nodeType"]);
-      const fallbackPosition = reactFlowInstance
-        ? reactFlowInstance.project({ x: window.innerWidth / 2 - 120, y: 180 })
-        : { x: 160, y: 120 };
+      const bounds = flowWrapperRef.current?.getBoundingClientRect();
+      const fallbackPosition = findFreePosition(
+        reactFlowInstance
+          ? reactFlowInstance.project({
+              x: (bounds ? bounds.width : window.innerWidth) / 2 - ORBIT.cardWidth / 2,
+              y: (bounds ? bounds.height : window.innerHeight) / 2 - ORBIT.cardHeight / 2
+            })
+          : { x: 160, y: 120 },
+        nodes as EditorNode[]
+      );
       const sourceNode = attachContext?.sourceNodeId
         ? nodes.find((node) => node.id === attachContext.sourceNodeId)
         : undefined;
@@ -4349,19 +4552,46 @@ function StudioApp() {
         return orbitPositions(sourceNode.id, slots, sourceNode.position)[id];
       })();
 
+      // A step node (not an agent attachment, not a drop) goes after the selected node or the output whose `+` was used.
+      const insertAfter = attachContext?.sourceHandle || (position && !insertSource) ? null : resolveInsertSource(insertSource ?? null);
+      const insertPosition = insertAfter
+        ? insertAfter.position ?? insertPositionAfter(insertAfter.node, insertAfter.handle, nodes as EditorNode[])
+        : undefined;
+      // The same rules as dragging a connection: a refused edge leaves the node placed but unconnected, with the notice.
+      const connectPlan = insertAfter
+        ? planInsertConnection(
+            insertAfter.node,
+            insertAfter.handle,
+            { id, data: { nodeType: definition.type, label: definition.label } },
+            nodes as EditorNode[],
+            edges
+          )
+        : null;
+      const connectAfter = insertAfter && connectPlan?.kind === "connect" ? { node: insertAfter.node, handle: connectPlan.sourceHandle } : null;
+
       const newNode: Node<EditorNodeData> = {
         id,
         type: definition.type === "sticky_note" ? "stickyNote" : "workflowNode",
-        position: position ?? attachmentPosition ?? fallbackPosition,
+        position: position ?? attachmentPosition ?? insertPosition ?? fallbackPosition,
+        // A step node starts selected, so the next one added connects after it.
+        selected: !attachContext?.sourceHandle,
         data: {
           label: definition.label,
           nodeType: definition.type as EditorNodeData["nodeType"],
-          config: newNodeConfig(definition.type, definition.sampleConfig)
+          // A new model node starts on a configured provider (a server key, else a saved secret) or on Echo.
+          config: withDefaultModelProvider(
+            definition.type,
+            newNodeConfig(definition.type, definition.sampleConfig),
+            pickDefaultModelProvider({ envProviders: envModelProviders, secrets })
+          )
         }
       };
 
       pushHistorySnapshot();
-      setNodes((existing) => [...existing, newNode]);
+      setNodes((existing) => [
+        ...(newNode.selected ? existing.map((node) => (node.selected ? { ...node, selected: false } : node)) : existing),
+        newNode
+      ]);
       if (attachContext?.sourceNodeId && attachContext.sourceHandle) {
         const edgeNodes = [...(nodes as EditorNode[]), newNode as EditorNode];
         const edge = decorateEdge(
@@ -4386,10 +4616,23 @@ function StudioApp() {
             : existing;
           return addEdge(edge, baseEdges);
         });
+      } else if (connectAfter) {
+        const edge = decorateEdge(
+          {
+            id: createEdgeId(connectAfter.node.id, id),
+            source: connectAfter.node.id,
+            target: id,
+            sourceHandle: connectAfter.handle ?? undefined,
+            targetHandle: undefined
+          },
+          [...(nodes as EditorNode[]), newNode as EditorNode]
+        );
+        setEdges((existing) => addEdge(edge, existing.map((candidate) => (candidate.selected ? { ...candidate, selected: false } : candidate))));
       }
-      setError(null);
+      if (!attachContext?.sourceHandle) revealCanvasPosition(newNode.position);
+      setError(connectPlan?.kind === "refused" ? connectPlan.message : null);
     },
-    [edges, nodes, pushHistorySnapshot, reactFlowInstance, setEdges, setNodes]
+    [edges, envModelProviders, nodes, pushHistorySnapshot, reactFlowInstance, resolveInsertSource, revealCanvasPosition, secrets, setEdges, setNodes]
   );
 
   const onConnect = useCallback(
@@ -4399,111 +4642,21 @@ function StudioApp() {
       }
       const source = connection.source;
       const target = connection.target;
-      const sourceNode = nodes.find((node) => node.id === source);
-      const targetNode = nodes.find((node) => node.id === target);
-      const expectedTargetType: Record<string, EditorNodeData["nodeType"] | EditorNodeData["nodeType"][]> = {
-        chat_model: chatModelNodeTypes,
-        memory: "local_memory",
-        tool: ["mcp_tool", "workflow_tool"],
-        worker: ["agent_orchestrator", "supervisor_node"],
-        guard: "guard",
-        protection: "guard_protection"
-      };
-      const expectedHandleByTargetType: Partial<Record<EditorNodeData["nodeType"], string>> = {
-        llm_call: "chat_model",
-        openai_chat_model: "chat_model",
-        anthropic_chat_model: "chat_model",
-        ollama_chat_model: "chat_model",
-        openai_compatible_chat_model: "chat_model",
-        ai_gateway_chat_model: "chat_model",
-        azure_openai_chat_model: "chat_model",
-        google_gemini_chat_model: "chat_model",
-        local_memory: "memory",
-        mcp_tool: "tool",
-        workflow_tool: "tool"
-      };
-
-      let sourceHandle = connection.sourceHandle ?? "";
-      if ((sourceNode?.data.nodeType === "agent_orchestrator" || sourceNode?.data.nodeType === "supervisor_node") && !sourceHandle && targetNode) {
-        const inferred = expectedHandleByTargetType[targetNode.data.nodeType];
-        if (inferred) {
-          sourceHandle = inferred;
-        } else if (targetNode.data.nodeType === "agent_orchestrator" || targetNode.data.nodeType === "supervisor_node") {
-          sourceHandle = "worker";
-        } else if (targetNode.data.nodeType === "guard") {
-          sourceHandle = "guard";
-        }
+      const verdict = validateConnection({ source, target, sourceHandle: connection.sourceHandle }, nodes as EditorNode[], edges);
+      if (!verdict.ok) {
+        setError(verdict.message);
+        return;
       }
-      if (sourceNode?.data.nodeType === "guard" && targetNode?.data.nodeType === "guard_protection" && (!sourceHandle || sourceHandle === "pass")) {
-        sourceHandle = "protection";
-      }
+      const sourceHandle = verdict.sourceHandle ?? "";
 
-      if ((targetNode?.data.nodeType === "agent_orchestrator" || targetNode?.data.nodeType === "supervisor_node") && sourceNode) {
-        const requiredHandle = expectedHandleByTargetType[sourceNode.data.nodeType];
-        if (requiredHandle) {
-          setError(
-            `Attach '${sourceNode.data.label}' from the Agent '${requiredHandle}' port (drag edge from Agent to node).`
-          );
-          return;
-        }
-      }
-
-      const isAgentAttachmentHandle = auxiliaryHandles.has(sourceHandle);
-
-      if (isAgentAttachmentHandle) {
-        const carrierOk =
-          sourceHandle === "protection"
-            ? sourceNode?.data.nodeType === "guard"
-            : sourceNode?.data.nodeType === "agent_orchestrator" || sourceNode?.data.nodeType === "supervisor_node";
-        if (!carrierOk) {
-          setError(
-            sourceHandle === "protection"
-              ? "The protection handle can only be used from a Content Rules node."
-              : "chat_model/memory/tool/worker/guard handles can only be used from an Agent Orchestrator or Supervisor node."
-          );
-          return;
-        }
-
-        const requiredType = expectedTargetType[sourceHandle];
-        if (requiredType) {
-          const typeMatches = Array.isArray(requiredType) 
-            ? requiredType.includes(targetNode?.data.nodeType as any)
-            : targetNode?.data.nodeType === requiredType;
-            
-          if (!typeMatches) {
-            setError(`Invalid attachment. '${sourceHandle}' must connect to a '${Array.isArray(requiredType) ? requiredType.join(" or ") : requiredType}' node.`);
-            return;
-          }
-        }
-      }
-
-      if (!isAgentAttachmentHandle && targetNode?.data.nodeType === "agent_orchestrator" && sourceNode) {
-        const incomingPrimaryInputTypes = new Set<EditorNodeData["nodeType"]>();
-
-        for (const edge of edges) {
-          const existingIsAttachment = edge.sourceHandle ? auxiliaryHandles.has(edge.sourceHandle) : false;
-          if (existingIsAttachment || edge.target !== target) {
-            continue;
-          }
-          const existingSourceNode = nodes.find((node) => node.id === edge.source);
-          const existingSourceType = existingSourceNode?.data.nodeType;
-          if (existingSourceType && agentPrimaryInputNodeTypes.has(existingSourceType)) {
-            incomingPrimaryInputTypes.add(existingSourceType);
-          }
-        }
-
-        if (agentPrimaryInputNodeTypes.has(sourceNode.data.nodeType)) {
-          incomingPrimaryInputTypes.add(sourceNode.data.nodeType);
-        }
-
-        if (incomingPrimaryInputTypes.size > 1) {
-          setError(
-            `Agent can only use one primary input type. Found: ${[...incomingPrimaryInputTypes].sort().join(", ")}.`
-          );
-          return;
-        }
-      }
-
+      const alreadyConnected = edges.some(
+        (edge) =>
+          edge.source === source &&
+          edge.target === target &&
+          (edge.sourceHandle ?? null) === (sourceHandle || null) &&
+          (edge.targetHandle ?? null) === (connection.targetHandle ?? null)
+      );
+      if (!alreadyConnected) pushHistorySnapshot();
       setEdges((existing) => {
         const edge = decorateEdge(
           {
@@ -4520,7 +4673,7 @@ function StudioApp() {
       });
       setError(null);
     },
-    [edges, nodes, setEdges]
+    [edges, nodes, pushHistorySnapshot, setEdges]
   );
 
   const onDrop = useCallback(
@@ -4994,6 +5147,16 @@ function StudioApp() {
             </div>
           )}
           {error && <div className="error-banner global-banner">{error}</div>}
+          {activeMode === "editor" && draftIssues && draftIssues.workflowId === currentWorkflow.id ? (
+            <DraftWarnings
+              issues={draftIssues.issues}
+              liveTriggersPaused={draftIssues.liveTriggersPaused}
+              nodeLabel={(nodeId) => (nodes as EditorNode[]).find((node) => node.id === nodeId)?.data.label}
+              onSelectNode={openNodeConfig}
+              onRemoveInvalidErrorConfig={removeInvalidErrorConfigs}
+              onDismiss={() => setDraftIssues(null)}
+            />
+          ) : null}
           {secretMessage && <div className="info-banner global-banner">{secretMessage}</div>}
 
           {activeMode === "dashboard" && (
@@ -5029,10 +5192,10 @@ function StudioApp() {
                   )}
                   <button
                     className="pg-btn primary"
-                    onClick={() => void handleCreateWorkflow()}
+                    onClick={() => handleCreateWorkflow()}
                     disabled={busy || !canManageWorkflows}
                   >
-                    {busy ? "Creating…" : "New workflow"}
+                    New workflow
                   </button>
                 </div>
               </header>
@@ -5266,20 +5429,33 @@ function StudioApp() {
               onCloseNodeDrawer={() => {
                 setShowNodeDrawer(false);
                 setNodeDrawerContext(null);
+                setPaletteInsertSource(null);
               }}
               onOpenNodeDrawer={() => {
                 setNodeDrawerContext(null);
+                setPaletteInsertSource(null);
                 setShowNodeDrawer(true);
               }}
+              onInsertFromHandle={(nodeId, handle, position) => {
+                setNodeDrawerContext(null);
+                setPaletteInsertSource({ nodeId, handle, position });
+                setShowNodeDrawer(true);
+              }}
+              insertAfterLabel={nodeDrawerContext ? null : resolveInsertSource(paletteInsertSource)?.node.data.label ?? null}
               groupedDefinitions={groupedDefinitions}
-              onCreateNodeFromDefinition={(definition) => createNodeFromDefinition(definition, undefined, nodeDrawerContext)}
+              onCreateNodeFromDefinition={(definition) =>
+                createNodeFromDefinition(definition, undefined, nodeDrawerContext, nodeDrawerContext ? null : paletteInsertSource)
+              }
               onOpenAgentAttachmentDrawer={handleOpenAgentAttachmentDrawer}
               nodes={nodes}
               edges={edges}
               nodeTypes={nodeTypes}
               edgeTypes={edgeTypes}
               onNodesChange={onNodesChange}
+              onNodeDragStart={handleNodeDragStart}
+              onNodeDragStop={handleNodeDragStop}
               onEdgesChange={(changes) => {
+                if (changes.some((change) => change.type === "remove")) pushHistorySnapshot();
                 onEdgesChange(changes);
                 setEdges((current) => current.map((edge) => decorateEdge(edge, nodes as EditorNode[])));
               }}
@@ -5289,6 +5465,13 @@ function StudioApp() {
               onOpenNodeConfig={openNodeConfig}
               reactFlowInstance={reactFlowInstance}
               onClearCanvas={() => {
+                if (nodes.length === 0 && edges.length === 0) return;
+                const count = nodes.length;
+                const confirmed = window.confirm(
+                  `Remove ${count === 1 ? "the 1 node" : `all ${count} nodes`} and their connections from the canvas? You can undo this with Ctrl+Z.`
+                );
+                if (!confirmed) return;
+                pushHistorySnapshot();
                 setNodes([]);
                 setEdges([]);
                 setExecutionResult(null);
@@ -5299,9 +5482,7 @@ function StudioApp() {
               onExecuteWorkflow={() => {
                 void handleExecute();
               }}
-              onExecuteWebhook={() => {
-                void handleWebhookExecute();
-              }}
+              onExecuteWebhook={() => setWebhookPayloadDialogOpen(true)}
               onCancelRun={() => {
                 void handleCancelActiveRun();
               }}
@@ -5956,6 +6137,18 @@ function StudioApp() {
             })
           }
           onClose={() => setSubjectRefsDialogOpen(false)}
+        />
+      )}
+
+      {webhookPayloadDialogOpen && (
+        <WebhookTestPayloadDialog
+          payload={currentWorkflow.settings?.testWebhookPayload}
+          busy={busy}
+          onRun={(payload) => {
+            setWebhookPayloadDialogOpen(false);
+            void handleWebhookExecute(payload);
+          }}
+          onClose={() => setWebhookPayloadDialogOpen(false)}
         />
       )}
 

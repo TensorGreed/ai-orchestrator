@@ -91,7 +91,7 @@ Two things to know:
 
 ## Variant: retrieve from a connector
 
-[`rag-flow.json`](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/rag-flow.json) loads documents from a **Connector Source** (Google Drive) on every run and retrieves from them in memory, with no knowledge base. As shipped it calls a local Ollama model (`llama3.1`). We ran it with the echo model and no Google credentials: the connector ran in demo-fallback mode and returned five built-in sample documents, and retrieval put the three closest to "How does MCP fit into an AI workflow builder?" into the prompt. Use a knowledge base when the documents should be ingested once and kept; use a connector for small sets that change between runs.
+[`rag-flow.json`](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/rag-flow.json) loads documents from a **Connector Source** (Google Drive) on every run and retrieves from them in memory, with no knowledge base. As shipped it runs on the built-in echo model. We ran it that way with no Google credentials: the connector ran in demo-fallback mode and returned five built-in sample documents, and retrieval put the three closest to "How does MCP fit into an AI workflow builder?" into the prompt. Use a knowledge base when the documents should be ingested once and kept; use a connector for small sets that change between runs.
 
 ## Make it yours
 

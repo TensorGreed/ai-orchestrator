@@ -1058,6 +1058,8 @@ export async function runWebhookStream(
     system_prompt?: string;
     user_prompt?: string;
     variables?: Record<string, unknown>;
+    /** The request body the webhook receives: what `{{webhook.<field>}}` reads. */
+    payload?: Record<string, unknown>;
   },
   handlers: WorkflowExecuteStreamHandlers = {}
 ) {
@@ -1077,6 +1079,8 @@ export async function fetchDefinitions() {
     providers: unknown[];
     connectors: unknown[];
     mcpServers: Array<{ id: string; label: string; description: string }>;
+    /** Hosted model providers whose API key the server's environment sets (builders only). */
+    envModelProviders?: string[];
   }>("/api/definitions");
 }
 

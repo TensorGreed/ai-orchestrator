@@ -457,6 +457,20 @@ describe("Human Approval timeouts and replays", () => {
     expect(last(result, "approve")?.input).toMatchObject({ decision: "reject", timedOut: true });
   });
 
+  it("runs a Human Approval's Error output only on a rejection, not on an approval", async () => {
+    const wf = workflow(
+      "wf-human-error-output",
+      [node("in", "manual_trigger"), node("ask", "human_approval", { approvalMessage: "ok?", timeoutMinutes: 5, onError: "branch" }), node("after", "output"), node("handler", "output")],
+      [{ source: "in", target: "ask" }, { source: "ask", target: "after" }, { source: "ask", target: "handler", sourceHandle: "error" }]
+    );
+    for (const decision of ["approve", "reject"] as const) {
+      const paused: WorkflowExecutionState[] = [];
+      await executeWorkflow({ workflow: wf, executionId: `exec-human-${decision}` }, deps({ paused }));
+      const result = await resumeWorkflowExecution({ executionId: `exec-human-${decision}`, state: paused[0]!, decision, actedBy: "lead@example.com" }, deps());
+      expect([last(result, "after")?.status, last(result, "handler")?.status]).toEqual(decision === "approve" ? ["success", "skipped"] : ["skipped", "success"]);
+    }
+  });
+
   it("answers an approval gate from the recording in a replay, routing by the recorded branch", async () => {
     const wf = gateWorkflow(GATE);
     const recorded: Record<string, ReplayRecordedNode> = {

@@ -22,15 +22,15 @@ const TEMPLATE_CATEGORY_MAP: Record<string, string> = {
 const TEMPLATE_DESCRIPTION_MAP: Record<string, string> = {
   "basic-flow.json": "Text-in, LLM-call, text-out pipeline. Runs out-of-the-box with the built-in echo provider — no Ollama, no API keys, no setup required. Swap to a real provider when you're ready.",
   "mcp-agent-quickstart-flow.json": "Manual Trigger -> Agent -> Output with the bundled echo provider and the in-process mock-mcp adapter exposing get_current_time + calculator. Zero-key target for the 5-minute MCP agent tutorial.",
-  "conditional-flow.json": "Demonstrates conditional branching with webhook triggers.",
-  "rag-flow.json": "Retrieval-Augmented Generation with Google Drive and vector search.",
+  "conditional-flow.json": "Demonstrates conditional branching with webhook triggers. Runs on the built-in Echo model with no setup; pick a real provider on the LLM Call when you are ready.",
+  "rag-flow.json": "Retrieval-Augmented Generation over a few built-in documents. Runs on the built-in Echo model with no setup; pick a real provider on the LLM Call for real answers.",
   "rag-pinecone-flow.json": "RAG pipeline using Pinecone as the vector store.",
-  "structured-output-flow.json": "Extract structured data from LLM responses with an output parser.",
-  "agentic-mcp-flow.json": "Agent orchestrator with MCP tool calling and session memory.",
+  "structured-output-flow.json": "Needs a chat model: the output parser expects real JSON from the model, so set a provider on the LLM Call first. Extracts structured data from LLM responses with an output parser.",
+  "agentic-mcp-flow.json": "Agent orchestrator with MCP tool calling and session memory. Runs on the built-in Echo model with no setup (Echo does not call tools); attach a real model to see tool calls.",
   "supervisor-worker-swarm-flow.json": "Multi-agent swarm: a Supervisor coordinates two specialist Worker agents (researcher + computer), each with their own MCP tools. Workers appear to the Supervisor as synthetic tools.",
   "workflow-as-mcp-tool-flow.json": "Compose-by-MCP: mcp_server_trigger exposes the whole workflow as an MCP tool at /api/mcp-server/kb-helper. Other agents wire it in as a callable tool — no HTTP plumbing required.",
-  "two-turn-report-code-helper-flow.json": "Helper-chat workflow that saves an exact MCP-backed report artifact on the first turn and reuses it for follow-up Python code.",
-  "vscode-l2m-coding-agent-flow.json": "L2M webhook workflow for the VS Code agent extension with structured messages, patch actions, command actions, code blocks, attachments, and memory updates.",
+  "two-turn-report-code-helper-flow.json": "Needs a chat model and an MCP server: set a provider on the chat model node first. Helper-chat workflow that saves an exact MCP-backed report artifact on the first turn and reuses it for follow-up Python code.",
+  "vscode-l2m-coding-agent-flow.json": "Needs a chat model: set a provider on the chat model node first. L2M webhook workflow for the VS Code agent extension with structured messages, patch actions, command actions, code blocks, attachments, and memory updates.",
   "azure-openai-flow.json": "Basic LLM flow using Azure OpenAI as the provider.",
   "azure-connectors-demo-flow.json": "Demo of Azure Storage, Cosmos DB, Monitor, and AI Search connectors."
 };

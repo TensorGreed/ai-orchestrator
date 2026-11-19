@@ -19,6 +19,144 @@ export function providerDefaultBaseUrl(providerId: string, env: Record<string, s
   return PROVIDER_DEFAULT_BASE_URLS[providerId];
 }
 
+/** The origin (scheme, host, port) of a URL, lower-cased with the default port dropped, or undefined if it cannot be read. */
+function originOf(value: string | undefined): string | undefined {
+  if (!value || !value.trim()) return undefined;
+  try {
+    const url = new URL(value.trim());
+    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+    return url.origin.toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
+/** A URL as origin plus path (no query, fragment or trailing slash), for prefix matching; undefined if unreadable. */
+function originAndPath(value: string | undefined): { origin: string; path: string } | undefined {
+  if (!value || !value.trim()) return undefined;
+  try {
+    const url = new URL(value.trim());
+    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+    return { origin: url.origin.toLowerCase(), path: url.pathname.replace(/\/+$/, "") };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Provider ids that read a deployment env key, so a `PROVIDER_ENV_KEY_BASE_URLS` entry may name one. */
+export const PROVIDERS_WITH_ENV_KEYS: readonly string[] = ["openai", "anthropic", "azure_openai", "gemini"];
+
+export interface EnvKeyBaseUrlEntry {
+  /** The provider the entry is for; undefined for an unprefixed entry, which any provider's env key may go to. */
+  providerId?: string;
+  url: string;
+}
+
+/**
+ * Parses `PROVIDER_ENV_KEY_BASE_URLS`: comma-separated entries, each `<provider>=<base URL>` (that provider's env key
+ * only) or a bare base URL (any provider's env key: less strict). Entries that cannot be read are reported in
+ * `errors` and left out.
+ */
+export function parseEnvKeyBaseUrls(value: string | undefined): { entries: EnvKeyBaseUrlEntry[]; errors: string[] } {
+  const entries: EnvKeyBaseUrlEntry[] = [];
+  const errors: string[] = [];
+  for (const raw of (value ?? "").split(",")) {
+    const entry = raw.trim();
+    if (!entry) continue;
+    const prefixed = /^([a-z][a-z0-9_]*)=(.*)$/i.exec(entry);
+    const providerId = prefixed ? prefixed[1]!.toLowerCase() : undefined;
+    const url = (prefixed ? prefixed[2]! : entry).trim();
+    if (providerId && !PROVIDERS_WITH_ENV_KEYS.includes(providerId)) {
+      errors.push(`'${entry}': unknown provider '${providerId}' (one of ${PROVIDERS_WITH_ENV_KEYS.join(", ")})`);
+      continue;
+    }
+    if (!originAndPath(url)) {
+      errors.push(`'${entry}': not an http(s) URL`);
+      continue;
+    }
+    const parsed = new URL(url);
+    if (parsed.username || parsed.password) {
+      // Not echoed: the entry holds a credential.
+      errors.push(`entry ${entries.length + errors.length + 1}${providerId ? ` (${providerId})` : ""}: a URL with a user name or password is refused; the provider's key is sent as a header`);
+      continue;
+    }
+    entries.push(providerId ? { providerId, url } : { url });
+  }
+  // "openai=https://x,https://y" most likely meant both for OpenAI, but a bare entry would carry every provider's key:
+  // mixing the two forms is refused rather than read the less strict way.
+  if (entries.some((entry) => entry.providerId) && entries.some((entry) => !entry.providerId)) {
+    errors.push("mixes provider=url entries with bare URLs: prefix every entry (a bare URL gets any provider's key)");
+    return { entries: entries.filter((entry) => entry.providerId), errors };
+  }
+  return { entries, errors };
+}
+
+/**
+ * Base URLs the operator allows `providerId`'s deployment env key to go to besides the provider's own default (for
+ * example a corporate gateway): the `PROVIDER_ENV_KEY_BASE_URLS` entries for that provider or for any provider, and
+ * `EVAL_JUDGE_BASE_URL` when `EVAL_JUDGE_ALLOW_ENV_CREDENTIALS` is on. A base URL matches an entry on the same origin
+ * whose path starts with the entry's path at a segment boundary, so an entry on a shared multi-tenant host only covers
+ * its own path.
+ */
+export function envKeyAllowedBaseUrls(providerId: string, env: Record<string, string | undefined> = process.env): string[] {
+  const urls = parseEnvKeyBaseUrls(env.PROVIDER_ENV_KEY_BASE_URLS)
+    .entries.filter((entry) => !entry.providerId || entry.providerId === providerId)
+    .map((entry) => entry.url);
+  // The judge's base URL carries only the judge provider's key (EVAL_JUDGE_PROVIDER_ID, default openai).
+  const judgeProvider = (env.EVAL_JUDGE_PROVIDER_ID ?? "").trim() || "openai";
+  if (/^(true|1|yes)$/i.test((env.EVAL_JUDGE_ALLOW_ENV_CREDENTIALS ?? "").trim()) && env.EVAL_JUDGE_BASE_URL && judgeProvider === providerId) {
+    urls.push(env.EVAL_JUDGE_BASE_URL.trim());
+  }
+  return urls;
+}
+
+// Percent-encoded "/", "\" and "." could be decoded by the server behind an entry into a path outside it.
+const ENCODED_PATH_SEPARATOR = /%2f|%5c|%2e/i;
+
+function underAllowedBaseUrl(target: { origin: string; path: string }, entry: string): boolean {
+  const allowed = originAndPath(entry);
+  if (!allowed || allowed.origin !== target.origin) return false;
+  if (allowed.path === "") return true;
+  if (ENCODED_PATH_SEPARATOR.test(target.path)) return false;
+  return target.path === allowed.path || target.path.startsWith(`${allowed.path}/`);
+}
+
+/**
+ * Whether `url` (a request URL) is on the same origin as `baseUrl` and under its path (at a segment boundary). A URL
+ * with a fragment, a query holding "/" or "?" (a base URL ending in "?" turns the appended path into a query), or
+ * percent-encoded path separators under a base URL with a path, never matches. A plain query such as api-version does.
+ */
+export function urlUnderBaseUrl(url: string, baseUrl: string): boolean {
+  if (url.includes("#")) return false;
+  const query = url.indexOf("?");
+  if (query >= 0 && /[/?]/.test(url.slice(query + 1))) return false;
+  const target = originAndPath(url);
+  return Boolean(target) && underAllowedBaseUrl(target!, baseUrl);
+}
+
+/**
+ * Whether a deployment env key (OPENAI_API_KEY, ANTHROPIC_API_KEY, AZURE_OPENAI_API_KEY, ...) may be sent to
+ * `baseUrl` for `providerId`. Only to the provider's own default base URL (Azure: AZURE_OPENAI_ENDPOINT), to a URL in
+ * `PROVIDER_ENV_KEY_BASE_URLS`, or when no base URL is set (the default is used). A base URL a node or a request
+ * names anywhere else gets no env key: it must use a secret, or no key. Compared by origin, so a path on the same
+ * host is fine and a look-alike host is not.
+ */
+export function envKeyMayGoTo(providerId: string, baseUrl: string | undefined, env: Record<string, string | undefined> = process.env): boolean {
+  if (!baseUrl || !baseUrl.trim()) return true;
+  const target = originOf(baseUrl);
+  const targetPath = originAndPath(baseUrl);
+  if (!target || !targetPath) return false;
+  if (envKeyAllowedBaseUrls(providerId, env).some((entry) => underAllowedBaseUrl(targetPath, entry))) return true;
+  const allowed = new Set<string>();
+  const own = originOf(PROVIDER_DEFAULT_BASE_URLS[providerId]);
+  if (own) allowed.add(own);
+  if (providerId === "azure_openai") {
+    const endpoint = originOf(env.AZURE_OPENAI_ENDPOINT);
+    if (endpoint) allowed.add(endpoint);
+  }
+  return allowed.has(target);
+}
+
 /** Providers that send nothing over the network (the echo test provider): they are no destination. */
 export const PROVIDERS_WITHOUT_NETWORK: ReadonlySet<string> = new Set(["echo"]);
 

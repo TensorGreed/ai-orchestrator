@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useImperativeHandle, useMemo, useRef, useState, type Ref } from "react";
 import type {
   LLMProviderConfig,
+  NodeErrorConfig,
   MCPToolDefinition,
   McpElicitationTraceEntry,
   McpSamplingTraceEntry,
@@ -14,8 +15,15 @@ import {
   BUILT_IN_TOOL_PROVIDERS,
   BUILT_IN_TOOL_PROVIDER_INFO,
   BUILT_IN_TOOLS_ADAPTER_ID,
+  DEFAULT_HTTP_RETRY_ON_STATUS,
+  DEFAULT_RETRY_MAX_DELAY_MS,
+  MODEL_PROVIDER_CHOICES,
+  PROVIDER_CONFIG_NODE_TYPES,
   WORKFLOW_TOOL_ADAPTER_ID,
   builtInToolProviderOf,
+  httpErrorStatusMode,
+  parseStatusList,
+  repairNodeErrorConfig,
   deriveWorkflowToolDescriptor,
   getNodeDefinition,
   nodeEmbeddingModelTarget,
@@ -30,6 +38,7 @@ import { latestResolvedFields, NodeActivityList, ResolvedFieldsTable } from "./N
 import { NodeRunInput, NodeRunOutput, RunDataView, RunStatusLine, RunStepBar, type RunNodeResult } from "./NodeRunData";
 import { DataPane, PaneSeparator, type PaneMenuItem } from "./InspectorPane";
 import { AdvancedFields, HelpHint, countSet } from "./InspectorDisclosure";
+import { runAfterPointerRelease } from "../lib/pointer-release";
 import { attachmentUse, hasTestData, runStepOrder } from "../lib/run-data";
 import type { EditorNode, EditorNodeData, NodeTelemetry } from "../lib/workflow";
 import { NodeTypeIcon } from "./node-icons";
@@ -39,6 +48,7 @@ import { ApprovalGateNodeFields } from "./ApprovalGateNodeFields";
 import { McpAnnotationChips, McpOutputSchema } from "./McpToolMeta";
 import { SecretSaveWarnings } from "./SecretSaveWarnings";
 import { ModelAllowlistWarning, useModelAllowlistWarning } from "./ModelAllowlistWarning";
+import { directApiBaseUrl } from "../lib/direct-api-url";
 import {
   TRIGGER_TRUST_OPTIONS,
   describeTriggerTrust,
@@ -152,6 +162,8 @@ export interface NodeInspectorProps {
     config: Record<string, unknown>;
     disabled?: boolean;
     color?: EditorNodeData["color"];
+    /** The node's other fields (errorConfig, ...) when the inspector changed them; absent: kept as they are. */
+    nodeExtras?: Record<string, unknown>;
   }) => void;
   onExecuteStep: () => void;
   onPinNodeOutput?: (nodeId: string) => Promise<void> | void;
@@ -332,6 +344,25 @@ export function withOpenDefaults(
     return { ...initialConfig, maxIterations: AGENT_DEFAULT_MAX_ITERATIONS };
   }
   return initialConfig;
+}
+
+/**
+ * A node's `config.provider` after the Provider picker changes to `next`. Echo needs no endpoint or key, so those go
+ * and the model becomes "echo"; leaving Echo clears that placeholder model. Other switches keep the rest as it was.
+ */
+export function switchedModelProvider(current: Record<string, unknown>, next: string): Record<string, unknown> | undefined {
+  // "Not set": a chain node then uses the model of an upstream model node.
+  if (!next) return undefined;
+  if (next === "echo") {
+    const rest = { ...current };
+    delete rest.baseUrl;
+    delete rest.secretRef;
+    delete rest.extra;
+    return { ...rest, providerId: "echo", model: "echo" };
+  }
+  const switched: Record<string, unknown> = { ...current, providerId: next };
+  if (current.providerId === "echo" && current.model === "echo") switched.model = "";
+  return switched;
 }
 
 function stripAgentOnlyKeys(nodeType: string, value: Record<string, unknown>): Record<string, unknown> {
@@ -632,6 +663,61 @@ function ToggleField({
         <span className="cfg-toggle-knob" />
       </button>
     </label>
+  );
+}
+
+/**
+ * HTTP Request: fail on a status outside 200–299 (so retries and the Error
+ * output apply), and which statuses are retried. New nodes have it on; a node
+ * saved before the option that asks for retries fails only on its retried statuses, and says so.
+ */
+function HttpErrorStatusFields({
+  config,
+  errorConfig,
+  setConfig
+}: {
+  config: Record<string, unknown>;
+  errorConfig?: NodeErrorConfig;
+  setConfig: React.Dispatch<React.SetStateAction<Record<string, unknown>>>;
+}) {
+  const mode = httpErrorStatusMode(config, errorConfig);
+  const failOn = mode === "all";
+  const retryOn = typeof config.retryOnStatus === "string" ? config.retryOnStatus : Array.isArray(config.retryOnStatus) ? config.retryOnStatus.join(", ") : "";
+  const invalid = parseStatusList(retryOn).invalid;
+  return (
+    <>
+      <ToggleField
+        label="Fail on HTTP error status"
+        checked={failOn}
+        onChange={(next) => setConfig((current) => ({ ...current, failOnHttpError: next }))}
+        help="On a status outside 200–299 the node fails, so Retries on Failure and the Error output apply. Off: the response is returned with ok: false and the run goes on."
+      />
+      {mode === "retry_list" && (
+        <div className="cfg-tip" data-testid="http-retry-list-only-tip">
+          This node was saved before this option. Because it retries, it retries the statuses below and fails if they
+          persist; other error statuses are returned with <code>ok: false</code>. Turn the option on to fail on every error status.
+        </div>
+      )}
+      {mode !== "none" && (
+        <label className="cfg-field">
+          <FieldLabel
+            label="Retry on status"
+            help="Statuses that are retried (codes, classes such as 5xx, or ranges such as 500-504). Others fail at once. Empty: 429 and 5xx."
+          />
+          <input
+            value={retryOn}
+            placeholder={DEFAULT_HTTP_RETRY_ON_STATUS}
+            aria-invalid={invalid.length > 0}
+            onChange={(event) => setConfig((current) => ({ ...current, retryOnStatus: event.target.value }))}
+          />
+          {invalid.length > 0 && (
+            <span className="cfg-field-error" role="alert">
+              Not a status code: {invalid.join(", ")}
+            </span>
+          )}
+        </label>
+      )}
+    </>
   );
 }
 
@@ -1010,12 +1096,21 @@ function ExpressionField({
     };
   }, [mode, previewContext, value]);
 
+  // The chips and the scope tip collapse on blur. When a mouse press caused the blur, they collapse after the release,
+  // so nothing below the field moves between press and release and the click lands where the user pressed.
+  const fieldRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
   return (
     <div
+      ref={fieldRef}
       className="cfg-field expression-field"
       onFocus={() => setFocusWithin(true)}
       onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocusWithin(false);
+        if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+        runAfterPointerRelease(() => {
+          if (!fieldRef.current?.contains(document.activeElement)) setFocusWithin(false);
+        });
       }}
     >
       <div className="cfg-field-header">
@@ -1042,8 +1137,13 @@ function ExpressionField({
         aria-label={label}
         value={value}
         onChange={(event) => onChange(event.target.value)}
+        ref={textareaRef}
         onFocus={() => setEditing(true)}
-        onBlur={() => setEditing(false)}
+        onBlur={() =>
+          runAfterPointerRelease(() => {
+            if (document.activeElement !== textareaRef.current) setEditing(false);
+          })
+        }
         rows={rows}
       />
       {formatError && <div className="cfg-field-error">{formatError}</div>}
@@ -1096,26 +1196,13 @@ function getSuggestedDirectApiBaseUrl(currentBaseUrl: string): string | null {
   if (typeof window === "undefined") {
     return null;
   }
-
-  const envBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim();
-  if (envBase) {
-    return null;
-  }
-
-  const hostname = window.location.hostname;
-  const isLocalhost = hostname === "localhost" || hostname === "127.0.0.1";
-  if (!isLocalhost) {
-    return null;
-  }
-
-  const directPortFromEnv = (import.meta.env.VITE_API_PORT as string | undefined)?.trim();
-  const normalizedPort = directPortFromEnv && /^\d+$/.test(directPortFromEnv) ? directPortFromEnv : "4000";
-  const suggested = `${window.location.protocol}//${hostname}:${normalizedPort}`;
-  if (suggested.replace(/\/+$/, "") === currentBaseUrl.replace(/\/+$/, "")) {
-    return null;
-  }
-
-  return suggested;
+  return directApiBaseUrl({
+    configuredBase: import.meta.env.VITE_API_BASE_URL as string | undefined,
+    // The dev server sets this to the port it proxies the API to (vite.config.ts).
+    apiPort: import.meta.env.VITE_API_PORT as string | undefined,
+    location: window.location,
+    currentBase: currentBaseUrl
+  });
 }
 
 export function NodeInspector({
@@ -1143,6 +1230,12 @@ export function NodeInspector({
   const [label, setLabel] = useState(node.data.label);
   const [config, setConfig] = useState<Record<string, unknown>>(asRecord(node.data.config));
   const [nodeDisabled, setNodeDisabled] = useState<boolean>(Boolean(node.data.disabled));
+  // Retry and continue settings a workflow JSON (or an import) set on the node; the engine reads them before the fields below.
+  // A workflow stored before saves checked them may hold invalid values: the engine ignores those, and so does the editor.
+  const errorConfigRepair = useMemo(() => repairNodeErrorConfig(node.data.nodeExtras?.errorConfig), [node.data.nodeExtras]);
+  const nodeErrorConfig: NodeErrorConfig | undefined = errorConfigRepair.errorConfig;
+  // Set when the user removes the invalid values; applied with the node's save.
+  const [removeInvalidErrorConfig, setRemoveInvalidErrorConfig] = useState(false);
   const [nodeColor, setNodeColor] = useState<EditorNodeData["color"]>(node.data.color);
   const [activeTab, setActiveTab] = useState<InspectorTab>("parameters");
   // A new node starts from its definition's sample config: those values count as defaults on the Advanced sections.
@@ -1379,6 +1472,8 @@ export function NodeInspector({
   const [inlineCreatedSecrets, setInlineCreatedSecrets] = useState<SecretListItem[]>([]);
   const [llmModels, setLlmModels] = useState<ModelOption[] | null>(null);
   const [llmModelsLoading, setLlmModelsLoading] = useState(false);
+  const [llmModelsNote, setLlmModelsNote] = useState<string | null>(null);
+  const llmModelsRequest = useRef(0);
   const [activeSecretFieldKey, setActiveSecretFieldKey] = useState<string | null>(null);
   const [inlineSecretProvider, setInlineSecretProvider] = useState("custom");
   const [inlineSecretName, setInlineSecretName] = useState("");
@@ -1399,8 +1494,10 @@ export function NodeInspector({
   const modelLookup = useMemo(() => {
     const type = node.data.nodeType;
 
-    if (type === "llm_call") {
-      const providerId = toStringValue(provider.providerId, "ollama").trim() || "ollama";
+    if (PROVIDER_CONFIG_NODE_TYPES.has(type)) {
+      // No provider set, or the built-in Echo provider: there is no model list to load.
+      const providerId = toStringValue(provider.providerId).trim();
+      if (!providerId || providerId === "echo") return null;
       const secretId = getSecretId(provider.secretRef);
       const baseUrl = toStringValue(provider.baseUrl).trim();
       const extra = asRecord(provider.extra);
@@ -1461,40 +1558,52 @@ export function NodeInspector({
     azureApiVersion
   ]);
 
+  // A model list is loaded only when the user asks for it (Load models): opening a node never calls a model server,
+  // so a node that names a local model server does not probe it just by being looked at.
   useEffect(() => {
-    if (!modelLookup?.providerId) {
-      setLlmModels(null);
-      setLlmModelsLoading(false);
-      return;
-    }
-
-    const baseUrl = modelLookup.baseUrl?.trim() ?? "";
-    if ((modelLookup.requiresBaseUrl && !baseUrl) || (baseUrl && !isHttpUrl(baseUrl))) {
-      setLlmModels(null);
-      setLlmModelsLoading(false);
-      return;
-    }
-
-    let canceled = false;
-    setLlmModelsLoading(true);
-    fetchProviderModels({
-      providerId: modelLookup.providerId,
-      ...(modelLookup.secretId ? { secretRef: { secretId: modelLookup.secretId } } : {}),
-      ...(baseUrl ? { baseUrl } : {}),
-      ...(modelLookup.extra ? { extra: modelLookup.extra } : {})
-    })
-      .then((result) => {
-        if (canceled) return;
-        setLlmModels(result.models.map((m) => ({ value: m.id, label: m.label })));
-      })
-      .catch(() => {
-        if (!canceled) setLlmModels(null);
-      })
-      .finally(() => {
-        if (!canceled) setLlmModelsLoading(false);
-      });
-    return () => { canceled = true; };
+    llmModelsRequest.current += 1;
+    setLlmModels(null);
+    setLlmModelsLoading(false);
+    setLlmModelsNote(null);
   }, [modelLookup]);
+
+  const modelListBaseUrl = modelLookup?.baseUrl?.trim() ?? "";
+  const modelListReady = Boolean(
+    modelLookup?.providerId &&
+      !(modelLookup.requiresBaseUrl && !modelListBaseUrl) &&
+      !(modelListBaseUrl && !isHttpUrl(modelListBaseUrl))
+  );
+
+  const loadModelList = useCallback(async () => {
+    if (!modelLookup?.providerId || !modelListReady) return;
+    const request = ++llmModelsRequest.current;
+    setLlmModelsLoading(true);
+    setLlmModelsNote(null);
+    try {
+      const result = await fetchProviderModels({
+        providerId: modelLookup.providerId,
+        ...(modelLookup.secretId ? { secretRef: { secretId: modelLookup.secretId } } : {}),
+        ...(modelListBaseUrl ? { baseUrl: modelListBaseUrl } : {}),
+        ...(modelLookup.extra ? { extra: modelLookup.extra } : {})
+      });
+      if (request !== llmModelsRequest.current) return;
+      const models = result.models.map((m) => ({ value: m.id, label: m.label }));
+      setLlmModels(models.length > 0 ? models : null);
+      setLlmModelsNote(
+        models.length > 0
+          ? `${models.length} model${models.length === 1 ? "" : "s"} loaded.`
+          : modelLookup.providerId === "ollama" && !modelListBaseUrl
+            ? "No models listed: set the Base URL to list an Ollama server's models, or type the model name."
+            : "No models found. Check the key and base URL, or type the model name."
+      );
+    } catch (error) {
+      if (request !== llmModelsRequest.current) return;
+      setLlmModels(null);
+      setLlmModelsNote(error instanceof Error ? error.message : "Could not load models.");
+    } finally {
+      if (request === llmModelsRequest.current) setLlmModelsLoading(false);
+    }
+  }, [modelLookup, modelListBaseUrl, modelListReady]);
 
   useEffect(() => {
     // The defaults filled in on open are not edits of the user's: isDirty compares against the same fill.
@@ -2346,7 +2455,7 @@ export function NodeInspector({
   const buildProviderTestConfig = useCallback((): { provider: LLMProviderConfig; prompt?: string; systemPrompt?: string } | null => {
     if (node.data.nodeType === "llm_call") {
       const providerConfig = asRecord(config.provider);
-      const providerId = toStringValue(providerConfig.providerId, "ollama").trim();
+      const providerId = toStringValue(providerConfig.providerId).trim();
       const model = toStringValue(providerConfig.model).trim();
       if (!providerId || !model) {
         return null;
@@ -2555,24 +2664,44 @@ export function NodeInspector({
     const currentValue = input.value.trim() || input.fallbackValue?.trim() || "";
     const fieldLabel = llmModelsLoading ? `${label} (loading...)` : label;
 
-    if (llmModels && llmModels.length > 0) {
-      return (
-        <SelectField
-          label={fieldLabel}
-          value={currentValue}
-          options={withCurrentModelOption(llmModels, currentValue, input.emptyLabel ?? `Select ${label.toLowerCase()}`)}
-          onChange={input.onChange}
-        />
-      );
-    }
-
     return (
-      <TextField
-        label={fieldLabel}
-        value={currentValue}
-        onChange={input.onChange}
-        placeholder={input.placeholder}
-      />
+      <>
+        {llmModels && llmModels.length > 0 ? (
+          <SelectField
+            label={fieldLabel}
+            value={currentValue}
+            options={withCurrentModelOption(llmModels, currentValue, input.emptyLabel ?? `Select ${label.toLowerCase()}`)}
+            onChange={input.onChange}
+          />
+        ) : (
+          <TextField
+            label={fieldLabel}
+            value={currentValue}
+            onChange={input.onChange}
+            placeholder={input.placeholder}
+          />
+        )}
+        {renderLoadModelsAction()}
+      </>
+    );
+  };
+
+  /** The explicit "Load models" action: the only way a node's editor asks a model server for its model list. */
+  const renderLoadModelsAction = () => {
+    if (!modelLookup) return null;
+    return (
+      <div className="cfg-inline-actions">
+        <button
+          type="button"
+          className="insp-btn"
+          onClick={() => void loadModelList()}
+          disabled={llmModelsLoading || !modelListReady}
+          title={modelListReady ? "Ask the model server for its models" : "Set the base URL first"}
+        >
+          {llmModelsLoading ? "Loading models..." : llmModels ? "Reload models" : "Load models"}
+        </button>
+        {llmModelsNote && <span className="muted">{llmModelsNote}</span>}
+      </div>
     );
   };
 
@@ -2581,10 +2710,12 @@ export function NodeInspector({
    * temperature, max tokens and the node's own rarely used fields (`advanced`) sit under Advanced.
    */
   const renderProviderSection = (advanced?: { content: React.ReactNode; setCount: number }) => {
-    const providerId = toStringValue(provider.providerId, "ollama");
+    const providerId = toStringValue(provider.providerId).trim();
     const providerExtra = asRecord(provider.extra);
     const isAzureOpenAI = providerId === "azure_openai";
-    const hideBaseUrl = providerId === "gemini";
+    // Echo is built in: no endpoint, no key, any model name.
+    const isEcho = providerId === "echo";
+    const hideBaseUrl = providerId === "gemini" || isEcho || !providerId;
     const baseUrlLabel =
       isAzureOpenAI
         ? "Endpoint"
@@ -2598,7 +2729,9 @@ export function NodeInspector({
           ? "https://api.anthropic.com/v1"
           : providerId === "openai"
             ? "https://api.openai.com/v1"
-            : "http://localhost:11434/v1";
+            : providerId === "ollama"
+              ? "http://localhost:11434/v1"
+              : "https://llm.example.com/v1";
 
     const optionalBaseUrl = providerId === "openai" || providerId === "anthropic";
     const baseUrlField = (
@@ -2615,16 +2748,32 @@ export function NodeInspector({
         <SelectField
           label="Provider"
           value={providerId}
-          onChange={(next) => setProvider({ providerId: next })}
+          onChange={(next) =>
+            setConfig((current) => {
+              const switched = switchedModelProvider(asRecord(current.provider), next);
+              if (switched) return { ...current, provider: switched };
+              const rest = { ...current };
+              delete rest.provider;
+              return rest;
+            })
+          }
           options={[
-            { value: "ollama", label: "Ollama" },
-            { value: "openai_compatible", label: "OpenAI Compatible" },
-            { value: "openai", label: "OpenAI" },
-            { value: "azure_openai", label: "Azure OpenAI" },
-            { value: "gemini", label: "Gemini" },
-            { value: "anthropic", label: "Anthropic" }
+            // A chain node may always go back to the upstream model; LLM Call needs its own provider.
+            ...(node.data.nodeType !== "llm_call"
+              ? [{ value: "", label: "Not set (uses the upstream model)" }]
+              : providerId
+                ? []
+                : [{ value: "", label: "Not set" }]),
+            ...MODEL_PROVIDER_CHOICES,
+            ...(providerId && !MODEL_PROVIDER_CHOICES.some((choice) => choice.value === providerId) ? [{ value: providerId, label: providerId }] : [])
           ]}
         />
+        {isEcho && (
+          <div className="cfg-tip" data-testid="echo-provider-tip">
+            Echo is the built-in demo model: it answers with the prompt it receives, needs no key and calls nothing. Pick a
+            real provider when the workflow is ready.
+          </div>
+        )}
         {!isAzureOpenAI ? (
           renderModelChoiceField({
             value: toStringValue(provider.model),
@@ -2632,12 +2781,15 @@ export function NodeInspector({
             onChange: (next) => setProvider({ model: next })
           })
         ) : (
-          <TextField
-            label={llmModelsLoading ? "Deployment (loading...)" : "Deployment"}
-            value={toStringValue(provider.model)}
-            onChange={(next) => setProvider({ model: next })}
-            placeholder="gpt-4o-mini"
-          />
+          <>
+            <TextField
+              label={llmModelsLoading ? "Deployment (loading...)" : "Deployment"}
+              value={toStringValue(provider.model)}
+              onChange={(next) => setProvider({ model: next })}
+              placeholder="gpt-4o-mini"
+            />
+            {renderLoadModelsAction()}
+          </>
         )}
         {!hideBaseUrl && !optionalBaseUrl && baseUrlField}
         {isAzureOpenAI && (
@@ -2648,7 +2800,7 @@ export function NodeInspector({
             placeholder="2024-10-21"
           />
         )}
-        {renderCredentialSecretField({
+        {!isEcho && providerId && renderCredentialSecretField({
           fieldKey: "llm_provider_secret",
           label: "API Key Secret",
           value: toStringValue(asRecord(provider.secretRef).secretId, ""),
@@ -5245,6 +5397,7 @@ export function NodeInspector({
           options={withCurrentModelOption(modelOptions, modelValue)}
           onChange={(next) => setConfig((current) => ({ ...current, model: next }))}
         />
+        {renderLoadModelsAction()}
         <div className="cfg-grid-2">
           <NumberField
             label="Temperature"
@@ -6394,12 +6547,42 @@ export function NodeInspector({
           </>
         );
       }
-      case "http_request":
+      case "http_request": {
+        const httpMethod = toStringValue(config.method, "GET").toUpperCase();
+        // A request with a body shows its headers and body up front; for GET and DELETE they stay under Advanced.
+        const sendsBody = httpMethod === "POST" || httpMethod === "PUT" || httpMethod === "PATCH";
+        const defaultHeaders = "{\n  \"Accept\": \"application/json\"\n}";
+        const headersField = (
+          <ExpressionField
+            label="Headers Template (JSON)"
+            value={toStringValue(config.headersTemplate, defaultHeaders)}
+            onChange={(next) => setConfig((current) => ({ ...current, headersTemplate: next }))}
+            rows={sendsBody ? 3 : 5}
+            mode="template"
+            previewContext={expressionPreviewContext}
+          />
+        );
+        const bodyField = (
+          <ExpressionField
+            label="Body Template"
+            value={toStringValue(config.bodyTemplate, "")}
+            onChange={(next) => setConfig((current) => ({ ...current, bodyTemplate: next }))}
+            rows={5}
+            mode="template"
+            previewContext={expressionPreviewContext}
+            help={
+              <>
+                A body that is valid JSON is sent as <code>application/json</code> unless the headers set a{" "}
+                <code>Content-Type</code>.
+              </>
+            }
+          />
+        );
         return (
           <>
             <SelectField
               label="Method"
-              value={toStringValue(config.method, "GET")}
+              value={httpMethod}
               onChange={(next) => setConfig((current) => ({ ...current, method: next }))}
               options={[
                 { value: "GET", label: "GET" },
@@ -6422,6 +6605,8 @@ export function NodeInspector({
                 </>
               }
             />
+            {sendsBody && bodyField}
+            {sendsBody && headersField}
             {renderCredentialSecretField({
               fieldKey: "http_request_secret",
               label: "Authorization Secret (Bearer)",
@@ -6436,49 +6621,41 @@ export function NodeInspector({
             })}
             <AdvancedFields
               setCount={countSet([
-                [config.headersTemplate, "{\n  \"Accept\": \"application/json\"\n}", sampleConfig.headersTemplate],
-                [config.bodyTemplate, "", sampleConfig.bodyTemplate],
+                ...(sendsBody
+                  ? []
+                  : ([
+                      [config.headersTemplate, defaultHeaders, sampleConfig.headersTemplate],
+                      [config.bodyTemplate, "", sampleConfig.bodyTemplate]
+                    ] as Array<[unknown, unknown, unknown]>)),
                 [config.responseType, "json", sampleConfig.responseType],
                 [config.timeoutMs, 15000, sampleConfig.timeoutMs]
               ])}
             >
-            <ExpressionField
-              label="Headers Template (JSON)"
-              value={toStringValue(config.headersTemplate, "{\n  \"Accept\": \"application/json\"\n}")}
-              onChange={(next) => setConfig((current) => ({ ...current, headersTemplate: next }))}
-              rows={5}
-              mode="template"
-              previewContext={expressionPreviewContext}
-            />
-            <ExpressionField
-              label="Body Template"
-              value={toStringValue(config.bodyTemplate, "")}
-              onChange={(next) => setConfig((current) => ({ ...current, bodyTemplate: next }))}
-              rows={5}
-              mode="template"
-              previewContext={expressionPreviewContext}
-            />
-            <div className="cfg-grid-2">
-              <SelectField
-                label="Response Type"
-                value={toStringValue(config.responseType, "json")}
-                onChange={(next) => setConfig((current) => ({ ...current, responseType: next }))}
-                options={[
-                  { value: "json", label: "JSON" },
-                  { value: "text", label: "Text" }
-                ]}
-              />
-              <NumberField
-                label="Timeout (ms)"
-                value={toNumberValue(config.timeoutMs, 15000)}
-                min={1}
-                step={100}
-                onChange={(next) => setConfig((current) => ({ ...current, timeoutMs: next }))}
-              />
-            </div>
+              {!sendsBody && headersField}
+              {!sendsBody && bodyField}
+              <div className="cfg-grid-2">
+                <SelectField
+                  label="Response Type"
+                  value={toStringValue(config.responseType, "json")}
+                  onChange={(next) => setConfig((current) => ({ ...current, responseType: next }))}
+                  options={[
+                    { value: "json", label: "JSON" },
+                    { value: "text", label: "Text" }
+                  ]}
+                />
+                <NumberField
+                  label="Timeout (ms)"
+                  value={toNumberValue(config.timeoutMs, 15000)}
+                  min={1}
+                  step={100}
+                  onChange={(next) => setConfig((current) => ({ ...current, timeoutMs: next }))}
+                />
+              </div>
             </AdvancedFields>
+            <HttpErrorStatusFields config={config} errorConfig={nodeErrorConfig} setConfig={setConfig} />
           </>
         );
+      }
       case "set_node": {
         const assignments = Array.isArray(config.assignments)
           ? config.assignments.map((entry) => asRecord(entry))
@@ -7221,11 +7398,12 @@ export function NodeInspector({
           <>
             <ExpressionField
               label="Response Template"
-              value={toStringValue(config.responseTemplate, "{{answer}}")}
+              value={toStringValue(config.responseTemplate, "")}
               onChange={(next) => setConfig((current) => ({ ...current, responseTemplate: next }))}
               rows={4}
               mode="template"
               previewContext={expressionPreviewContext}
+              help="Empty: the answer or text it receives, else the run's prompt, else everything the parent node sent."
             />
             <AdvancedFields setCount={countSet([[config.outputKey, "result", sampleConfig.outputKey]])}>
               <TextField
@@ -9578,6 +9756,32 @@ export function NodeInspector({
         </section>
         <section className="insp-settings-group" aria-label="Error handling">
           <h4>Error handling</h4>
+          {errorConfigRepair.invalidFields.length > 0 && (
+            <div className="cfg-tip cfg-tip-warn" role="alert" data-testid="node-error-config-invalid">
+              {removeInvalidErrorConfig ? (
+                <>
+                  The invalid <code>errorConfig</code> values are removed when you save this node.
+                </>
+              ) : (
+                <>
+                  This node&apos;s <code>errorConfig</code> has invalid values ({errorConfigRepair.invalidFields.join(", ")}). Runs
+                  ignore them, but the workflow cannot be saved until they are removed.{" "}
+                  <button type="button" className="auth-link-btn" onClick={() => setRemoveInvalidErrorConfig(true)}>
+                    Remove invalid values
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+          {(nodeErrorConfig?.retryOnFail === true || nodeErrorConfig?.continueOnFail === true) && (
+            <div className="cfg-tip" data-testid="node-error-config-tip">
+              This node&apos;s workflow JSON sets its error handling (<code>errorConfig</code>), which takes precedence:
+              {nodeErrorConfig.retryOnFail === true &&
+                ` ${nodeErrorConfig.maxRetries ?? 2} retries, first wait ${nodeErrorConfig.retryIntervalMs ?? 1000} ms`}
+              {nodeErrorConfig.retryOnFail === true && nodeErrorConfig.continueOnFail === true && ";"}
+              {nodeErrorConfig.continueOnFail === true && " a failure continues the run"}.
+            </div>
+          )}
           <div className="cfg-grid-2">
             <NumberField
               label="Retries on Failure"
@@ -9585,6 +9789,7 @@ export function NodeInspector({
               min={0}
               step={1}
               onChange={(next) => setConfig((current) => ({ ...current, retryCount: next }))}
+              help="How many times to try again after a failure. Left unset, nodes that call a model, a tool or the network try once more."
             />
             <NumberField
               label="Delay between Retries (ms)"
@@ -9592,8 +9797,17 @@ export function NodeInspector({
               min={0}
               step={500}
               onChange={(next) => setConfig((current) => ({ ...current, retryDelayMs: next }))}
+              help="The first wait. Each later wait doubles, varied by up to 20% so retries do not arrive together."
             />
           </div>
+          <NumberField
+            label="Max delay between Retries (ms)"
+            value={toNumberValue(config.retryMaxDelayMs, DEFAULT_RETRY_MAX_DELAY_MS)}
+            min={0}
+            step={1000}
+            onChange={(next) => setConfig((current) => ({ ...current, retryMaxDelayMs: next }))}
+            help="No wait is longer than this. A server's Retry-After is honoured; if it asks for longer than this, the node fails at once."
+          />
           <SelectField
             label="On Error Behavior"
             value={toStringValue(config.onError, "stop")}
@@ -9602,9 +9816,16 @@ export function NodeInspector({
               { value: "stop", label: "Stop Execution" },
               // A gate or approval that continued past a failure would run the next step with no decision.
               ...(node.data.nodeType === "approval_gate" || node.data.nodeType === "human_approval" ? [] : [{ value: "continue", label: "Continue Anyway" }]),
-              { value: "branch", label: "Execute Fallback Branch" }
+              ...(node.data.nodeType === "try_catch" ? [] : [{ value: "branch", label: "Execute Fallback Branch" }])
             ]}
           />
+          {toStringValue(config.onError, "stop") === "branch" && node.data.nodeType !== "try_catch" && (
+            <div className="cfg-tip" data-testid="error-output-tip">
+              The node now has a red <strong>Error</strong> output on the canvas. Connect it to the steps that handle a failure: they get the
+              failed item&apos;s fields plus <code>error</code>, <code>errorCategory</code>, <code>failedNodeId</code> and, for HTTP, <code>status</code>.
+              The node&apos;s other outputs are skipped when it fails.
+            </div>
+          )}
         </section>
         <section className="insp-settings-group" aria-label="Input mapping">
           <div className="cfg-field-label">
@@ -9685,6 +9906,7 @@ export function NodeInspector({
     inputMappingRows.length > 0 ||
     toNumberValue(config.retryCount, 0) > 0 ||
     (typeof config.retryDelayMs === "number" && config.retryDelayMs !== 1000) ||
+    (typeof config.retryMaxDelayMs === "number" && config.retryMaxDelayMs !== DEFAULT_RETRY_MAX_DELAY_MS) ||
     toStringValue(config.onError, "stop") !== "stop" ||
     config.sensitiveOutput === true;
 
@@ -9703,16 +9925,23 @@ export function NodeInspector({
     if (label !== node.data.label) return true;
     if (nodeDisabled !== Boolean(node.data.disabled)) return true;
     if ((nodeColor ?? undefined) !== (node.data.color ?? undefined)) return true;
+    if (removeInvalidErrorConfig) return true;
     return stableStringify(getConfigForSave()) !== stableStringify(stripAgentOnlyKeys(node.data.nodeType, savedConfig));
-  }, [config, label, mcpServerDefinitions, node.data, nodeColor, nodeDisabled]);
+  }, [config, label, mcpServerDefinitions, node.data, nodeColor, nodeDisabled, removeInvalidErrorConfig]);
   isDirtyRef.current = isDirty;
+
+  const extrasWithoutInvalidErrorConfig = (): Record<string, unknown> => {
+    const { errorConfig: _invalid, ...rest } = node.data.nodeExtras ?? {};
+    return errorConfigRepair.errorConfig ? { ...rest, errorConfig: errorConfigRepair.errorConfig } : rest;
+  };
 
   const handleSave = () =>
     onSave({
       label,
       config: getConfigForSave(),
       disabled: nodeDisabled || undefined,
-      color: nodeColor
+      color: nodeColor,
+      ...(removeInvalidErrorConfig ? { nodeExtras: extrasWithoutInvalidErrorConfig() } : {})
     });
 
   const resolvePendingClose = (choice: "save" | "discard" | "keep") => {

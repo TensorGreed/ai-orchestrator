@@ -170,9 +170,10 @@ function parseSSEEventPayload(rawEvent: string): string | null {
   return dataLines.length ? dataLines.join("\n") : null;
 }
 
-function findSSEBoundary(buffer: string): { index: number; separatorLength: number } | null {
-  const unixBoundary = buffer.indexOf("\n\n");
-  const windowsBoundary = buffer.indexOf("\r\n\r\n");
+/** The first event boundary at or after `from` (callers pass where the unscanned text starts, so a long event is not rescanned on every chunk). */
+function findSSEBoundary(buffer: string, from = 0): { index: number; separatorLength: number } | null {
+  const unixBoundary = buffer.indexOf("\n\n", from);
+  const windowsBoundary = buffer.indexOf("\r\n\r\n", from);
   if (unixBoundary < 0 && windowsBoundary < 0) return null;
   if (unixBoundary < 0) return { index: windowsBoundary, separatorLength: 4 };
   if (windowsBoundary < 0) return { index: unixBoundary, separatorLength: 2 };
@@ -245,6 +246,10 @@ function orderlyEndIn(rawEvent: string, payload: string, provider: string): bool
  *
  * `strict` (`ProviderCallOptions.strictStream`) throws on an error frame and on a body that ends with no sign of an
  * orderly end. Without it both read as a normal end, as they always have for workflow runs.
+ *
+ * Some OpenAI-compatible servers ignore `stream: true` and answer with one plain chat completion: a body with no SSE
+ * event at all is read as that JSON answer. A body that is neither (empty, or not a completion), and a stream whose
+ * events carry no text, no tool call and no finish reason, fail instead of reading as an empty answer.
  */
 export async function* readOpenAIStream(
   body: ReadableStream<Uint8Array>,
@@ -255,8 +260,20 @@ export async function* readOpenAIStream(
   let buffer = "";
   let finished = false;
   let orderly = false;
+  // Whether any SSE event arrived, and whether any of them carried an answer (text, a tool call or a finish reason).
+  let sawEvent = false;
+  let sawAnswer = false;
+  // The whole body while no SSE event has arrived, for a server that answered plain JSON (dropped past the cap).
+  let plainBody: string | null = "";
   const observe = (rawEvent: string, payload: string) => {
+    sawEvent = true;
+    plainBody = null;
+    // Any finish reason counts as an answer, including ones outside the OpenAI vocabulary (`eos` and the like).
+    if (!sawAnswer && hasFinishReason(payload)) sawAnswer = true;
     if (input.strict && orderlyEndIn(rawEvent, payload, input.provider)) orderly = true;
+  };
+  const noteAnswer = (chunk: LLMStreamChunk) => {
+    if (chunk.type === "text_delta" || chunk.type === "tool_call_delta" || chunk.type === "finish") sawAnswer = true;
   };
   try {
     while (true) {
@@ -270,17 +287,31 @@ export async function* readOpenAIStream(
         finished = true;
         break;
       }
-      buffer += decoder.decode(value, { stream: true });
+      const text = decoder.decode(value, { stream: true });
+      // A boundary can straddle the old end of the buffer by up to 3 characters ("\r\n\r" + "\n").
+      let scanFrom = Math.max(0, buffer.length - 3);
+      buffer += text;
+      // A body that is not a stream is kept to be read as one JSON answer, up to the cap: past it, it fails.
+      if (plainBody !== null) {
+        if (plainBody.length + text.length > STREAM_BUFFER_MAX_CHARS) throw streamFailure(input.provider, "sent a response larger than 8 MB without a stream event");
+        plainBody += text;
+      }
       while (true) {
-        const boundary = findSSEBoundary(buffer);
+        const boundary = findSSEBoundary(buffer, scanFrom);
+        scanFrom = 0;
         if (!boundary) break;
         const rawEvent = buffer.slice(0, boundary.index);
         buffer = buffer.slice(boundary.index + boundary.separatorLength);
         const payload = parseSSEEventPayload(rawEvent);
         if (!payload) continue;
         observe(rawEvent, payload);
-        for (const chunk of chunksOfEvent(payload)) yield chunk;
+        for (const chunk of chunksOfEvent(payload)) {
+          noteAnswer(chunk);
+          yield chunk;
+        }
       }
+      // What is left is one event still arriving: one larger than the cap is not a model stream.
+      if (buffer.length > STREAM_BUFFER_MAX_CHARS) throw streamFailure(input.provider, "sent a stream event larger than 8 MB");
     }
   } finally {
     if (!finished) {
@@ -292,8 +323,75 @@ export async function* readOpenAIStream(
     const trailing = parseSSEEventPayload(buffer);
     if (trailing) {
       observe(buffer, trailing);
-      for (const chunk of chunksOfEvent(trailing)) yield chunk;
+      for (const chunk of chunksOfEvent(trailing)) {
+        noteAnswer(chunk);
+        yield chunk;
+      }
     }
   }
+  if (!sawEvent) {
+    // No SSE event at all: the server ignored `stream: true`. Read its body as one chat completion.
+    yield* chunksOfPlainCompletion(plainBody, input.provider);
+    return;
+  }
   if (input.strict && !orderly) throw streamFailure(input.provider, "ended the stream without finishing");
+  if (!sawAnswer) throw streamFailure(input.provider, "ended the stream without any answer (no text, tool call or finish reason)");
+}
+
+/** Whether an SSE payload carries a non-empty finish reason of any spelling. */
+function hasFinishReason(payload: string): boolean {
+  if (!payload.includes("finish_reason")) return false;
+  try {
+    const reason = (JSON.parse(payload) as OpenAIWireStreamResponse).choices?.[0]?.finish_reason;
+    return typeof reason === "string" && reason.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The most of a response held in memory at once: a plain JSON answer sent in place of a stream, or one SSE event
+ * still arriving. Past it the call fails (8 MB of text; a model answer is far smaller).
+ */
+export const STREAM_BUFFER_MAX_CHARS = 8 * 1024 * 1024;
+
+/**
+ * The chunks of a plain chat completion sent in place of a stream, as a stream of it would have carried them. Throws
+ * for an empty body, an error body and anything that is not a chat completion; the upstream's own text stays out.
+ */
+function chunksOfPlainCompletion(body: string | null, provider: string): LLMStreamChunk[] {
+  const text = body?.trim() ?? "";
+  if (text.length === 0) throw streamFailure(provider, "returned an empty stream (no events and no answer)");
+  let parsed: (OpenAIWireResponse & { error?: unknown; object?: unknown }) | null = null;
+  try {
+    parsed = text ? (JSON.parse(text) as OpenAIWireResponse & { error?: unknown; object?: unknown }) : null;
+  } catch {
+    parsed = null;
+  }
+  if (parsed && typeof parsed === "object" && (parsed.error || parsed.object === "error")) {
+    throw streamFailure(provider, "answered the stream request with an error");
+  }
+  const choice = parsed && typeof parsed === "object" && Array.isArray(parsed.choices) ? parsed.choices[0] : undefined;
+  if (!choice || !choice.message || typeof choice.message !== "object") {
+    throw streamFailure(provider, "answered the stream request with neither a stream nor a chat completion");
+  }
+  const out: LLMStreamChunk[] = [];
+  const content = choice.message.content;
+  if (typeof content === "string" && content.length > 0) out.push({ type: "text_delta", textDelta: content });
+  const toolCalls = Array.isArray(choice.message.tool_calls) ? choice.message.tool_calls : [];
+  toolCalls.forEach((toolCall, index) => {
+    if (typeof toolCall.function?.name !== "string") return;
+    out.push({
+      type: "tool_call_delta",
+      index: typeof toolCall.index === "number" ? toolCall.index : index,
+      toolCallId: toolCall.id,
+      name: toolCall.function.name,
+      argumentsDelta: typeof toolCall.function.arguments === "string" ? toolCall.function.arguments : ""
+    });
+  });
+  const hasToolCalls = out.some((chunk) => chunk.type === "tool_call_delta");
+  out.push({ type: "finish", reason: openAIFinishReason(choice.finish_reason) ?? (hasToolCalls ? "tool_calls" : "stop") });
+  const usage = extractOpenAIUsage(parsed?.usage);
+  if (usage) out.push({ type: "usage", usage });
+  return out;
 }

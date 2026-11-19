@@ -18,6 +18,54 @@ Concepts: [Workflows vs agents](/learn/agents/workflows-vs-agents) explains when
 - Execution logs pane and run-inputs pane
 - Per-node run data on the canvas and in the node inspector (see [Run data](#run-data))
 - Agent port `+` buttons that open filtered drawers for Language Models, Memory, Tools, and Workers
+- One undo history for every canvas change (see [Undo and redo](#undo-and-redo))
+
+## Adding nodes
+
+Open the palette with **Add node**, a double-click on empty canvas, or the `+` beside a node's output.
+
+- **Search** ranks what you type: an exact node name first (`output` finds **Output**, `if` finds **IF**), then names
+  that start with it, then other names a node goes by (`api` or `fetch` find **HTTP Request**, `foreach` finds
+  **Loop / ForEach**), then words in the description. The top result is marked **Best match**; **Enter** adds the
+  highlighted row and the arrow keys move the highlight.
+- **After the selected node**: with one node selected, the node you pick is placed to its right, clear of other
+  nodes, and connected from its first output that has no connection yet. The new node is selected, so adding several
+  in a row builds a chain. The palette's subtitle names the node it connects after. A trigger or input node, a sticky
+  note, and a model, memory or tool picked after an agent are placed but not connected (attach those through the
+  agent's ports). The connection follows the same rules as one you drag: when they refuse it (for example a model
+  picked before an agent), the node is placed unconnected and the editor shows why.
+- **From an output**: the `+` beside an output (shown on outputs with no connection, and on hover) opens the palette
+  connected after that output, for example an IF node's **false** branch or a node's red **Error** output (a node
+  added after an Error output goes on the row below). Dragging a connection out of an output and
+  dropping it on empty canvas does the same, and places the node where you dropped it.
+- **Drag and drop** a palette row onto the canvas to place a node at that point without connecting it.
+
+The canvas pans to show a node it adds when the node would land out of view.
+
+## Undo and redo
+
+`Ctrl+Z` undoes the last canvas change and `Ctrl+Shift+Z` or `Ctrl+Y` redoes it (`Cmd` on macOS). Every change is
+one step: adding, deleting, moving (one step per drag), connecting and removing a connection (double-click or
+right-click an edge), **Clear**, paste, duplicate, a node's settings, and **Tidy**. **Clear** asks before it removes
+the nodes, and can be undone. Opening or reloading a workflow starts a fresh history.
+
+## Model nodes
+
+A new **LLM Call** starts on a model that works right away. When the API server's environment sets `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or `GEMINI_API_KEY`
+(checked in that order), the node starts on that provider; otherwise, when you have saved a secret for OpenAI,
+Anthropic or Gemini, it starts on that provider with that secret; otherwise it starts on **Echo**, the built-in demo
+model. Echo answers with the prompt it receives, needs no key and calls nothing, so a new workflow runs on the first
+try. Pick a real provider in the node's **Provider** list when you are ready. A local Ollama is never picked for you.
+Nodes you already have keep the model they name.
+
+A new chain node such as **Text Classifier** or **Summarization Chain** starts with its **Provider** "Not set": it uses
+the model of an upstream model node. Pick a provider to give it its own model, or **Not set** to go back.
+
+Opening a model node never contacts a model server. To pick from the models a provider offers, click **Load models**
+under the model field; until then, type the model name. Model lists for Ollama come only from the node's base URL or
+the server's `OLLAMA_BASE_URL`.
+
+The agent's **Language Models** drawer offers **LLM Call** too, so an agent can run on Echo before it has a real model.
 
 ## Workflow settings
 
@@ -50,6 +98,15 @@ A Text Input or User Prompt node with text keeps the test prompt out, so the nod
 Prompt node with text does the same for the system prompt. A workflow that reads neither, for example an HTTP
 Request followed by an Output, runs with no prompt, so the test prompt does not show up in its input or its output.
 The chat panel sends the message you type, and its system prompt on the same rule.
+
+**Webhook run** (canvas toolbar) asks for the request body first: a JSON object that the run receives as a call to the
+webhook URL would send it, so nodes read its fields as <span v-pre>`{{webhook.customer}}`</span>. The body is saved with the workflow
+(`settings.testWebhookPayload`, at most 64 KB) and filled in the next time. Everyone who can read the workflow sees it,
+so a field named like a credential (`password`, `token`, `api_key`, `authorization`, `secret` and the like) is refused:
+put credentials in a secret instead.
+
+**New workflow** opens a User Prompt → Output starter in the editor without saving it. Its first edit (or a save or a
+run) saves it; open another workflow first and nothing is kept.
 
 ## Run data
 
@@ -89,10 +146,12 @@ for every node, so it keeps its shape while you move between nodes; on a narrow 
   line between panes, or focus it and use the arrow keys, to resize. Both are remembered. The panes give way when the
   window is narrow, so the parameters and the Output pane stay in view. Before a node has run, its empty Input and
   Output panes start as rails so the parameters get the room.
-- **Parameters** shows the fields you set most. A node type's rarely used fields (for example an HTTP request's
-  headers, body and timeout, a model's temperature and max tokens, an agent's iteration and tool output limits, a
+- **Parameters** shows the fields you set most. A node type's rarely used fields (for example a GET request's
+  headers and an HTTP request's timeout and response type, a model's temperature and max tokens, an agent's iteration and tool output limits, a
   content rules node's approval settings) are under **Advanced**, closed by default; its title counts the fields
-  that differ from their defaults. Help for a field is behind the **?** next to its label. The expression helpers
+  that differ from their defaults. A POST, PUT or PATCH request shows its **Body** and **Headers** next to the URL; a
+  body that is valid JSON is sent as `application/json` unless the headers set a `Content-Type`. Help for a field is
+  behind the **?** next to its label. The expression helpers
   under a template field show while you edit it, and its preview shows when the result differs from what you typed
   (or the expression has an error). A code node's **Test Run** stays in view, with its test input folded under it.
 - **Settings** holds what every node has: disabled, accent colour, error handling (retries, delay, on error), input
@@ -111,7 +170,8 @@ for every node, so it keeps its shape while you move between nodes; on a narrow 
 **Run data** in the canvas toolbar lists this workflow's latest runs. Pick one to load it onto the canvas and into
 the inspector; the workflow itself is not changed. An older run stays loaded until you pick the latest one or run
 the workflow again. Otherwise a run started elsewhere (a webhook, the API) appears on the canvas on its own while it is
-running.
+running. Opening a workflow loads its latest run, so the run pill and Run data show it straight away; **Clear logs**
+keeps the canvas clear until the next run.
 
 The editor shows exactly what run history stored for that run: it never fetches anything else. Values that run
 history keeps masked or as placeholders (see [content rules](/product/content-rules)) stay that way here.
@@ -137,5 +197,43 @@ Validation checks include:
 - Required node config fields
 - Attachment-type correctness (for agent/supervisor ports)
 - Node-type specific rules
+
+An Output node is optional. Without one, a run's result is the output of the last node that ran, and validation
+lists it as a note, not an error.
+
+Saving keeps a draft: node settings you have not filled in yet (an HTTP Request URL, an IF condition, a model, a
+Set node's fields and the like) do not stop a save. The editor lists them above the canvas after the save, with a
+link to each node, and a run stops at them until they are fixed. Such a version cannot be published either. A save is
+still refused for a broken graph (a cycle, an edge to a missing node, a repeated node id) and for settings that are
+live as soon as the workflow is saved: trigger and webhook authentication settings, approval and content-rule rules,
+and attachment rules.
+
+### Settings that may be unfinished in a draft
+
+These save unfinished; each one stops a run until it is filled in:
+
+- Templates: a Prompt Template's template, an HTTP Request URL and its Retry on status list, a Set node's fields (and
+  their names and values)
+- Branching: an IF condition, a Switch value and its cases, a Merge node's combine key and its second input
+- Loops: a Loop's input key and item variable
+- Models: an LLM Call's provider, a Gemini model, a chat model's model or gateway base URL, an agent's attached chat
+  model
+- Azure: the Azure OpenAI secret, endpoint and deployment, the Azure embedding secret and settings, and the
+  operation of an Azure Storage, Monitor, Cosmos DB or AI Search node
+- Tools and data: an MCP tool or resource, a connector, a Qdrant operation, an output parser's schema, an input
+  validator's rules
+- Code and sub-workflows: a code node's script, the workflow an Execute Workflow or Workflow Tool node calls
+
+### Live triggers of an unfinished draft
+
+While the version production would run has unfinished settings (a saved draft with nothing published), its live
+triggers are paused and the editor says so above the canvas: a production webhook (`/webhook/:path`, after its own
+address and authentication checks), form submission, chat message or MCP trigger call answers `409` with
+`code: "workflow_unfinished"` and starts no run (the form page and the tool's manifest still show), and a schedule or
+app trigger skips its tick. Other production runs of that version are refused with the same code: an API key's
+`/execute` answers `409`; a sub-workflow call fails the calling run with `errorCode: "workflow_unfinished"` (a webhook
+answer carries it as `code`); a call through the MCP gateway returns a tool error with `_meta.code`. The audit log
+records the pause once per version (`workflow.triggers_paused`, "Live triggers paused: unfinished settings"). Webhook run and the test webhook URL (`/webhook-test/:path`) still run the draft, so you can
+see where it stops. Save it finished and the triggers serve again.
 
 Non-connected nodes are not executed.

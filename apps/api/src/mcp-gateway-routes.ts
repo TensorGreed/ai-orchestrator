@@ -181,6 +181,7 @@ import type { Store } from "./db/store.js";
 import { labelMarkRaiseHeld, labelMarkRaised, type McpGatewayLabelMark, type McpGatewayLabelMarkKey } from "./db/gateway-label-marks.js";
 import { filterAsync, mapAsync } from "./async-array.js";
 import { pageOfById, pageRequestFromQuery } from "./pagination.js";
+import { productionRefusalCode } from "./services/release-service.js";
 
 const SERVER_VERSION = "0.1.0";
 const MAX_ERROR_CHARS = 500;
@@ -242,6 +243,8 @@ export interface GatewayWorkflowRunOutcome {
   status: string;
   output?: unknown;
   error?: string;
+  /** Why the run did not start, for clients: `workflow_unfinished` when production's version has unfinished settings. */
+  code?: string;
   /**
    * 12.2 — the labels of the run's output, when known: the engine's (on this instance, or stored with a queue
    * worker's result), else `sensitive` when the workflow declares a sensitive source (tracking toolsets only).
@@ -321,6 +324,12 @@ export interface McpGatewayDeps {
    * the draft. The admin API (toolset members, candidates) reads drafts.
    */
   loadProductionWorkflow?: (id: string) => Promise<Workflow | null>;
+  /**
+   * The workflow the gateway lists as a tool: production's version, unfinished or not. A call of a tool whose version
+   * has unfinished settings is refused with `code: "workflow_unfinished"` (the tool call loads `loadProductionWorkflow`).
+   * Defaults to `loadProductionWorkflow`.
+   */
+  loadCatalogWorkflow?: (id: string) => Promise<Workflow | null>;
   /** Phase 15.4 — why production refuses an existing workflow (a deactivated gated one); the tool call reports it. */
   productionRefusal?: (id: string) => Promise<string | null>;
   /** 12.2 — the ids of secrets flagged "sensitive output": a server that uses one returns sensitive results. */
@@ -649,8 +658,9 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
   };
 
   const productionWorkflow = async (id: string): Promise<Workflow | null> => (deps.loadProductionWorkflow ? deps.loadProductionWorkflow(id) : await store.getWorkflow(id));
+  const catalogWorkflow = async (id: string): Promise<Workflow | null> => (deps.loadCatalogWorkflow ? await deps.loadCatalogWorkflow(id) : await productionWorkflow(id));
   const catalogStore = {
-    getWorkflow: productionWorkflow,
+    getWorkflow: catalogWorkflow,
     listMcpServers: async () => await store.listMcpServers(),
     getMcpToolSnapshot: async (id: string) => await store.getMcpToolSnapshot(id),
     listMcpToolPolicies: async () => await store.listMcpToolPolicies(),
@@ -1522,7 +1532,12 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
     let outcome: GatewayWorkflowRunOutcome;
     if (!workflow) {
       const refusal = (await deps.productionRefusal?.(tool.workflowId)) ?? null;
-      outcome = { status: "error", error: refusal ? `Workflow '${tool.workflowName}': ${refusal}` : `Workflow '${tool.workflowName}' no longer exists.` };
+      const code = productionRefusalCode(refusal);
+      outcome = {
+        status: "error",
+        error: refusal ? `Workflow '${tool.workflowName}': ${refusal}` : `Workflow '${tool.workflowName}' no longer exists.`,
+        ...(code ? { code } : {})
+      };
     } else {
       const total = workflow.nodes.length;
       let done = 0;
@@ -1556,7 +1571,8 @@ export function registerMcpGatewayRoutes(deps: McpGatewayDeps) {
         outcome = { status: "error", error: error instanceof Error ? error.message : String(error) };
       }
     }
-    const meta = { executionId };
+    // A refusal's code (such as `workflow_unfinished`) travels with the tool error, as the HTTP entry points send it.
+    const meta = { executionId, ...(outcome.status === "error" && outcome.code ? { code: outcome.code } : {}) };
     let result: McpCallToolResult;
     let errorText: string | null = null;
     // 12.6 — the run's answer (its output or error text) reaches the client like a server tool's result: it is

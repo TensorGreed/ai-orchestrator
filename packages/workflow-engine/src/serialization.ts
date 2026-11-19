@@ -1,4 +1,4 @@
-import { WORKFLOW_SCHEMA_VERSION, workflowSchema, type Workflow } from "@ai-orchestrator/shared";
+import { WORKFLOW_SCHEMA_VERSION, repairWorkflowErrorConfigs, workflowSchema, type Workflow } from "@ai-orchestrator/shared";
 
 export interface WorkflowExportPayload {
   schemaVersion: string;
@@ -28,5 +28,6 @@ export function importWorkflowFromJson(raw: string): Workflow {
     workflowVersion: workflowCandidate.workflowVersion || 1
   };
 
-  return workflowSchema.parse(normalized);
+  // An export of a workflow stored before errorConfig was checked may hold invalid fields: they are left out.
+  return workflowSchema.parse(repairWorkflowErrorConfigs(normalized).workflow);
 }
