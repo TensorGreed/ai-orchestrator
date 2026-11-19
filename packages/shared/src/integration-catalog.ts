@@ -141,6 +141,16 @@ export interface CatalogSourceSummary {
 // OpenAPI parsing
 // ---------------------------------------------------------------------------------------------------------------------
 
+/**
+ * True when a name or a default from a spec or a tool schema holds `{{` or `}}`. Such text would become an expression
+ * in the node's request templates (and could read the run's data), so names are left out and defaults not offered.
+ */
+export function hasTemplateMarks(value: string): boolean {
+  return value.includes("{{") || value.includes("}}");
+}
+
+const LEFT_OUT_NAMES = "Names with {{ or }} were left out: they would be read as expressions.";
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -297,6 +307,10 @@ function readParameters(
     const name = text(parameter.name);
     const location = text(parameter.in).toLowerCase();
     if (!name) continue;
+    if (hasTemplateMarks(name)) {
+      warnings.add(LEFT_OUT_NAMES);
+      continue;
+    }
     if (location === "cookie") {
       warnings.add("Cookie parameters are not supported and were left out.");
       continue;
@@ -382,6 +396,11 @@ function parseDocument(document: unknown, options: { sourceUrl?: string }): Open
   let dropped = 0;
   for (const [path, rawItem] of Object.entries(paths)) {
     if (!path.startsWith("/")) continue;
+    // A path is literal text in the request URL: no expressions, no query or fragment of its own.
+    if (hasTemplateMarks(path) || path.includes("?") || path.includes("#")) {
+      warnings.add("Paths with {{, }}, ? or # were left out.");
+      continue;
+    }
     const item = resolveRefs(document, rawItem);
     if (!isRecord(item)) continue;
     const shared = readParameters(item.parameters, document, warnings);
@@ -586,6 +605,8 @@ export function jsonTemplateFromForm(
     const parts: string[] = [];
     let touched = false;
     for (const [key, rawProperty] of Object.entries(properties)) {
+      // A key from the schema with {{ or }} would be an expression in the template: never written.
+      if (hasTemplateMarks(key)) continue;
       const property = isRecord(rawProperty) ? rawProperty : {};
       const fieldPath = path ? `${path}.${key}` : key;
       const kind = schemaTypeOf(property);

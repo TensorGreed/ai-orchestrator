@@ -110,7 +110,8 @@ export function registerWorkflowBuilderRoutes(deps: WorkflowBuilderRoutesDeps): 
     let provider: LLMProviderConfig;
     if (parsed.data.model) {
       const secretId = parsed.data.model.secretRef?.secretId;
-      if (secretId && !(await deps.canUseSecret(user, secretId))) {
+      // The secret must be one this person may use in the target project (the list the dialog offers), not any secret they may use.
+      if (secretId && (!(await deps.canUseSecret(user, secretId)) || !(await deps.usableSecrets(user, projectId)).some((secret) => secret.id === secretId))) {
         reply.code(403);
         return { error: `Secret '${secretId}' is not available to you.` };
       }

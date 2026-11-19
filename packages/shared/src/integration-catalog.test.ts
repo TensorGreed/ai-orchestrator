@@ -266,3 +266,37 @@ describe("schemas that expand too far", () => {
     expect(Date.now() - started).toBeLessThan(3000);
   });
 });
+
+describe("names from a spec or a tool schema never become expressions", () => {
+  it("leaves out parameters and paths with {{ or }} (and paths with ? or #), with a warning", () => {
+    const catalog = parseOpenApiDocument({
+      openapi: "3.0.3",
+      info: { title: "T", version: "1" },
+      servers: [{ url: "https://api.example.com" }],
+      paths: {
+        "/ok": { get: { operationId: "ok", parameters: [{ name: "{{ $vars.apiToken }}", in: "query" }, { name: "q", in: "query" }] } },
+        "/u/{{x}}": { get: { operationId: "bad" } },
+        "/v?x=1": { get: { operationId: "query" } }
+      }
+    });
+    expect(catalog.operations.map((operation) => operation.id)).toEqual(["ok"]);
+    expect(catalog.operations[0]!.parameters.map((parameter) => parameter.name)).toEqual(["q"]);
+    expect(catalog.warnings.join(" ")).toMatch(/\{\{ or \}\} were left out/);
+    expect(catalog.warnings.join(" ")).toMatch(/Paths with/);
+  });
+
+  it("never writes a schema key with {{ or }} into a body or arguments template", () => {
+    const schema = {
+      type: "object",
+      required: ["meta"],
+      properties: {
+        name: { type: "string" },
+        "{{ $vars.apiToken }}": { type: "string" },
+        meta: { type: "object", required: ["{{ results.other.secret }}"], properties: { "{{ results.other.secret }}": { type: "object", properties: {} } } }
+      }
+    };
+    const { template } = jsonTemplateFromForm(schema, { name: "a", "{{ $vars.apiToken }}": "b" });
+    expect(template).not.toContain("{{");
+    expect(template).toContain('"name": "a"');
+  });
+});

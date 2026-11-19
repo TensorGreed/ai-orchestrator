@@ -334,6 +334,25 @@ describe("POST /api/workflow-builder/build", () => {
     expect(modelRequests).toHaveLength(0);
   });
 
+  it("refuses a secret of another project, even one the person may use there", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context, "builder");
+    const otherId = (await context.app.inject({ method: "POST", url: "/api/projects", headers: { cookie }, payload: { name: "Other" } })).json<{ id: string }>().id;
+    const secret = await context.app.inject({
+      method: "POST",
+      url: "/api/secrets",
+      headers: { cookie },
+      payload: { name: "Other key", provider: "openai", value: "other-project-key", projectId: otherId }
+    });
+    const secretId = secret.json<{ secretId?: string; id?: string }>().secretId ?? secret.json<{ id: string }>().id;
+    const model = { ...mockModel(), secretRef: { secretId } };
+    const elsewhere = await build(context, cookie, { prompt: "post orders", projectId: "default", model });
+    expect(elsewhere.statusCode, elsewhere.body).toBe(403);
+    expect(modelRequests).toHaveLength(0);
+    const there = await build(context, cookie, { prompt: "post orders", projectId: otherId, model });
+    expect(there.statusCode, there.body).toBe(200);
+  });
+
   it("runs one build at a time per person", async () => {
     const context = await createTestContext();
     const cookie = await login(context, "builder");
