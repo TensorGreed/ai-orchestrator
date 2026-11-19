@@ -116,7 +116,8 @@ on Pass and its discarded output on Stopped.
 
 ### Set / Transform
 
-Each field has a **Type** (`type`):
+Each field has a **Type** (`type`). A field on `auto` keeps its type under **More** (**Type of** the field's key); a
+field with another type shows it in its row.
 
 | Type | The value |
 |---|---|

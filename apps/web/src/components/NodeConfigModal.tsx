@@ -7042,32 +7042,34 @@ export function NodeInspector({
                       rows={3}
                     />
                   </div>
-                  <SelectField
-                    label="Type"
-                    value={typeof assignment.type === "string" ? assignment.type : ""}
-                    onChange={(next) =>
-                      setConfig((current) => {
-                        const currentAssignments = Array.isArray(current.assignments)
-                          ? current.assignments.map((item) => asRecord(item))
-                          : [];
-                        currentAssignments[index] = {
-                          ...asRecord(currentAssignments[index]),
-                          type: next
-                        };
-                        return {
-                          ...current,
-                          assignments: currentAssignments
-                        };
-                      })
-                    }
-                    options={setValueTypeOptions(assignment.type)}
-                    help="Auto keeps the type of a value that is one {{ }} (a number, true or false, a list or an object); other values are text. String, Number, Boolean and JSON convert the value, and a value that cannot be converted fails the node. A field saved before types existed is Text (as before): its value becomes text, and text that is a JSON object or list is parsed."
-                  />
+                  {assignment.type !== "auto" ? (
+                    <SelectField
+                      label="Type"
+                      value={typeof assignment.type === "string" ? assignment.type : ""}
+                      onChange={(next) =>
+                        setConfig((current) => {
+                          const currentAssignments = Array.isArray(current.assignments)
+                            ? current.assignments.map((item) => asRecord(item))
+                            : [];
+                          currentAssignments[index] = {
+                            ...asRecord(currentAssignments[index]),
+                            type: next
+                          };
+                          return {
+                            ...current,
+                            assignments: currentAssignments
+                          };
+                        })
+                      }
+                      options={setValueTypeOptions(assignment.type)}
+                      help="Auto keeps the type of a value that is one {{ }} (a number, true or false, a list or an object); other values are text. String, Number, Boolean and JSON convert the value, and a value that cannot be converted fails the node. A field saved before types existed is Text (as before): its value becomes text, and text that is a JSON object or list is parsed."
+                    />
+                  ) : null}
                   <div className="cfg-inline-actions">
                     <button
                       type="button"
                       className="header-btn danger"
-                      onClick={() =>
+                      onClick={() => {
                         setConfig((current) => {
                           const currentAssignments = Array.isArray(current.assignments)
                             ? current.assignments.map((item) => asRecord(item))
@@ -7077,8 +7079,8 @@ export function NodeInspector({
                             ...current,
                             assignments: currentAssignments
                           };
-                        })
-                      }
+                        });
+                      }}
                     >
                       Remove
                     </button>
@@ -7110,6 +7112,31 @@ export function NodeInspector({
                 </button>
               </div>
             </div>
+            {assignments.some((assignment) => assignment.type === "auto") ? (
+              // Fields on Auto (the default) keep their type under More; a field with another type shows it in its row.
+              <AdvancedFields>
+                {assignments.map((assignment, index) =>
+                  assignment.type === "auto" ? (
+                    <SelectField
+                      key={`assignment-type-${index}`}
+                      label={`Type of ${toStringValue(assignment.key).trim() || `field ${index + 1}`}`}
+                      value="auto"
+                      onChange={(next) =>
+                        setConfig((current) => {
+                          const currentAssignments = Array.isArray(current.assignments)
+                            ? current.assignments.map((item) => asRecord(item))
+                            : [];
+                          currentAssignments[index] = { ...asRecord(currentAssignments[index]), type: next };
+                          return { ...current, assignments: currentAssignments };
+                        })
+                      }
+                      options={setValueTypeOptions("auto")}
+                      help="Auto keeps the type of a value that is one {{ }} (a number, true or false, a list or an object); other values are text. String, Number, Boolean and JSON convert the value, and a value that cannot be converted fails the node. A field with another type shows it in its row."
+                    />
+                  ) : null
+                )}
+              </AdvancedFields>
+            ) : null}
           </>
         );
       }

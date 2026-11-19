@@ -124,10 +124,12 @@ test.describe("lists of items", () => {
       await page.keyboard.press("Escape");
       await expect(inspector).toHaveCount(0);
 
-      // The Set form: each field has a Type.
+      // The Set form: each field has a Type; while it is Auto it sits under More, not in the field's row.
       await canvasNode(page, "Shape row").dblclick();
       inspector = page.getByRole("dialog", { name: /^Inspect / });
-      await expect(inspector.getByLabel(/^Type/).nth(1)).toHaveValue("auto");
+      await expect(inspector.getByLabel(/^Type of expensive/)).toBeHidden();
+      await inspector.getByTestId("advanced-fields").getByText("More", { exact: true }).click();
+      await expect(inspector.getByLabel(/^Type of expensive/)).toHaveValue("auto");
       await page.screenshot({ path: path.join(SHOT_DIR, "after-02-set-field-types.png") });
       await page.keyboard.press("Escape");
       await expect(inspector).toHaveCount(0);

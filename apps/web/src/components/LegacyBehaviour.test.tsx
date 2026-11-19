@@ -125,7 +125,9 @@ describe("Set", () => {
     const notice = screen.getByTestId("legacy-behaviour");
     expect(notice).toHaveTextContent("fields saved without a type turn their values into text");
     await user.click(within(notice).getByRole("button", { name: "Upgrade to the new behaviour" }));
-    expect(screen.getAllByLabelText(/^Type/)[0]).toHaveValue("auto");
+    // Upgraded to Auto, the field's type moves under More; the typed field keeps its select in its row.
+    expect(screen.getByLabelText(/^Type of a/)).toHaveValue("auto");
+    expect(screen.getAllByLabelText(/^Type(?! of)/)).toHaveLength(1);
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     expect(view.onSave).toHaveBeenCalledWith(
       expect.objectContaining({
