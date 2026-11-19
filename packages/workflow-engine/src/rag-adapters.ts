@@ -30,7 +30,7 @@ function requireEmbeddingKey(apiKey: string | undefined, provider: string, envVa
     ErrorCategory.PROVIDER_AUTH,
     false,
     { provider, ...(envVar ? { envVar } : {}) },
-    `Add a ${provider} key, or switch the node to the built-in token embedder.`
+    `Add ${/^[AEIOU]/i.test(provider) ? "an" : "a"} ${provider} key, or switch the node to the built-in token embedder.`
   );
 }
 

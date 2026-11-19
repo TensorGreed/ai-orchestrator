@@ -17,7 +17,7 @@ description: "Install and run L2M locally: prerequisites (Node.js 24+, pnpm 10+)
 pnpm install
 ```
 
-pnpm may warn that it ignored the build script of `onnxruntime-node`: that is safe to ignore (it belongs to the optional names service and is not needed to run L2M).
+pnpm may warn that it ignored build scripts (for example `onnxruntime-node`, `esbuild`, `keytar`, `@vscode/vsce-sign`): that is safe to ignore. They belong to optional parts (the names service, the VS Code extension's packaging) and are not needed to run L2M.
 
 ## Configure env
 

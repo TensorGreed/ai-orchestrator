@@ -23,6 +23,7 @@ describe("embedders that need a key", () => {
     };
     const openai = new OpenAIEmbeddingAdapter({ apiKey: "", fetcher });
     await expect(openai.embed("hello")).rejects.toThrow(/No OpenAI API key for the embedder.*OPENAI_API_KEY/);
+    await expect(openai.embed("hello")).rejects.toMatchObject({ remediation: expect.stringMatching(/^Add an OpenAI key/) });
     await expect(openai.embed("hello")).rejects.toMatchObject({ category: ErrorCategory.PROVIDER_AUTH });
     const azure = new AzureOpenAIEmbeddingAdapter({ apiKey: "", endpoint: "https://r.openai.azure.com", deployment: "emb", fetcher });
     await expect(azure.embed("hello")).rejects.toThrow(/No Azure OpenAI API key for the embedder/);
