@@ -4789,18 +4789,11 @@ export async function createApp(
     // Who started a run (its history, or the paused state of a run that has none yet) and whose sessions it used.
     getRunOwner: async (executionId) => {
       const history = await store.getExecutionHistory(executionId);
-      const paused = history ? null : await store.getWorkflowExecutionState(executionId);
-      const started = history ?? paused;
-      if (!started) return null;
-      // A paused run keeps whose sessions it uses, and who started it, in its state until its history records them.
-      const pausedState = paused ? asRecord(paused.state) : {};
-      const pausedOwner = pausedState.sessionOwner;
-      const pausedStarter = pausedState.triggeredByUserId;
-      const sessionOwner = (await store.getExecutionSessionOwner(executionId)) ?? (typeof pausedOwner === "string" ? pausedOwner : null);
-      const triggeredByUserId = (history ? await store.getExecutionStarter(executionId) : null) ?? (typeof pausedStarter === "string" && pausedStarter ? pausedStarter : null);
-      return { triggeredBy: started.triggeredBy ?? null, triggeredByUserId, sessionOwner, startedAt: started.startedAt ?? null };
+      // A paused run has its history row (written when it paused); one without it is nobody's own, as the stores'
+      // approvals lists judge it (db/own-runs-sql.ts).
+      if (!history) return (await store.getWorkflowExecutionState(executionId)) ? { triggeredByUserId: null, sessionOwner: null } : null;
+      return { triggeredByUserId: await store.getExecutionStarter(executionId), sessionOwner: await store.getExecutionSessionOwner(executionId) };
     },
-    getUserCreatedAt: async (userId) => (await store.getUserById(userId))?.createdAt ?? null
   });
   // Phase 9.1 — built-in persistent vector store. A run sees the knowledge
   // bases of its own project and the shared ones without a project; any other
@@ -5800,15 +5793,27 @@ export async function createApp(
   });
 
   /**
-   * v80 — the starter of a run recorded before user ids were: the account with that user id, or with that email when
-   * the account is older than the run (as run-access.ts runOwnedBy judges it). Null otherwise.
+   * v80 — who started a paused run that recorded no starter's user id: its history's (migration 80 set it on the runs
+   * recorded before, or left it empty when it could tell nobody). A run paused with no history row follows migration
+   * 80's rule: its first approval request's requester (`firstRequester`, by user id, else by email) or, with no request,
+   * the paused row's `triggeredBy`; that names the account with that user id, or with that email when the account is
+   * older than the run.
    */
-  const legacyRunStarter = async (triggeredBy: string | null, startedAt: string | null): Promise<string | null> => {
-    if (!triggeredBy) return null;
-    const byId = await store.getUserById(triggeredBy);
+  const pausedRunStarter = async (
+    executionId: string,
+    hasHistory: boolean,
+    firstRequester: { userId: string | null; email: string | null } | null,
+    triggeredBy: string | null,
+    startedAt: string | null
+  ): Promise<string | null> => {
+    if (hasHistory) return await store.getExecutionStarter(executionId);
+    if (firstRequester?.userId) return (await store.getUserById(firstRequester.userId))?.id ?? null;
+    const ref = firstRequester ? firstRequester.email : triggeredBy;
+    if (!ref) return null;
+    const byId = await store.getUserById(ref);
     if (byId) return byId.id;
-    if (!triggeredBy.includes("@") || !startedAt) return null;
-    const byEmail = await store.getUserByEmail(triggeredBy.toLowerCase());
+    if (!ref.includes("@") || !startedAt) return null;
+    const byEmail = await store.getUserByEmail(ref);
     return byEmail && Date.parse(byEmail.createdAt) <= Date.parse(startedAt) ? byEmail.id : null;
   };
   // Phase 11.2 — resuming a decided approval: inline, or on the execution queue when it is in use.
@@ -5999,6 +6004,10 @@ export async function createApp(
         // 12.6 — a run an MCP gateway call started resumes under the same toolset/client Guard stack (pinned versions),
         // and its history keeps the record, so a retry or replay of it applies the stack again.
         const resumeHistory = await store.getExecutionHistory(job.executionId);
+        // Who started the run: its first approval request's requester (an older build wrote the approver into a
+        // resumed run's triggered_by, also of the paused row when it paused again), else as the paused row records it.
+        const [firstRequest] = await store.listApprovalRequestsForExecution(job.executionId);
+        const startedBy = firstRequest?.requestedBy ?? pending.triggeredBy ?? resumeHistory?.triggeredBy ?? undefined;
         const gatewayGuard =
           parseGatewayGuardStack(state.gatewayGuard) ?? parseGatewayGuardStack(asRecord(resumeHistory?.customData)[GATEWAY_GUARD_CUSTOM_DATA_KEY]);
         // 12.6 — and its usage stays the gateway client's and counts toward the toolset's project (not the approver's).
@@ -6020,16 +6029,23 @@ export async function createApp(
           budgetSubject: state.budgetSubject ?? budgetSubjectOf(pending.triggeredBy ?? undefined),
           // A run kept to one person's sessions stays so after the approval, whoever decided it.
           ...(typeof state.sessionOwner === "string" && state.sessionOwner ? { sessionOwner: state.sessionOwner } : {}),
-          // v80 — and stays the person's who started it, not the approver's (a run paused before v80: by its email).
+          // v80 — and stays the person's who started it, not the approver's (a run paused before v80: see pausedRunStarter).
           triggeredByUserId:
             typeof state.triggeredByUserId === "string" && state.triggeredByUserId
               ? state.triggeredByUserId
-              : await legacyRunStarter(pending.triggeredBy ?? null, pending.startedAt ?? null),
+              : await pausedRunStarter(
+                  job.executionId,
+                  resumeHistory !== null,
+                  firstRequest ? { userId: firstRequest.requestedByUserId, email: firstRequest.requestedBy } : null,
+                  pending.triggeredBy ?? null,
+                  pending.startedAt ?? null
+                ),
           policyActor: actor,
           workflow: resumeWorkflow,
           executionId: job.executionId,
           triggerType: "approval_resume",
-          triggeredBy: actedBy,
+          // "Started by" stays who started the run; the approver is recorded on the decision (approval_requests).
+          triggeredBy: startedBy,
           // The resumed run is its own span, linked (not parented) to the node that paused, hours or days earlier.
           ...(readTraceCarrier(state.traceContext) ? { traceLinks: [readTraceCarrier(state.traceContext)!] } : {}),
           resumeState: { ...state, workflow: resumeWorkflow },
@@ -6047,7 +6063,7 @@ export async function createApp(
           workflow: state.workflow,
           result,
           triggerType: "approval_resume",
-          triggeredBy: actedBy,
+          triggeredBy: startedBy,
           ...(resumeCustomData ? { customData: { ...(result.customData ?? {}), ...resumeCustomData } } : {}),
           ...(gatewayUsage ? { gatewayUsage } : {}),
           requestInput: {
@@ -6097,7 +6113,8 @@ export async function createApp(
         // error); the attempts are for a lost worker, re-run only if nothing completed since the resume started.
         maxAttempts: 3,
         triggerType: "approval_resume",
-        triggeredBy: job.actedBy,
+        // The run's starter, as the run records them; the approver is on the decision.
+        triggeredBy: pending?.triggeredBy ?? job.actedBy,
         // The queue's stuck-job threshold follows the run's own timeout.
         executionTimeoutMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS,
         resume: job

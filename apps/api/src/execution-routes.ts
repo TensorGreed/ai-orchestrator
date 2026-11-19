@@ -141,11 +141,11 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
    * continues their sessions; anyone else's runs under the person's key in a namespace of its own (a repeat owner,
    * db/person-sessions.ts), so it reads none of their memory, whatever its session templates say, and writes nowhere
    * they read. A run whose owner went unrecorded (a canceled, expired or reconciled run) is judged by who started it
-   * (their user id, v80; for an older run their email, only when that account is older than the run), failing closed. A run that used the workflow's sessions is repeated in the repeating person's scope, as a new run
-   * of theirs would be. `null`: the person was deleted, so the run is not repeated (their sessions are gone).
+   * (their user id, v80), failing closed: a run that records nobody is repeated in the repeating person's scope, as a run
+   * that used the workflow's sessions is, like a new run of theirs. `null`: the person was deleted, so the run is not repeated (their sessions are gone).
    */
   const repeatSessionScope = async (
-    source: { id: string; triggeredBy?: string | null; startedAt?: string | null },
+    source: { id: string },
     user: SafeUser,
     workflow: Workflow,
     executionId: string
@@ -153,10 +153,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     let owner = await deps.store.getExecutionSessionOwner(source.id);
     if (!owner) {
       const starterId = await deps.store.getExecutionStarter(source.id);
-      const byEmail = !starterId && source.triggeredBy ? await deps.store.getUserByEmail(source.triggeredBy.toLowerCase()) : null;
-      // An email names the run's starter only when that account is older than the run (a reused email is not them).
-      const emailStarter = byEmail && source.startedAt && Date.parse(byEmail.createdAt) <= Date.parse(source.startedAt) ? byEmail : null;
-      const starter = starterId ? await deps.store.getUserById(starterId) : emailStarter;
+      const starter = starterId ? await deps.store.getUserById(starterId) : null;
       // The person who started it no longer has an account: their sessions are gone, so it is not run again.
       if (starterId && !starter) return null;
       if (starter) {

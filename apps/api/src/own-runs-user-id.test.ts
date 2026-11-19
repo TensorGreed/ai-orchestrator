@@ -1,8 +1,8 @@
 /**
  * v80 — own runs by user id. A run records the id of the person who started it (`triggered_by_user_id`), and "their own
- * runs" (a person who has a workflow only through a share with them) is judged by that id when a run has one. A run
- * recorded before v80 has only an email: it is the person's only when their account was created before the run
- * started, so an email given to a new account later does not bring the old account's runs with it. Signed-in form
+ * runs" (a person who has a workflow only through a share with them) is judged by that id and the session owner only:
+ * an email never counts (migration 80 set the id on the runs recorded before; db/execution-starter-v80-upgrade.test.ts).
+ * An approver's resume changes neither the id nor "started by"; the approver is on the decision. Signed-in form
  * submissions and chats are the submitter's own runs. Release history and the publish preview leave out what comes
  * from other people's runs (gate reasons, figures, the replay job) for such a person.
  */
@@ -182,10 +182,10 @@ describe("own runs by user id (v80)", () => {
     const paused = await call(context, "POST", "/api/workflows/wf-gated/execute", olivia.cookie, { input: {} });
     expect(paused.json<{ status: string }>().status, paused.body).toBe("waiting_approval");
     const oldPaused = paused.json<{ executionId: string }>().executionId;
-    // A run recorded before v80 (no user id): only the email says whose it is.
+    // A run with only their email (no starter's user id): nobody's own run, not even theirs.
     const legacyAt = new Date().toISOString();
     await context.store.saveExecutionHistory({ id: "run-legacy", workflowId: "wf-team", status: "success", startedAt: legacyAt, completedAt: legacyAt, triggerType: "manual", triggeredBy: olivia.email });
-    expect((await listRuns(context, olivia)).ids).toEqual([oldPaused, oldRun, "run-legacy"].sort());
+    expect((await listRuns(context, olivia)).ids).toEqual([oldPaused, oldRun].sort());
 
     expect(await context.store.deleteUserKeepingAdmin(olivia.id)).not.toBe("not_found");
     await pause(5);
@@ -205,20 +205,20 @@ describe("own runs by user id (v80)", () => {
     expect((await listRuns(context, admin)).total).toBe(4);
   });
 
-  it("a run without a user id is the person's only when their account is older than the run", async () => {
+  it("a run is the person's by its starter's user id only, never by its email or triggered_by", async () => {
     const { context, olivia } = await seed();
-    const longAgo = "2020-01-01T00:00:00.000Z";
     const now = new Date().toISOString();
-    await context.store.saveExecutionHistory({ id: "run-before-account", workflowId: "wf-team", status: "success", startedAt: longAgo, completedAt: longAgo, triggerType: "manual", triggeredBy: olivia.email.toUpperCase() });
-    await context.store.saveExecutionHistory({ id: "run-after-account", workflowId: "wf-team", status: "success", startedAt: now, completedAt: now, triggerType: "manual", triggeredBy: olivia.email.toUpperCase() });
-    // Started by their user id (older rows did that too): theirs, whenever it ran.
-    await context.store.saveExecutionHistory({ id: "run-by-id", workflowId: "wf-team", status: "success", startedAt: longAgo, completedAt: longAgo, triggerType: "manual", triggeredBy: olivia.id });
-    // A user id on the run decides: the email no longer counts.
-    await context.store.saveExecutionHistory({ id: "run-other-id", workflowId: "wf-team", status: "success", startedAt: now, completedAt: now, triggerType: "manual", triggeredBy: olivia.email, triggeredByUserId: "usr_someone_else" });
-    expect((await listRuns(context, olivia)).ids).toEqual(["run-after-account", "run-by-id"]);
-    expect((await call(context, "GET", "/api/executions/run-before-account", olivia.cookie)).statusCode).toBe(404);
-    expect((await call(context, "GET", "/api/executions/run-other-id", olivia.cookie)).statusCode).toBe(404);
-    expect((await call(context, "GET", "/api/executions/run-after-account", olivia.cookie)).statusCode).toBe(200);
+    const save = async (id: string, triggeredBy: string, triggeredByUserId?: string) =>
+      await context.store.saveExecutionHistory({ id, workflowId: "wf-team", status: "success", startedAt: now, completedAt: now, triggerType: "manual", triggeredBy, ...(triggeredByUserId ? { triggeredByUserId } : {}) });
+    await save("run-email", olivia.email.toUpperCase());
+    await save("run-id-text", olivia.id);
+    await save("run-other-id", olivia.email, "usr_someone_else");
+    await save("run-hers", "approver@example.com", olivia.id);
+    expect((await listRuns(context, olivia)).ids).toEqual(["run-hers"]);
+    for (const id of ["run-email", "run-id-text", "run-other-id"]) {
+      expect((await call(context, "GET", `/api/executions/${id}`, olivia.cookie)).statusCode, id).toBe(404);
+    }
+    expect((await call(context, "GET", "/api/executions/run-hers", olivia.cookie)).statusCode).toBe(200);
   });
 
   it("a run resumed by someone else's approval stays the starter's", async () => {
@@ -231,26 +231,56 @@ describe("own runs by user id (v80)", () => {
     expect(finished?.status).toBe("success");
     expect(await context.store.getExecutionStarter(executionId)).toBe(olivia.id);
     expect((await listRuns(context, olivia)).ids).toEqual([executionId]);
+    // "Started by" stays Olivia (the run list, its detail); the approver is on the decision.
+    expect(finished?.triggeredBy).toBe(olivia.email);
+    const listed = (await call(context, "GET", "/api/executions", owner.cookie)).json<{ items: Array<{ id: string; triggeredBy?: string | null }> }>();
+    expect(listed.items.find((item) => item.id === executionId)?.triggeredBy).toBe(olivia.email);
+    const [decision] = await context.store.listApprovalRequestsForExecution(executionId);
+    expect(decision).toMatchObject({ status: "approved", decidedBy: owner.email, decidedByUserId: owner.id, requestedBy: olivia.email });
+    // The run's audit entries name its starter; the decision's names the approver.
+    const audit = await context.store.listAuditLogsForExecution(executionId);
+    expect(audit.filter((entry) => entry.eventType === "execution.success").map((entry) => entry.actorEmail)).toEqual([olivia.email]);
+    expect(audit.filter((entry) => entry.eventType === "approval.decided").map((entry) => entry.actorEmail)).toEqual([owner.email]);
   });
 
-  it("a run paused before v80 (no starter in its state) stays its starter's after someone else approves it", async () => {
+  it("a run paused before v80 with no history row resumes as its first requester's, by the rule migration 80 follows", async () => {
     const { context, owner, olivia } = await seed();
     const paused = await call(context, "POST", "/api/workflows/wf-gated/execute", olivia.cookie, { input: {} });
     const executionId = paused.json<{ executionId: string }>().executionId;
-    // As an older build left it: no starter on the history or in the paused state.
+    // As an older build could leave it: a paused state without the starter, naming an earlier approver as its
+    // triggered_by (it paused again after a resume), and no history row yet. The first request names Olivia.
     const state = (await context.store.getWorkflowExecutionState(executionId))!;
     const { triggeredByUserId: _dropped, ...olderState } = state.state as Record<string, unknown>;
+    await context.store.saveWorkflowExecutionState({ ...state, triggeredBy: owner.email, state: olderState } as never);
+    await testSql(context.store).run("DELETE FROM execution_history WHERE id = ?", executionId);
+    expect(await context.store.getExecutionHistory(executionId)).toBeNull();
+
+    const approved = await call(context, "POST", `/api/approvals/${executionId}/approve`, owner.cookie, {});
+    expect(approved.statusCode, approved.body).toBeLessThan(300);
+    const finished = await context.store.getExecutionHistory(executionId);
+    expect(finished?.status).toBe("success");
+    expect(finished?.triggeredBy).toBe(olivia.email);
+    // Her account is older than the run, so the email names her.
+    expect(await context.store.getExecutionStarter(executionId)).toBe(olivia.id);
+    expect((await listRuns(context, olivia)).ids).toEqual([executionId]);
+  });
+
+  it("a paused run whose history records no starter (migration 80 could tell nobody) stays nobody's after the resume", async () => {
+    const { context, owner, olivia } = await seed();
+    const paused = await call(context, "POST", "/api/workflows/wf-gated/execute", olivia.cookie, { input: {} });
+    const executionId = paused.json<{ executionId: string }>().executionId;
+    const state = (await context.store.getWorkflowExecutionState(executionId))!;
+    // Nor whose sessions it used (a run that kept the workflow's sessions).
+    const { triggeredByUserId: _dropped, sessionOwner: _owner, ...olderState } = state.state as Record<string, unknown>;
     await context.store.saveWorkflowExecutionState({ ...state, state: olderState } as never);
-    const history = (await context.store.getExecutionHistory(executionId))!;
-    await testSql(context.store).run("UPDATE execution_history SET triggered_by_user_id = NULL WHERE id = ?", executionId);
-    expect(await context.store.getExecutionStarter(executionId)).toBeNull();
-    expect(history.triggeredBy).toBe(olivia.email);
+    await testSql(context.store).run("UPDATE execution_history SET triggered_by_user_id = NULL, session_owner = NULL WHERE id = ?", executionId);
 
     const approved = await call(context, "POST", `/api/approvals/${executionId}/approve`, owner.cookie, {});
     expect(approved.statusCode, approved.body).toBeLessThan(300);
     expect((await context.store.getExecutionHistory(executionId))?.status).toBe("success");
-    expect(await context.store.getExecutionStarter(executionId)).toBe(olivia.id);
-    expect((await listRuns(context, olivia)).ids).toEqual([executionId]);
+    // Not re-judged by its email at the resume, and never the approver's.
+    expect(await context.store.getExecutionStarter(executionId)).toBeNull();
+    expect((await listRuns(context, olivia)).ids).toEqual([]);
   });
 
   it("a retry of a run whose starter's account is gone, with no session owner recorded, is refused", async () => {

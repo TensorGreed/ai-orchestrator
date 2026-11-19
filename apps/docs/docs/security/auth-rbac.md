@@ -264,10 +264,12 @@ project member keeps the full view, and so does anyone who also has the workflow
 
 - **Whose run it is.** A run records the user id of the person who started it: from the app, with their API key, or
   by a signed-in form submission or chat (a signed-in form also keeps the submitter's session memory to them, as a
-  signed-in chat does). The run stays theirs when someone else approves it. A run recorded before this (migration v80)
-  has only an email: it counts as theirs only when their account was created before the run started, so an email that
-  a new account gets later does not bring the old account's runs with it. Runs no person started (webhooks, schedules,
-  public forms and chats, MCP and gateway calls) are nobody's own.
+  signed-in chat does). The run stays theirs, and keeps them as "started by", when someone else approves it; the
+  approver is recorded on the decision. An email never counts: migration v80 recorded the user id on older runs once,
+  for the account with that email created before the run started (for a run that asked for an approval, the first
+  request's requester), and left it empty where it could tell nobody (a
+  deleted account's email, an email a new account got later, two accounts). Runs with no user id, like runs no person
+  started (webhooks, schedules, public forms and chats, MCP and gateway calls), are nobody's own.
 - **Lists.** The run history, the editor's run picker (it reads **Your runs** then) and the restored run data show only
   their runs, filtered before paging, so totals count only those.
 - **Single runs.** Someone else's run answers `404`, the same answer as a run that does not exist: its detail, its live

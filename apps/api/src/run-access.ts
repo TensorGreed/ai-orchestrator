@@ -18,10 +18,9 @@
  * Someone who can read a workflow only through a share with them (not as a
  * member of its project, not through a project share, not an admin) sees only
  * their own runs of it: the runs they started and the runs whose sessions are
- * theirs (`session_owner`). Who started a run is its starter's user id (v80);
- * a run recorded before that is judged by email, and only for an account
- * created before the run started (`runOwnedBy`). Anyone else's run answers
- * 404, as a missing one.
+ * theirs (`session_owner`). Who started a run is its starter's user id (v80;
+ * migration 80 set it on the runs recorded before), never an email
+ * (`runOwnedBy`). Anyone else's run answers 404, as a missing one.
  * Run lists apply the same rule before paging (`runListScope`), and data built
  * from many people's runs (golden runs, captures, cassettes, eval and replay
  * runs, content-rule events, the dead-letter queue) leaves such workflows out
@@ -50,20 +49,9 @@ interface ExecutionLike {
 
 /** Who a run belongs to: who started it and whose sessions it used. */
 export interface RunOwner {
-  /** As the run records it: an email, a user id, or a trigger's name. */
-  triggeredBy: string | null;
-  /** v80 — the user id of the person who started it; null for a run no person started or one recorded before v80. */
+  /** v80 — the user id of the person who started it; null when no person did, or none could be told (migration 80). */
   triggeredByUserId: string | null;
   sessionOwner: string | null;
-  /** When the run started; an email counts only for an account created by then. */
-  startedAt: string | null;
-}
-
-/** The person a run is judged for: an account created at `createdAt` (null: unknown, so never by email). */
-export interface RunOwnerCandidate {
-  id: string;
-  email: string;
-  createdAt: string | null;
 }
 
 /** Runs of these workflows are the person's own only: they started them, or the runs used their sessions. */
@@ -94,8 +82,6 @@ export interface RunAccessDeps {
   readsOnlyThroughUserShare: (user: SafeUser, workflow: { id: string; projectId?: string | null }) => Promise<boolean>;
   /** Who a run belongs to; null when there is no such run. */
   getRunOwner: (executionId: string) => Promise<RunOwner | null>;
-  /** v80 — when this user's account was created; null when there is no such user. */
-  getUserCreatedAt: (userId: string) => Promise<string | null>;
 }
 
 export interface RunAccess {
@@ -136,21 +122,11 @@ export interface RunAccess {
 const globalAdmin = (user: SafeUser): boolean => user.role === "admin" && !user.projectScope;
 
 /**
- * Is the run the person's: run in their sessions, or started by them? A run that records its starter's user id
- * (v80) is judged by that alone. One recorded before v80 is theirs when it was started by their user id, or by their
- * email and their account was created before the run started, so an email given to a new account later does not bring
- * the old account's runs with it. The same rule as the stores' SQL (db/own-runs-sql.ts).
+ * Is the run the person's: run in their sessions, or started by them (its starter's user id, v80)? Never by email: an
+ * email given to another account does not bring runs with it. The same rule as the stores' SQL (db/own-runs-sql.ts).
  */
-export function runOwnedBy(owner: RunOwner, user: RunOwnerCandidate): boolean {
-  if (owner.sessionOwner && owner.sessionOwner === user.id) return true;
-  if (owner.triggeredByUserId) return owner.triggeredByUserId === user.id;
-  const by = owner.triggeredBy;
-  if (!by) return false;
-  if (by === user.id) return true;
-  if (by.toLowerCase() !== user.email.toLowerCase() || !user.createdAt || !owner.startedAt) return false;
-  const created = Date.parse(user.createdAt);
-  const started = Date.parse(owner.startedAt);
-  return Number.isFinite(created) && Number.isFinite(started) && created <= started;
+export function runOwnedBy(owner: RunOwner, userId: string): boolean {
+  return owner.sessionOwner === userId || owner.triggeredByUserId === userId;
 }
 
 const executionIdOf = (run: ExecutionLike): string => (typeof run.executionId === "string" && run.executionId ? run.executionId : run.id);
@@ -236,10 +212,7 @@ export function createRunAccess(deps: RunAccessDeps): RunAccess {
 
   const ownsRun = async (user: SafeUser, executionId: string): Promise<boolean> => {
     const owner = await deps.getRunOwner(executionId);
-    if (!owner) return false;
-    // The account's creation time is read only when an email is all the run has.
-    const needsCreatedAt = !owner.triggeredByUserId && owner.sessionOwner !== user.id && owner.triggeredBy !== user.id;
-    return runOwnedBy(owner, { id: user.id, email: user.email, createdAt: needsCreatedAt ? await deps.getUserCreatedAt(user.id) : null });
+    return owner !== null && runOwnedBy(owner, user.id);
   };
 
   /** A readable run the user still may not see: someone else's run of a workflow they see only their own runs of. */
@@ -285,7 +258,7 @@ export function createRunAccess(deps: RunAccessDeps): RunAccess {
       const { full, ownOnly } = await classifyWorkflows(user);
       return {
         workflowIds: full,
-        ownRunsOnly: ownOnly.length > 0 ? { workflowIds: ownOnly, userId: user.id, email: user.email, userCreatedAt: await deps.getUserCreatedAt(user.id) } : null
+        ownRunsOnly: ownOnly.length > 0 ? { workflowIds: ownOnly, userId: user.id, email: user.email } : null
       };
     },
 

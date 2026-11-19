@@ -201,7 +201,8 @@ interface DeletionState {
   /** Tokens seen in rows that were deleted, and in rows a hold keeps (never deleted while held). */
   tokens: string[];
   heldTokens: string[];
-  staff: { pseudonym: string; rowsPseudonymised: number; userDeleted: boolean; held: number } | null;
+  /** `userId` (v80): the deleted account's id, so a later pass (after a hold) still finds the runs it started. */
+  staff: { pseudonym: string; rowsPseudonymised: number; userDeleted: boolean; held: number; userId?: string | null } | null;
 }
 
 /** Sealing with the master key (SecretService). */
@@ -425,7 +426,13 @@ function readDeletion(raw: Record<string, unknown>): DeletionState {
     tokens: Array.isArray(raw.tokens) ? raw.tokens.map(String) : [],
     heldTokens: Array.isArray(raw.heldTokens) ? raw.heldTokens.map(String) : [],
     staff: staff
-      ? { pseudonym: String(staff.pseudonym ?? ""), rowsPseudonymised: numberOf(staff.rowsPseudonymised), userDeleted: staff.userDeleted === true, held: numberOf(staff.held) }
+      ? {
+          pseudonym: String(staff.pseudonym ?? ""),
+          rowsPseudonymised: numberOf(staff.rowsPseudonymised),
+          userDeleted: staff.userDeleted === true,
+          held: numberOf(staff.held),
+          userId: typeof staff.userId === "string" && staff.userId ? staff.userId : null
+        }
       : null
   };
 }
@@ -1539,6 +1546,8 @@ export class SubjectRequestService {
         const tombstoneId = staffTombstoneId(key, value);
         const pseudonym = staffPseudonym(tombstoneId);
         const previous = deletion.staff;
+        // v80 — the account's id: the runs it started are matched by it too (the account is gone on a later pass).
+        const userId = (typeof user?.id === "string" && user.id ? user.id : null) ?? previous?.userId ?? null;
         // The account first (checked again: it may have become the last admin since the confirmation), so the person
         // can write nothing more under the email; then the tombstone, written only once the account is gone, so a
         // restore never re-applies an erasure whose account delete was refused; then the authorship rows.
@@ -1549,16 +1558,21 @@ export class SubjectRequestService {
           const removed = await this.options.staffUser.remove(value, actor, initial.id);
           if (removed === "last_admin") throw new PermanentDeletionError("The user is the only admin who can sign in; make another person an admin, then make a new request.");
           userDeleted = true;
-          deletion.staff = { pseudonym, rowsPseudonymised: previous?.rowsPseudonymised ?? 0, userDeleted, held: previous?.held ?? 0 };
+          deletion.staff = { pseudonym, rowsPseudonymised: previous?.rowsPseudonymised ?? 0, userDeleted, held: previous?.held ?? 0, userId };
           if (!(await save())) return;
         }
         await store.writeErasureTombstones([{ kind: "staff", rowId: tombstoneId, requestId: initial.id, erasedAt }]);
-        const result = await store.pseudonymiseStaff({ emails: staffEmails(value, typeof user?.email === "string" ? user.email : null), pseudonym });
+        const result = await store.pseudonymiseStaff({
+          emails: staffEmails(value, typeof user?.email === "string" ? user.email : null),
+          ...(userId ? { userIds: [userId] } : {}),
+          pseudonym
+        });
         deletion.staff = {
           pseudonym,
           rowsPseudonymised: (deletion.staff?.rowsPseudonymised ?? previous?.rowsPseudonymised ?? 0) + result.changed,
           userDeleted,
-          held: result.held
+          held: result.held,
+          userId
         };
         if (result.remaining > 0) {
           // Rows another transaction had locked: tried again on the next pass.

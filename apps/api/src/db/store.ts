@@ -1308,10 +1308,11 @@ export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentR
   countErasureTombstones(): Promise<number>;
   /**
    * 13.3 — replaces a staff member's email with `pseudonym` in every authorship column (STAFF_AUTHORSHIP_COLUMNS), in
-   * batches. Rows a legal hold keeps are left and counted (`held`); `remaining` counts rows another transaction had
-   * locked (Postgres SKIP LOCKED), to retry.
+   * batches, and (v80) `triggered_by` of the runs whose starter's user id is one of `userIds`. Rows a legal hold keeps
+   * are left and counted (`held`); `remaining` counts rows another transaction had locked (Postgres SKIP LOCKED), to
+   * retry.
    */
-  pseudonymiseStaff(input: { emails: string[]; pseudonym: string; batch?: number }): Promise<{ changed: number; held: number; remaining: number }>;
+  pseudonymiseStaff(input: { emails: string[]; userIds?: string[]; pseudonym: string; batch?: number }): Promise<{ changed: number; held: number; remaining: number }>;
   /** Bytes one workflow's captured candidates use (REPLAY_CAPTURES_MAX_BYTES_PER_WORKFLOW). */
   sumReplayCaptureBytesForWorkflow(workflowId: string): Promise<number>;
   /** The oldest candidates of a workflow with their sizes, oldest first (byte-budget eviction), held ones left out. */

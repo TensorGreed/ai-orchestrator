@@ -986,7 +986,9 @@ describe("review M1: a gateway run that waits on an approval stays the client's"
     expect(approved.statusCode, approved.body).toBe(200);
     const finished = await store.getExecutionHistory(run!.id);
     expect(finished?.status).toBe("success");
-    expect(finished?.triggeredBy).toBe("admin@example.com");
+    // "Started by" stays the gateway client (v80); the approver is on the decision.
+    expect(finished?.triggeredBy).toBe(`mcp-client:${own.client.name}`);
+    expect((await store.listApprovalRequestsForExecution(run!.id))[0]).toMatchObject({ status: "approved", decidedBy: "admin@example.com" });
     const rows = await testSql(store).all<{ client_id: string | null; toolset_id: string | null; user_id: string | null; user_email: string | null; total_tokens: number | string }>(
       "SELECT client_id, toolset_id, user_id, user_email, total_tokens FROM usage_events WHERE execution_id = ? AND trigger_type = ?",
       run!.id,

@@ -710,6 +710,63 @@ for (const kind of kinds) {
       expect((await sql.all<{ created_by: string }>("SELECT created_by FROM variables WHERE id = 'var-1'"))[0]!.created_by).toBe(pseudonym);
     });
 
+    it("v80: lists and erases a staff member's runs by the starter's user id too (an email from before a rename); a held run waits", async () => {
+      const { store, sql, service } = await setup({
+        staffUser: {
+          check: async () => null,
+          remove: async (email) => {
+            const user = await store.getUserByEmail(email);
+            return user ? await store.deleteUserKeepingAdmin(user.id) : "not_found";
+          }
+        }
+      });
+      await store.saveUser({ id: "u-admin", email: ADMIN.email, passwordHash: "x", role: "admin" });
+      await store.saveUser({ id: "u-erin", email: STAFF_EMAIL, passwordHash: "x", role: "builder" });
+      await sql.run("UPDATE users SET created_at = ? WHERE id = 'u-erin'", AT);
+      await store.upsertWorkflow(WORKFLOW);
+      const before = "erin.before@example.com";
+      const run = async (id: string, workflowId: string, starter: string) =>
+        await sql.run(
+          "INSERT INTO execution_history (id, workflow_id, status, started_at, triggered_by, triggered_by_user_id) VALUES (?, ?, 'success', ?, ?, ?)",
+          id, workflowId, AT, before, starter
+        );
+      await run("r-renamed", "wf-free", "u-erin");
+      await run("r-held", WORKFLOW.id, "u-erin");
+      // The same old email, another account's run: not hers.
+      await run("r-other", "wf-free", "u-someone-else");
+      const hold = await store.placeLegalHold({
+        id: "hold-erin", name: "Matter", reason: "litigation", matterRef: null, scopeType: "workflow", scopeId: WORKFLOW.id, endsAt: null, createdBy: ADMIN.email, createdAt: AT, items: []
+      });
+      const triggeredBy = async () => Object.fromEntries((await sql.all<{ id: string; triggered_by: string }>("SELECT id, triggered_by FROM execution_history ORDER BY id")).map((row) => [row.id, row.triggered_by]));
+
+      // The export lists them.
+      expect((await store.staffSubjectRows(STAFF_EMAIL)).runsTriggered.map((row) => row.id).sort()).toEqual(["r-held", "r-renamed"]);
+      const created = await service.create({ type: "delete", subjectKind: "staff", value: STAFF_EMAIL, scan: true, revealTokens: false }, ADMIN);
+      await settle(service);
+      expect((await service.get(created.id))!.staffPreview).toMatchObject({ userFound: true, runsTriggered: 2 });
+
+      await service.confirm(created.id, ADMIN);
+      await settle(service);
+      expect((await service.get(created.id))!.status).toBe("deferred_by_hold");
+      const pseudonym = staffPseudonym(staffTombstoneId(await service.subjectKey(), STAFF_EMAIL));
+      expect(await triggeredBy()).toEqual({ "r-held": before, "r-other": before, "r-renamed": pseudonym });
+
+      // Once the hold ends, the next pass (the account is gone by now) still finds the held run by its starter's id.
+      await store.releaseLegalHold({ id: hold.id, releasedBy: ADMIN.email, reason: "settled", releasedAt: T0.toISOString() });
+      expect(await service.requeueDeferred()).toBe(1);
+      await settle(service);
+      expect((await service.get(created.id))!.status).toBe("done");
+      expect(await triggeredBy()).toEqual({ "r-held": pseudonym, "r-other": before, "r-renamed": pseudonym });
+
+      // A restore of a backup from before the erasure: the account and the old email come back, and are erased again.
+      await store.saveUser({ id: "u-erin", email: STAFF_EMAIL, passwordHash: "x", role: "builder" });
+      await sql.run("UPDATE users SET created_at = ? WHERE id = 'u-erin'", AT);
+      await sql.run("UPDATE execution_history SET triggered_by = ? WHERE id IN ('r-renamed', 'r-held')", before);
+      await reapplyErasures(sqlExecutor(store), await service.subjectKey());
+      expect(await triggeredBy()).toEqual({ "r-held": pseudonym, "r-other": before, "r-renamed": pseudonym });
+      expect(await store.getUserByEmail(STAFF_EMAIL)).toBeNull();
+    });
+
     it("re-applies run, memory and token erasures after a restore brings the rows back; refuses without the key", async () => {
       const { store, sql, service } = await setup();
       await store.upsertWorkflow(WORKFLOW);

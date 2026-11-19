@@ -208,9 +208,9 @@ export async function listExecutionHistory(ctx: PgContext, input: {
     if (own) {
       const ids = own.workflowIds.map(() => `$${paramIdx++}`).join(", ");
       whereParams.push(...own.workflowIds);
-      const bind = (value: string, cast?: "timestamptz") => {
+      const bind = (value: string) => {
         whereParams.push(value);
-        return `$${paramIdx++}${cast ? `::${cast}` : ""}`;
+        return `$${paramIdx++}`;
       };
       anyOf.push(`(workflow_id IN (${ids}) AND ${ownHistoryRunSql(own, bind)})`);
     }
