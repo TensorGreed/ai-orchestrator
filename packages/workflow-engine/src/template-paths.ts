@@ -8,7 +8,11 @@
  * - `{{<field>}}`: when every step connected straight in has a closed output, one of them must have `<field>`.
  *   Run-wide names (`webhook`, `user_prompt`, `vars`, `item`...) and the parents' ids are always readable.
  * Expressions (anything but a plain dotted path) are not checked, nor are nodes in a loop body (they read the item),
- * nodes with an input mapping, code, or a step's output after an error (it carries the failed item).
+ * a Filter's conditions (they read each item), nodes with an input mapping, code, a disabled step (it passes its
+ * input on) or a step's output after an error (it carries the failed item).
+ * A run's input is spread into every node's data too, so plain `{{<field>}}` paths are only checked when the
+ * workflow's triggers say what that input holds: a Webhook Input (its body is under `webhook`), a Schedule Trigger,
+ * or a Form Trigger (its fields). A manual, chat, MCP or sub-workflow trigger takes any input: not checked.
  */
 import {
   RESERVED_NODE_IDS,
@@ -38,6 +42,37 @@ const ATTACHMENT_HANDLES = new Set(["chat_model", "memory", "tool", "worker", "g
 const RUN_WIDE_NAMES = new Set([...RESERVED_NODE_IDS, "images"]);
 /** Node types whose settings are not templates. */
 const NOT_TEMPLATE_TYPES = new Set(["code_node"]);
+/** Nodes whose plain paths read each item they filter, not their parents' output. */
+const PER_ITEM_TYPES = new Set(["filter_node"]);
+/** What the API adds to a run's input for any trigger (`trigger_node_id`, the schedule's, the form's). */
+const TRIGGER_INPUT_NAMES = [
+  "trigger_type",
+  "trigger_node_id",
+  "input_trigger_type",
+  "scheduled_at",
+  "schedule_node_id",
+  "cron_expression",
+  "timezone",
+  "form_path",
+  "form_submission"
+];
+/** Triggers whose run input is known (beyond the names above): the webhook's body is under `webhook`. */
+const KNOWN_INPUT_TRIGGERS = new Set(["webhook_input", "schedule_trigger", "form_trigger"]);
+
+/** The names a run's input holds, or null when a trigger takes any input (plain paths are then not checked). */
+function runInputNames(nodes: readonly WorkflowNode[], hasIncoming: (id: string) => boolean): Set<string> | null {
+  const names = new Set(TRIGGER_INPUT_NAMES);
+  for (const node of nodes) {
+    if (hasIncoming(node.id)) continue;
+    if (!KNOWN_INPUT_TRIGGERS.has(node.type)) return null;
+    if (node.type !== "form_trigger") continue;
+    const fields = isRecord(node.config) ? (node.config as Record<string, unknown>).fields : undefined;
+    for (const field of Array.isArray(fields) ? fields : []) {
+      if (isRecord(field) && typeof field.name === "string") names.add(field.name);
+    }
+  }
+  return names;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -68,6 +103,8 @@ function isStepEdge(edge: WorkflowEdge): boolean {
 function closedFields(node: WorkflowNode, viaHandle?: string): Set<string> | null {
   // The error output carries the failed item and the error; On Error "continue" outputs the error instead.
   if (viaHandle === "error") return null;
+  // A disabled step is skipped: what it passes on is its own input.
+  if (node.disabled === true) return null;
   if (node.errorConfig?.continueOnFail === true) return null;
   const onError = isRecord(node.config) ? (node.config as Record<string, unknown>).onError : undefined;
   if (onError === "continue" || onError === "branch") return null;
@@ -107,6 +144,11 @@ export function unknownTemplatePaths(workflow: Pick<Workflow, "nodes" | "edges">
       }
     }
   }
+  // The run starts at the nodes nothing points at (an agent's attached nodes are pointed at by its port edges).
+  // A node on no edge at all (a note, a step not wired in yet) starts nothing.
+  const targets = new Set(workflow.edges.map((edge) => edge.target));
+  const sources = new Set(workflow.edges.map((edge) => edge.source));
+  const inputNames = runInputNames(workflow.nodes, (id) => targets.has(id) || !sources.has(id));
   const issues: TemplatePathIssue[] = [];
   for (const node of workflow.nodes) {
     if (NOT_TEMPLATE_TYPES.has(node.type)) continue;
@@ -151,7 +193,8 @@ export function unknownTemplatePaths(workflow: Pick<Workflow, "nodes" | "edges">
         continue;
       }
       if (first.startsWith("$") || first.startsWith("_") || RUN_WIDE_NAMES.has(first) || byId.has(first)) continue;
-      if (parents.length === 0 || afterLoop.has(node.id) || hasInputMapping) continue;
+      if (!inputNames || inputNames.has(first)) continue;
+      if (parents.length === 0 || afterLoop.has(node.id) || hasInputMapping || PER_ITEM_TYPES.has(node.type)) continue;
       const parentFields = parents.map((parent) => (parent.node ? closedFields(parent.node, parent.handle) : null));
       if (parentFields.some((fields) => fields === null)) continue;
       if (parentFields.some((fields) => fields!.has(first))) continue;

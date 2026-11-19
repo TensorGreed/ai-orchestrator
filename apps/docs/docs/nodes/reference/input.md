@@ -36,7 +36,7 @@ Receive chat messages via POST /api/chat/:workflowId. Pairs naturally with agent
 
 **Outputs**
 
-The chat message: <span v-pre>`{{user_prompt}}`</span> and <span v-pre>`{{session_id}}`</span>.
+The chat message: <span v-pre>`{{message}}`</span> (also <span v-pre>`{{user_prompt}}`</span>) and <span v-pre>`{{session_id}}`</span>.
 
 **Example config**
 

@@ -4,8 +4,8 @@
  * model and checks every `{{ }}` path of a draft against them, and the editor's autocomplete leaves out the older
  * aliases. Fields starting with `_` are the engine's own bookkeeping (usage, routing) and are never listed.
  *
- * The lists mirror the engine's handlers (packages/workflow-engine/src/executor.ts); a test there runs each closed
- * node and compares its output keys with these lists.
+ * The lists mirror the engine's handlers (packages/workflow-engine/src/executor.ts); a test there runs the common closed
+ * nodes (template-paths.test.ts) and checks that every key they output is listed.
  */
 import type { NodeDefinition, NodeOutputField, NodeOutputSpec } from "./types";
 
@@ -114,7 +114,7 @@ export const NODE_OUTPUT_SPECS: Readonly<Record<string, NodeOutputSpec>> = Objec
   },
   manual_trigger: { fields: [], closed: false, note: "The run's input. {{user_prompt}} reads the prompt the run was given." },
   form_trigger: { fields: [], closed: false, note: "One field per form field, named by its key." },
-  chat_trigger: { fields: [], closed: false, note: "The chat message: {{user_prompt}} and {{session_id}}." },
+  chat_trigger: { fields: [], closed: false, note: "The chat message: {{message}} (also {{user_prompt}}) and {{session_id}}." },
   if_node: {
     fields: [field("result", "Whether the condition was true."), field("evaluatedValue", "What the condition evaluated to.")],
     closed: false,

@@ -127,9 +127,9 @@ A model node whose name says its provider or model, such as "Chat Model (echo)" 
 with it when you change the provider or the model ("Chat Model (anthropic)"). A name you gave it yourself stays.
 
 In a workflow with several agents (a **Supervisor** and its workers), each agent has its own chat model. When you
-change the model of one of them and another agent uses a different one, the node offers **Use for all agents in this
-workflow**: one click saves the node and puts the same provider, model, base URL and credential on every agent's
-chat model (each keeps its own temperature and token limit). **Undo** takes it back in one step.
+change the model of one that is an **LLM Call** and another agent's **LLM Call** uses a different one, the node
+offers **Use for all agents in this workflow**: one click saves the node and puts the same provider, model, base URL
+and credential on every agent's **LLM Call** chat model (each keeps its own temperature and token limit). **Undo** takes it back in one step.
 
 ## Workflow settings
 

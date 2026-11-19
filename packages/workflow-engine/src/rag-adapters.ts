@@ -34,6 +34,16 @@ function requireEmbeddingKey(apiKey: string | undefined, provider: string, envVa
   );
 }
 
+/** An endpoint on Azure's own hosts (`*.openai.azure.com`, `*.cognitiveservices.azure.com`). */
+function isAzureHost(endpoint: string): boolean {
+  try {
+    const host = new URL(endpoint).hostname.toLowerCase();
+    return host.endsWith(".openai.azure.com") || host.endsWith(".cognitiveservices.azure.com");
+  } catch {
+    return false;
+  }
+}
+
 /** A key the provider refused (401/403), in one sentence: the provider's raw body is left out. */
 function embeddingKeyRefused(status: number, provider: string, envVar?: string): WorkflowError {
   return new WorkflowError(
@@ -275,7 +285,8 @@ export class AzureOpenAIEmbeddingAdapter implements EmbeddingAdapter {
       throw new Error("AzureOpenAIEmbeddingAdapter requires endpoint and deployment.");
     }
 
-    requireEmbeddingKey(this.config.apiKey, "Azure OpenAI", "AZURE_OPENAI_API_KEY");
+    // An Azure resource always needs its key; an Azure-shaped endpoint of the node's own (a proxy) may not.
+    if (isAzureHost(endpoint)) requireEmbeddingKey(this.config.apiKey, "Azure OpenAI", "AZURE_OPENAI_API_KEY");
     const apiVersion = this.config.apiVersion?.trim() || "2024-10-21";
     const trimmedAuth = this.config.apiKey.trim();
     const isBearer = trimmedAuth.split(".").length === 3 || /^bearer\s+/i.test(trimmedAuth);

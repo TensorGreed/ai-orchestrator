@@ -507,6 +507,15 @@ describe("template paths in a draft", () => {
     expect(check.issues[0]!.message).not.toMatch(/\btext\b/);
   });
 
+  it("says when the wrong path is the node's example value the draft left in place", () => {
+    const draft = classifyWebhook("unused");
+    (draft.nodes[3] as { config: Record<string, unknown> }).config = { statusCode: 200 };
+    const check = checkBuilderDraft(draft, { workflowId: "wf", nodeModel: NODE_MODEL });
+    expect(check.issues).toHaveLength(1);
+    expect(check.issues[0]!.message).toMatch(/bodyTemplate is the node's example value, as the draft left it out: set it/);
+    expect(checkBuilderDraft(classifyWebhook("{{response}}"), { workflowId: "wf", nodeModel: NODE_MODEL }).issues[0]!.message).not.toMatch(/example value/);
+  });
+
   it("accepts the fields the steps output, earlier steps through results, and run-wide names", () => {
     for (const body of ["{{answer}}", "{{text}}", "{{results.classify.answer}}", "{{results.build_prompt.prompt}}", "{\"from\": \"{{webhook.email}}\", \"q\": \"{{user_prompt}}\"}"]) {
       expect(checkBuilderDraft(classifyWebhook(body), { workflowId: "wf", nodeModel: NODE_MODEL }).issues).toEqual([]);

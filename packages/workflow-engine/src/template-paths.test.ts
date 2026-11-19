@@ -37,7 +37,7 @@ function workflow(nodes: WorkflowNode[], edges: Array<[string, string, string?]>
 describe("unknownTemplatePaths", () => {
   const llmThen = (template: string, extra: Partial<WorkflowNode> = {}) =>
     workflow(
-      [node("start", "manual_trigger"), node("ask", "llm_call", { provider: ECHO }, extra), node("after", "set_node", { assignments: [{ key: "out", valueTemplate: template }] })],
+      [node("start", "webhook_input"), node("ask", "llm_call", { provider: ECHO }, extra), node("after", "set_node", { assignments: [{ key: "out", valueTemplate: template }] })],
       [
         ["start", "ask"],
         ["ask", "after"]
@@ -57,11 +57,39 @@ describe("unknownTemplatePaths", () => {
     }
   });
 
+  it("does not check plain paths when a trigger takes any input, and knows the form's fields", () => {
+    const manual = llmThen("{{customer}}");
+    manual.nodes[0] = node("start", "manual_trigger");
+    expect(unknownTemplatePaths(manual)).toEqual([]);
+    const chat = llmThen("{{message}}");
+    chat.nodes[0] = node("start", "chat_trigger");
+    expect(unknownTemplatePaths(chat)).toEqual([]);
+    const form = llmThen("{{email}} {{trigger_node_id}} {{phone}}");
+    form.nodes[0] = node("start", "form_trigger", { fields: [{ name: "email", type: "email" }] });
+    expect(unknownTemplatePaths(form).map((issue) => issue.template)).toEqual(["{{phone}}"]);
+  });
+
+  it("does not check a disabled step's output or a Filter's per-item conditions", () => {
+    expect(unknownTemplatePaths(llmThen("{{customer}}", { disabled: true }))).toEqual([]);
+    const filter = workflow(
+      [
+        node("start", "webhook_input"),
+        node("fetch", "http_request", { method: "GET", urlTemplate: "https://x.example/items" }),
+        node("keep", "filter_node", { mode: "items", conditions: [{ field: "price", operator: "gt", value: "{{min_price}}" }] })
+      ],
+      [
+        ["start", "fetch"],
+        ["fetch", "keep"]
+      ]
+    );
+    expect(unknownTemplatePaths(filter)).toEqual([]);
+  });
+
   it("does not check the output of a step that continues or branches on an error (it carries the failed item)", () => {
     expect(unknownTemplatePaths(llmThen("{{customer}}", { config: { provider: ECHO, onError: "continue" } }))).toEqual([]);
     expect(unknownTemplatePaths(llmThen("{{customer}}", { errorConfig: { continueOnFail: true } }))).toEqual([]);
     const branched = workflow(
-      [node("start", "manual_trigger"), node("ask", "llm_call", { provider: ECHO, onError: "branch" }), node("fallback", "set_node", { assignments: [{ key: "x", valueTemplate: "{{error}}" }] })],
+      [node("start", "webhook_input"), node("ask", "llm_call", { provider: ECHO, onError: "branch" }), node("fallback", "set_node", { assignments: [{ key: "x", valueTemplate: "{{error}}" }] })],
       [
         ["start", "ask"],
         ["ask", "fallback", "error"]
@@ -73,7 +101,7 @@ describe("unknownTemplatePaths", () => {
   it("does not check plain paths in a loop body, with an input mapping, or in code", () => {
     const loop = workflow(
       [
-        node("start", "manual_trigger"),
+        node("start", "webhook_input"),
         node("each", "loop_node", { inputKey: "orders", itemVariable: "order" }),
         node("ask", "llm_call", { provider: ECHO }),
         node("body", "set_node", { assignments: [{ key: "id", valueTemplate: "{{order.id}}" }] })
@@ -89,7 +117,7 @@ describe("unknownTemplatePaths", () => {
     (mapped.nodes[2]!.config as Record<string, unknown>).inputMapping = { reply: "answer" };
     expect(unknownTemplatePaths(mapped)).toEqual([]);
     const code = workflow(
-      [node("start", "manual_trigger"), node("ask", "llm_call", { provider: ECHO }), node("run", "code_node", { code: "return { x: '{{nope}}' }" })],
+      [node("start", "webhook_input"), node("ask", "llm_call", { provider: ECHO }), node("run", "code_node", { code: "return { x: '{{nope}}' }" })],
       [
         ["start", "ask"],
         ["ask", "run"]
@@ -101,7 +129,7 @@ describe("unknownTemplatePaths", () => {
   it("ignores attachment edges: an agent's chat model is not a step before it", () => {
     const agent = workflow(
       [
-        node("start", "manual_trigger"),
+        node("start", "webhook_input"),
         node("agent", "agent_orchestrator", { userPromptTemplate: "{{user_prompt}}" }),
         node("model", "llm_call", { provider: ECHO }),
         node("reply", "output", { responseTemplate: "{{answer}} after {{iterations}} turns, not {{summary}}" })

@@ -177,6 +177,23 @@ describe("WorkflowBuilderDialog", () => {
     expect(credential.selectedOptions[0]!.textContent).toBe("Team Anthropic key (anthropic)");
   });
 
+  it("names a saved credential the list does not show, and says no server key for a keyless model server", async () => {
+    vi.mocked(api.fetchSecrets).mockResolvedValue([]);
+    vi.mocked(api.fetchWorkflowBuilderStatus).mockResolvedValue({
+      enabled: true,
+      defaultModel: { providerId: "anthropic", model: "claude-x", secretRef: { secretId: "sec-elsewhere" } }
+    });
+    const { unmount } = render(<WorkflowBuilderDialog {...defaults} onCreate={vi.fn()} onUseTemplate={vi.fn()} />);
+    const credential = screen.getByLabelText<HTMLSelectElement>("Credential");
+    await vi.waitFor(() => expect(credential.value).toBe("sec-elsewhere"));
+    expect(credential.selectedOptions[0]!.textContent).toBe("Saved credential");
+    unmount();
+    vi.mocked(api.fetchWorkflowBuilderStatus).mockResolvedValue({ enabled: true, defaultModel: { providerId: "ollama", model: "llama3.1" } });
+    render(<WorkflowBuilderDialog {...defaults} onCreate={vi.fn()} onUseTemplate={vi.fn()} />);
+    expect(await screen.findByText(/llama3\.1/)).toBeInTheDocument();
+    expect(screen.getByLabelText<HTMLSelectElement>("Credential").selectedOptions[0]!.textContent).toBe("None (or the server's key)");
+  });
+
   it("says the server's key is used when the default model's key comes from the server", async () => {
     vi.mocked(api.fetchWorkflowBuilderStatus).mockResolvedValue({ enabled: true, defaultModel: { providerId: "openai", model: "gpt-4o-mini" } });
     render(<WorkflowBuilderDialog {...defaults} onCreate={vi.fn()} onUseTemplate={vi.fn()} />);

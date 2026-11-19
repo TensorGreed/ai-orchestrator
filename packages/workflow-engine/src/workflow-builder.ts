@@ -357,6 +357,8 @@ export function checkBuilderDraft(raw: unknown, options: BuilderDraftOptions): B
 
   const nodes: WorkflowNode[] = [];
   const ids = new Set<string>();
+  /** The settings the model wrote on each node (the rest are the node's example values). */
+  const givenKeys = new Map<string, Set<string>>();
   const removedCredentials: string[] = [];
   const removedAdminKeys: string[] = [];
   const removedAddresses: string[] = [];
@@ -392,6 +394,7 @@ export function checkBuilderDraft(raw: unknown, options: BuilderDraftOptions): B
     }
     const sample = structuredClone(definition.sampleConfig ?? {}) as Record<string, unknown>;
     const given = withoutCredentials(entry.config ?? {}, removedCredentials, [id]) as Record<string, unknown>;
+    givenKeys.set(id, new Set(Object.keys(given)));
     let config: Record<string, unknown> = { ...(withoutCredentials(sample, []) as Record<string, unknown>), ...given };
     for (const key of ADMIN_ONLY_KEYS) {
       if (key in given) removedAdminKeys.push(`${id}.${key}`);
@@ -510,7 +513,11 @@ export function checkBuilderDraft(raw: unknown, options: BuilderDraftOptions): B
   const validation = validateWorkflowGraph(workflow);
   for (const issue of saveBlockingIssues(validation)) issues.push({ message: issue.message, ...(issue.nodeId ? { nodeId: issue.nodeId } : {}) });
   const unfinished = unfinishedDraftIssues(validation).map((issue) => ({ message: issue.message, ...(issue.nodeId ? { nodeId: issue.nodeId } : {}) }));
-  const pathIssues = unknownTemplatePaths(workflow).map((issue) => ({ message: issue.message, nodeId: issue.nodeId }));
+  // A setting the model left out holds the node's example value: say so, so the fix is to set it.
+  const pathIssues = unknownTemplatePaths(workflow).map((issue) => {
+    const fromExample = !givenKeys.get(issue.nodeId)?.has(issue.setting.split(".")[0]!);
+    return { message: fromExample ? `${issue.message} (${issue.setting} is the node's example value, as the draft left it out: set it.)` : issue.message, nodeId: issue.nodeId };
+  });
   issues.push(...pathIssues);
 
   if (removedCredentials.length > 0) notes.push(`Left out credential values the model wrote (${removedCredentials.join(", ")}): pick saved credentials on those nodes.`);
