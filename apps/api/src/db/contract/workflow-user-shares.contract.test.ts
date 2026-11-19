@@ -32,14 +32,16 @@ describeStoreContract("store contract: workflow user shares", (ctx) => {
     expect(shares[0]!.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     expect(await store.getWorkflowUserShare("wf-a", "u-a")).toEqual({ accessLevel: "execute" });
     expect(await store.getWorkflowUserShare("wf-a", "u-nobody")).toBeNull();
-    expect(await store.listWorkflowsSharedToUser("u-a")).toEqual([
-      { workflowId: "wf-a", accessLevel: "execute" },
-      { workflowId: "wf-b", accessLevel: "read" }
+    const sharedToA = await store.listWorkflowsSharedToUser("u-a");
+    expect(sharedToA.every((share) => typeof share.updatedAt === "string" && share.updatedAt.length > 0)).toBe(true);
+    expect(sharedToA.map(({ updatedAt, ...rest }) => rest)).toEqual([
+      { workflowId: "wf-a", accessLevel: "execute", name: "Workflow wf-a", projectId: "default" },
+      { workflowId: "wf-b", accessLevel: "read", name: "Workflow wf-b", projectId: "default" }
     ]);
 
     expect(await store.removeWorkflowUserShare("wf-a", "u-a")).toBe(true);
     expect(await store.removeWorkflowUserShare("wf-a", "u-a")).toBe(false);
-    expect(await store.listWorkflowsSharedToUser("u-a")).toEqual([{ workflowId: "wf-b", accessLevel: "read" }]);
+    expect((await store.listWorkflowsSharedToUser("u-a")).map((share) => share.workflowId + ":" + share.accessLevel)).toEqual(["wf-b:read"]);
   });
 
   it("deleting the workflow or the user removes their shares; a disabled user's shares stay, marked", async () => {
@@ -53,7 +55,7 @@ describeStoreContract("store contract: workflow user shares", (ctx) => {
     await store.upsertWorkflowUserShare({ workflowId: "wf-b", userId: "u-b", accessLevel: "read" });
 
     expect(await store.deleteWorkflow("wf-a")).toBe(true);
-    expect(await store.listWorkflowsSharedToUser("u-a")).toEqual([{ workflowId: "wf-b", accessLevel: "read" }]);
+    expect((await store.listWorkflowsSharedToUser("u-a")).map((share) => share.workflowId + ":" + share.accessLevel)).toEqual(["wf-b:read"]);
     // A workflow created again with the id starts unshared.
     await store.upsertWorkflow(workflow("wf-a"));
     expect(await store.listWorkflowUserShares("wf-a")).toEqual([]);

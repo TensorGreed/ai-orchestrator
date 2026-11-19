@@ -1511,7 +1511,10 @@ export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentR
   listWorkflowUserShares(workflowId: string): Promise<WorkflowUserShareRecord[]>;
   getWorkflowUserShare(workflowId: string, userId: string): Promise<{ accessLevel: WorkflowShareAccessLevel } | null>;
   /** v78 — the workflows shared with one person (one indexed read). */
-  listWorkflowsSharedToUser(userId: string): Promise<Array<{ workflowId: string; accessLevel: WorkflowShareAccessLevel }>>;
+  /** The workflows shared with a user, each with its name, project and last save (one query). */
+  listWorkflowsSharedToUser(
+    userId: string
+  ): Promise<Array<{ workflowId: string; accessLevel: WorkflowShareAccessLevel; name: string; projectId: string; updatedAt: string | null }>>;
   /** v78 — adds or changes a user share; false when the workflow or the user does not exist. */
   upsertWorkflowUserShare(input: { workflowId: string; userId: string; accessLevel: WorkflowShareAccessLevel; sharedBy?: string | null }): Promise<boolean>;
   removeWorkflowUserShare(workflowId: string, userId: string): Promise<boolean>;

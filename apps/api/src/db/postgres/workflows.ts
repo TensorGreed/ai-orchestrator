@@ -829,11 +829,19 @@ export async function getWorkflowUserShare(ctx: PgContext, workflowId: string, u
 }
 
 export async function listWorkflowsSharedToUser(ctx: PgContext, userId: string): ReturnType<Store["listWorkflowsSharedToUser"]> {
-  const rows = await ctx.query<{ workflow_id: string; access_level: string }>(
-    `SELECT workflow_id, access_level FROM workflow_user_shares WHERE user_id = $1 ORDER BY workflow_id COLLATE "C"`,
+  const rows = await ctx.query<{ workflow_id: string; access_level: string; name: string; project_id: string | null; updated_at: string | null }>(
+    `SELECT s.workflow_id, s.access_level, w.name, w.project_id, w.updated_at
+       FROM workflow_user_shares s JOIN workflows w ON w.id = s.workflow_id
+      WHERE s.user_id = $1 ORDER BY s.workflow_id COLLATE "C"`,
     [userId]
   );
-  return rows.map((row) => ({ workflowId: toStr(row.workflow_id), accessLevel: shareLevel(row.access_level) }));
+  return rows.map((row) => ({
+    workflowId: toStr(row.workflow_id),
+    accessLevel: shareLevel(row.access_level),
+    name: toStr(row.name),
+    projectId: row.project_id ? toStr(row.project_id) : DEFAULT_PROJECT_ID,
+    updatedAt: row.updated_at ? toStr(row.updated_at) : null
+  }));
 }
 
 export async function upsertWorkflowUserShare(ctx: PgContext, input: Parameters<Store["upsertWorkflowUserShare"]>[0]): Promise<boolean> {

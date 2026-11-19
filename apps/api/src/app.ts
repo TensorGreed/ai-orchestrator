@@ -10844,22 +10844,19 @@ export async function createApp(
   app.get("/api/workflows/shared-with-me", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
+    // One query with the workflow summaries; the same rules as rbacService.userShareAccess, without a read per row.
     const shared = await store.listWorkflowsSharedToUser(user.id);
-    const items = [];
-    for (const share of shared) {
-      const workflow = await store.getWorkflow(share.workflowId);
-      if (!workflow) continue;
-      const access = await rbacService.userShareAccess(user, workflow);
-      if (!access) continue;
-      items.push({
-        id: workflow.id,
-        name: workflow.name,
-        projectId: workflow.projectId ?? DEFAULT_PROJECT_ID,
-        updatedAt: workflow.updatedAt ?? null,
+    const items = shared
+      .filter((share) => !user.projectScope || user.projectScope.includes(share.projectId))
+      .map((share) => ({
+        id: share.workflowId,
+        name: share.name,
+        projectId: share.projectId,
+        updatedAt: share.updatedAt,
         accessLevel: share.accessLevel,
-        effectiveAccess: access
-      });
-    }
+        effectiveAccess: share.accessLevel === "execute" && roleMayRunWorkflows(user.role) ? ("execute" as const) : ("read" as const)
+      }))
+      .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
     return { workflows: items };
   });
 

@@ -8699,11 +8699,19 @@ export class SqliteStore implements Store {
   }
 
   async listWorkflowsSharedToUser(userId: string): ReturnType<Store["listWorkflowsSharedToUser"]> {
-    const rows = this.queryAll<{ workflow_id: string; access_level: string }>(
-      `SELECT workflow_id, access_level FROM workflow_user_shares WHERE user_id = ? ORDER BY workflow_id`,
+    const rows = this.queryAll<{ workflow_id: string; access_level: string; name: string; project_id: string | null; updated_at: string | null }>(
+      `SELECT s.workflow_id, s.access_level, w.name, w.project_id, w.updated_at
+         FROM workflow_user_shares s JOIN workflows w ON w.id = s.workflow_id
+        WHERE s.user_id = ? ORDER BY s.workflow_id`,
       [userId]
     );
-    return rows.map((row) => ({ workflowId: toString(row.workflow_id), accessLevel: toString(row.access_level) === "execute" ? "execute" : "read" }));
+    return rows.map((row) => ({
+      workflowId: toString(row.workflow_id),
+      accessLevel: toString(row.access_level) === "execute" ? "execute" : "read",
+      name: toString(row.name),
+      projectId: row.project_id ? toString(row.project_id) : DEFAULT_PROJECT_ID,
+      updatedAt: row.updated_at ? toString(row.updated_at) : null
+    }));
   }
 
   async upsertWorkflowUserShare(input: Parameters<Store["upsertWorkflowUserShare"]>[0]): Promise<boolean> {
