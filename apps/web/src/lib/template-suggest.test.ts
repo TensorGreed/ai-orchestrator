@@ -143,3 +143,26 @@ describe("dragged fields", () => {
     expect(joinTemplatePath("", "has space")).toBeUndefined();
   });
 });
+
+describe("output aliases", () => {
+  it("offers an LLM Call's answer, not its text (the same value, kept for saved workflows)", () => {
+    const llm = { id: "classify", label: "Classify", type: "llm_call", output: { text: "shipping", answer: "shipping", toolCalls: [] } };
+    const paths = buildTemplateSuggestions({
+      nodeId: "reply",
+      parents: [llm],
+      steps: [llm],
+      input: { text: "shipping", answer: "shipping", webhook: { message: "where is my parcel" } }
+    }).map((entry) => entry.path);
+    expect(paths).toContain("answer");
+    expect(paths).toContain("results.classify.answer");
+    expect(paths).not.toContain("text");
+    expect(paths).not.toContain("results.classify.text");
+  });
+
+  it("keeps a text field of a node that is not a model node, or a model output without answer", () => {
+    const set = { id: "draft", label: "Draft", type: "set_node", output: { text: "hi", answer: "hi" } };
+    expect(buildTemplateSuggestions({ nodeId: "x", parents: [set], steps: [set] }).map((entry) => entry.path)).toContain("text");
+    const old = { id: "old", label: "Old", type: "llm_call", output: { text: "hi" } };
+    expect(buildTemplateSuggestions({ nodeId: "x", parents: [old], steps: [old] }).map((entry) => entry.path)).toContain("text");
+  });
+});

@@ -3,8 +3,10 @@
  * last run (or pinned data): the fields of the steps connected straight into the node (`{{field}}`), what the node
  * received in the run (run input and context), workflow variables (`{{vars.KEY}}`), and any step of the workflow
  * (`{{results.<nodeId>.field}}`, shown with the step's label). Only paths a template can read as a path are offered:
- * each segment letters, digits, `_` or `-`, and list entries by index (`items.0.title`).
+ * each segment letters, digits, `_` or `-`, and list entries by index (`items.0.title`). A field kept only as an older
+ * name of another (an LLM Call's `text`, the same as `answer`) is not offered: new templates use the field it names.
  */
+import { nodeOutputAliases } from "@ai-orchestrator/shared";
 
 export interface TemplateSuggestion {
   /** The text inside `{{ }}`. */
@@ -18,6 +20,8 @@ export interface TemplateSuggestion {
 export interface TemplateSuggestStep {
   id: string;
   label: string;
+  /** The step's node type, when known: its older output names (aliases) are left out. */
+  type?: string;
   /** The step's output in the last run (or its pinned data); undefined when unknown. */
   output?: unknown;
 }
@@ -100,6 +104,13 @@ function collectPaths(
   }
 }
 
+/** The top-level keys of a step's output not to offer: internal keys, and aliases whose field is there too. */
+function hiddenKeysOf(step: TemplateSuggestStep, isInternalKey: (key: string) => boolean): (key: string) => boolean {
+  const aliases = step.type ? nodeOutputAliases(step.type) : {};
+  const output = isRecord(step.output) ? step.output : {};
+  return (key) => isInternalKey(key) || (key in aliases && aliases[key]! in output);
+}
+
 /** Every suggestion for a node's template fields, nearest data first, without duplicate paths. */
 export function buildTemplateSuggestions(sources: TemplateSuggestSources): TemplateSuggestion[] {
   const isInternalKey = sources.isInternalKey ?? (() => false);
@@ -107,16 +118,20 @@ export function buildTemplateSuggestions(sources: TemplateSuggestSources): Templ
   const parentIds = new Set(sources.parents.map((parent) => parent.id));
   // Fields of the steps connected straight in: `{{field}}`. Only an object's fields are spread into the input: a
   // step whose output is a list (or a single value) is read by its id (`{{<id>.0.title}}`).
+  // A parent's alias is also in the node's recorded input (parents' fields are spread into it): left out there too.
+  const hiddenAliases = new Set<string>();
   for (const parent of sources.parents) {
     const base = isRecord(parent.output) ? "" : joinTemplatePath("", parent.id);
     if (base === undefined) continue;
-    collectPaths(parent.output, base, parent.label, out, isInternalKey);
+    const hidden = hiddenKeysOf(parent, isInternalKey);
+    if (isRecord(parent.output)) for (const key of Object.keys(parent.output)) if (hidden(key) && !isInternalKey(key)) hiddenAliases.add(key);
+    collectPaths(parent.output, base, parent.label, out, hidden);
   }
   // What the node received in the run besides its parents' fields: run input (webhook body, prompt) and context.
   if (isRecord(sources.input)) {
     const rest: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(sources.input)) {
-      if (INPUT_SKIP_KEYS.has(key) || parentIds.has(key)) continue;
+      if (INPUT_SKIP_KEYS.has(key) || parentIds.has(key) || hiddenAliases.has(key)) continue;
       rest[key] = value;
     }
     collectPaths(rest, "", "Run input", out, isInternalKey);
@@ -132,7 +147,7 @@ export function buildTemplateSuggestions(sources: TemplateSuggestSources): Templ
     const root = joinTemplatePath("results", step.id);
     if (!root) continue;
     out.push({ path: root, source: step.label, detail: step.output === undefined ? "no run data yet" : describeValue(step.output) });
-    collectPaths(step.output, root, step.label, out, isInternalKey);
+    collectPaths(step.output, root, step.label, out, hiddenKeysOf(step, isInternalKey));
   }
   const seen = new Set<string>();
   return out.filter((entry) => {

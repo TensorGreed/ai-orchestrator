@@ -40,6 +40,8 @@ import {
 } from "@ai-orchestrator/shared";
 import { buildToolPolicyTraceView, readToolPolicyTrace } from "../lib/tool-policy-trace";
 import { isNumberOrTemplateSchema, numberOrTemplateText, parseNumberOrTemplate } from "../lib/number-or-template";
+import { relabelForModel } from "../lib/model-labels";
+import { modelChoiceKey, type AgentModelPeer } from "../lib/agent-models";
 import type { LiveNodeResult } from "../lib/run-trace";
 import { LiveElapsed } from "./WorkflowCanvasNode";
 import { latestResolvedFields, NodeActivityList, ResolvedFieldsTable } from "./NodeActivityList";
@@ -165,6 +167,10 @@ export interface NodeInspectorProps {
   executionResult: WorkflowExecutionResult | null;
   /** Labels of the workflow's nodes by id, to name upstream nodes and the agent an attachment served. */
   nodeLabels?: ReadonlyMap<string, string>;
+  /** Types of the workflow's nodes by id: autocomplete leaves out the older output names (aliases) of a type. */
+  nodeTypes?: ReadonlyMap<string, string>;
+  /** On an agent's chat model: the other agents' chat models (for "Use for all agents in this workflow"). */
+  agentModelPeers?: AgentModelPeer[];
   /** Opens another node in the inspector (previous/next step of the run), through the host's unsaved-edits check. */
   onNavigateNode?: (nodeId: string) => void;
   workflowContext?: {
@@ -189,6 +195,8 @@ export interface NodeInspectorProps {
     color?: EditorNodeData["color"];
     /** The node's other fields (errorConfig, ...) when the inspector changed them; absent: kept as they are. */
     nodeExtras?: Record<string, unknown>;
+    /** Other agents' chat models to put this node's model on as well ("Use for all agents in this workflow"). */
+    applyModelTo?: string[];
   }) => void;
   onExecuteStep: () => void;
   onPinNodeOutput?: (nodeId: string) => Promise<void> | void;
@@ -1458,6 +1466,8 @@ export function NodeInspector({
   inputOptions,
   executionResult,
   nodeLabels,
+  nodeTypes,
+  agentModelPeers,
   onNavigateNode,
   workflowContext,
   pinnedData,
@@ -2063,7 +2073,7 @@ export function NodeInspector({
       if (result.output !== undefined) outputs.set(result.nodeId, result.output);
     }
     const stepIds = nodeLabels ? [...nodeLabels.keys()] : [...outputs.keys()];
-    const step = (id: string) => ({ id, label: nodeLabels?.get(id) ?? id, output: outputs.get(id) });
+    const step = (id: string) => ({ id, label: nodeLabels?.get(id) ?? id, type: nodeTypes?.get(id), output: outputs.get(id) });
     return {
       suggestions: buildTemplateSuggestions({
         nodeId: node.id,
@@ -2080,7 +2090,7 @@ export function NodeInspector({
       strictTemplates: workflowContext?.strictTemplates === true,
       readOnly: Boolean(readOnlyReason)
     };
-  }, [currentNodeResult?.input, executionResult, inputOptions, node.id, nodeLabels, pinnedData, readOnlyReason, workflowContext?.strictTemplates, workflowContext?.vars]);
+  }, [currentNodeResult?.input, executionResult, inputOptions, node.id, nodeLabels, nodeTypes, pinnedData, readOnlyReason, workflowContext?.strictTemplates, workflowContext?.vars]);
   const currentNodePinned = hasOwnRecordKey(asRecord(pinnedData), node.id);
   const currentPinnedOutput = currentNodePinned ? asRecord(pinnedData)[node.id] : undefined;
 
@@ -2125,6 +2135,40 @@ export function NodeInspector({
           : "parameters"
     );
   }, [node.id]);
+
+  /**
+   * On an agent's chat model whose model differs from another agent's: one click saves this node and puts the same
+   * model on every agent's chat model in the workflow.
+   */
+  const renderUseForAllAgents = () => {
+    const peers = agentModelPeers ?? [];
+    if (peers.length === 0 || readOnlyReason) return null;
+    if (!toStringValue(provider.providerId).trim() || !toStringValue(provider.model).trim()) return null;
+    const chosen = modelChoiceKey(provider);
+    const differing = peers.filter((peer) => modelChoiceKey(peer.provider) !== chosen);
+    if (differing.length === 0) return null;
+    return (
+      <div className="cfg-tip cfg-inline-actions" data-testid="use-model-for-all-agents">
+        <span>
+          {differing.length === 1 ? "1 other agent uses" : `${differing.length} other agents use`} another model.
+        </span>
+        <button
+          type="button"
+          className="insp-btn"
+          onClick={() => handleSave({ applyModelTo: peers.map((peer) => peer.id) })}
+        >
+          Use for all agents in this workflow
+        </button>
+      </div>
+    );
+  };
+
+  /** A label that names the node's provider or model ("Chat Model (echo)") follows a change of either. */
+  const followModelInLabel = (next: Record<string, unknown> | undefined) => {
+    const before = { providerId: toStringValue(provider.providerId), model: toStringValue(provider.model) };
+    const after = { providerId: toStringValue(next?.providerId), model: toStringValue(next?.model) };
+    setLabel((current) => relabelForModel(current, before, after));
+  };
 
   const setProvider = (patch: Record<string, unknown>) => {
     setConfig((current) => ({
@@ -3037,15 +3081,16 @@ export function NodeInspector({
         <SelectField
           label="Provider"
           value={providerId}
-          onChange={(next) =>
+          onChange={(next) => {
+            followModelInLabel(switchedModelProvider(provider, next));
             setConfig((current) => {
               const switched = switchedModelProvider(asRecord(current.provider), next);
               if (switched) return { ...current, provider: switched };
               const rest = { ...current };
               delete rest.provider;
               return rest;
-            })
-          }
+            });
+          }}
           options={[
             // A chain node may always go back to the upstream model; LLM Call needs its own provider.
             ...(node.data.nodeType !== "llm_call"
@@ -3067,7 +3112,10 @@ export function NodeInspector({
           renderModelChoiceField({
             value: toStringValue(provider.model),
             placeholder: "gpt-4.1-mini / llama3.1",
-            onChange: (next) => setProvider({ model: next })
+            onChange: (next) => {
+              followModelInLabel({ ...provider, model: next });
+              setProvider({ model: next });
+            }
           })
         ) : (
           <>
@@ -3112,6 +3160,7 @@ export function NodeInspector({
           {providerTestMessage && <span className="muted">{providerTestMessage}</span>}
         </div>
         {providerTestError && <div className="error-banner">{providerTestError}</div>}
+        {renderUseForAllAgents()}
         <ModelAllowlistWarning message={modelAllowlistWarning} />
         <AdvancedFields
           setCount={
@@ -10358,13 +10407,14 @@ export function NodeInspector({
     return errorConfigRepair.errorConfig ? { ...rest, errorConfig: errorConfigRepair.errorConfig } : rest;
   };
 
-  const handleSave = () =>
+  const handleSave = (extra: { applyModelTo?: string[] } = {}) =>
     onSave({
       label,
       config: getConfigForSave(),
       disabled: nodeDisabled || undefined,
       color: nodeColor,
-      ...(removeInvalidErrorConfig ? { nodeExtras: extrasWithoutInvalidErrorConfig() } : {})
+      ...(removeInvalidErrorConfig ? { nodeExtras: extrasWithoutInvalidErrorConfig() } : {}),
+      ...(extra.applyModelTo?.length ? { applyModelTo: extra.applyModelTo } : {})
     });
 
   const resolvePendingClose = (choice: "save" | "discard" | "keep") => {
@@ -11047,7 +11097,7 @@ export function NodeInspector({
         <button
           type="button"
           className="insp-btn primary"
-          onClick={readOnlyReason ? undefined : handleSave}
+          onClick={readOnlyReason ? undefined : () => handleSave()}
           aria-disabled={readOnlyReason ? true : undefined}
           title={readOnlyReason ?? undefined}
           data-dirty={isDirty && !readOnlyReason ? "true" : undefined}
