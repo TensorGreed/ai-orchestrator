@@ -506,6 +506,9 @@ export class PostgresStore implements Store {
   async saveWebhookIdempotencyPending(...args: Parameters<Store["saveWebhookIdempotencyPending"]>): ReturnType<Store["saveWebhookIdempotencyPending"]> {
     return webhooks.saveWebhookIdempotencyPending(this.ctx, ...args);
   }
+  async releaseWebhookIdempotencyPending(...args: Parameters<Store["releaseWebhookIdempotencyPending"]>): ReturnType<Store["releaseWebhookIdempotencyPending"]> {
+    return webhooks.releaseWebhookIdempotencyPending(this.ctx, ...args);
+  }
   async saveWebhookIdempotencyResult(...args: Parameters<Store["saveWebhookIdempotencyResult"]>): ReturnType<Store["saveWebhookIdempotencyResult"]> {
     return webhooks.saveWebhookIdempotencyResult(this.ctx, ...args);
   }

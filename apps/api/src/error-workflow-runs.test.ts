@@ -15,7 +15,7 @@ import type { Store } from "./db/store.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
 import { openTestStore } from "./test-support/test-store.js";
-import { claimErrorWorkflowRun, errorWorkflowRunId } from "./error-workflow-run.js";
+import { claimErrorWorkflowRun, errorWorkflowRunId, releaseErrorWorkflowRun } from "./error-workflow-run.js";
 
 interface TestContext {
   app: FastifyInstance;
@@ -260,6 +260,74 @@ describe("an error workflow's run", () => {
     await new Promise((resolve) => setTimeout(resolve, 500));
     expect((await context.store.getExecutionHistory(errorRunId))?.startedAt).toBe(firstError?.startedAt);
     expect((await runsOf(context, admin, "wf-handler")).map((row) => row.id)).toEqual([errorRunId]);
+  });
+
+  it("gives the claim back when a budget refuses the error workflow's run, so the failed run executed again tries again", async () => {
+    const context = await createTestContext("role");
+    const admin = await login(context, "admin", "ada");
+    await context.store.upsertWorkflow(handlerWorkflow("wf-handler"));
+    await context.store.upsertWorkflow(failingWorkflow("wf-fails", "wf-handler"));
+    const budget = await call(context, "POST", "/api/budgets", admin.cookie, {
+      name: "Handler cap",
+      scopeType: "workflow",
+      scopeId: "wf-handler",
+      period: "month",
+      limitType: "tokens",
+      limitValue: 1,
+      action: "block",
+      warnThresholdPct: 0.8
+    });
+    expect(budget.statusCode, budget.body).toBe(200);
+    await context.store.writeUsageEvent({
+      id: `usage_${crypto.randomUUID()}`,
+      executionId: `exec_${crypto.randomUUID()}`,
+      workflowId: "wf-handler",
+      workflowName: "Handler",
+      userId: null,
+      userEmail: null,
+      projectId: "default",
+      triggerType: "manual",
+      status: "success",
+      inputTokens: 5,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      totalTokens: 5,
+      costUsd: 0,
+      llmCallCount: 1,
+      durationMs: 1,
+      providers: []
+    });
+
+    const failed = await call(context, "POST", "/api/workflows/wf-fails/execute", admin.cookie, {});
+    expect(failed.statusCode, failed.body).toBe(400);
+    const failedRunId = failed.json<{ executionId: string }>().executionId;
+    const errorRunId = errorWorkflowRunId(failedRunId);
+    // The refusal is recorded (one budget-refused run), the error run never started, and the claim is free again.
+    await vi.waitFor(async () => expect((await runsOf(context, admin, "wf-handler")).some((row) => row.id.startsWith("budget-refused-"))).toBe(true), { timeout: 10_000 });
+    await vi.waitFor(async () => expect(await context.store.getWebhookIdempotency({ endpointKey: "l2m:error-workflow-run", idempotencyKey: failedRunId })).toBeNull(), { timeout: 10_000 });
+    expect(await context.store.getExecutionHistory(errorRunId)).toBeNull();
+
+    // With the budget gone, the same failed run executed again starts its error workflow.
+    const budgetId = budget.json<{ budget: { id: string } }>().budget.id;
+    expect((await context.app.inject({ method: "DELETE", url: `/api/budgets/${budgetId}`, headers: { cookie: admin.cookie } })).statusCode).toBe(200);
+    const uuid = vi.spyOn(crypto, "randomUUID").mockImplementationOnce(() => failedRunId as ReturnType<typeof crypto.randomUUID>);
+    const again = await call(context, "POST", "/api/workflows/wf-fails/execute", admin.cookie, {});
+    uuid.mockRestore();
+    expect(again.json<{ executionId: string }>().executionId).toBe(failedRunId);
+    await vi.waitFor(async () => expect((await context.store.getExecutionHistory(errorRunId))?.status).toBe("success"), { timeout: 10_000 });
+  });
+
+  it("a claim is given back only while pending with its own hash", async () => {
+    const context = await createTestContext("role");
+    expect(await claimErrorWorkflowRun(context.store, "failed-run-9")).toBe(true);
+    expect(await releaseErrorWorkflowRun(context.store, "failed-run-9")).toBe(true);
+    expect(await releaseErrorWorkflowRun(context.store, "failed-run-9")).toBe(false);
+    expect(await claimErrorWorkflowRun(context.store, "failed-run-9")).toBe(true);
+    expect(await claimErrorWorkflowRun(context.store, "failed-run-9")).toBe(false);
+    // Another key with the same idempotency key (a webhook endpoint) is never touched.
+    await context.store.saveWebhookIdempotencyPending({ endpointKey: "prod:hook", idempotencyKey: "failed-run-10", requestHash: errorWorkflowRunId("failed-run-10"), expiresAt: "2099-01-01T00:00:00.000Z" });
+    expect(await releaseErrorWorkflowRun(context.store, "failed-run-10")).toBe(false);
+    expect(await context.store.getWebhookIdempotency({ endpointKey: "prod:hook", idempotencyKey: "failed-run-10" })).not.toBeNull();
   });
 
   it("claims a failed run's error workflow run once, however many callers race for it", async () => {

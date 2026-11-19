@@ -311,6 +311,13 @@ describeStoreContract("store contract: sessions, webhooks and triggers", (ctx) =
     expect(await store.getWebhookIdempotency({ endpointKey: "ep", idempotencyKey: "k1" })).toMatchObject({ status: "pending", result: null, requestHash: "h" });
     await store.saveWebhookIdempotencyResult({ endpointKey: "ep", idempotencyKey: "k1", status: "success", result: { ok: true } });
     expect(await store.getWebhookIdempotency({ endpointKey: "ep", idempotencyKey: "k1" })).toMatchObject({ status: "success", result: { ok: true } });
+    // A pending claim is given back only with its own hash; a row with a result is kept.
+    expect(await store.releaseWebhookIdempotencyPending({ endpointKey: "ep", idempotencyKey: "k1", requestHash: "h" })).toBe(false);
+    await store.saveWebhookIdempotencyPending({ endpointKey: "ep", idempotencyKey: "k2", requestHash: "h2", expiresAt: future });
+    expect(await store.releaseWebhookIdempotencyPending({ endpointKey: "ep", idempotencyKey: "k2", requestHash: "other" })).toBe(false);
+    expect(await store.releaseWebhookIdempotencyPending({ endpointKey: "ep", idempotencyKey: "k2", requestHash: "h2" })).toBe(true);
+    expect(await store.getWebhookIdempotency({ endpointKey: "ep", idempotencyKey: "k2" })).toBeNull();
+    await store.saveWebhookIdempotencyPending({ endpointKey: "ep", idempotencyKey: "k2", requestHash: "h2", expiresAt: future });
     await store.saveWebhookReplayKey({ replayKey: "old", endpointKey: "ep", expiresAt: "2000-01-01T00:00:00.000Z" });
     await store.clearExpiredWebhookSecurityState();
     expect(await store.hasWebhookReplayKey("old")).toBe(false);

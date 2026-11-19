@@ -6208,6 +6208,17 @@ export class SqliteStore implements Store {
     this.persist();
   }
 
+  async releaseWebhookIdempotencyPending(input: { endpointKey: string; idempotencyKey: string; requestHash: string }): Promise<boolean> {
+    const changed = this.db
+      .prepare(
+        `DELETE FROM webhook_idempotency
+         WHERE endpoint_key = ? AND idempotency_key = ? AND request_hash = ? AND status = 'pending'`
+      )
+      .run(input.endpointKey, input.idempotencyKey, input.requestHash).changes;
+    this.persist();
+    return changed > 0;
+  }
+
   async saveWebhookIdempotencyResult(input: {
     endpointKey: string;
     idempotencyKey: string;

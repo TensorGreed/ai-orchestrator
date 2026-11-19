@@ -155,7 +155,8 @@ that project shared it with execute access (see [what a running workflow can rea
 off. Its runs are listed in **Runs** like any other, with the trigger `error`: the failed run's details say
 **Error workflow ran → run …**, and the error workflow's run says which failed run it handled. Each belongs to the
 person who started the failed run, so someone who sees only their own runs sees the error runs of their runs. An
-error workflow that fails does not start another one, and a failed run starts its error workflow once, even if it runs again.
+error workflow that fails does not start another one, and a failed run starts its error workflow once, even if it runs
+again (unless a budget or a full queue refused that error run: then it is tried again).
 
 ## Running from the editor
 

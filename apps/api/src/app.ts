@@ -368,7 +368,7 @@ import { DeliveryDedupe } from "./services/delivery-dedupe.js";
 import { acceptSlackEvent } from "./services/slack-intake.js";
 import { LocalRunEvents, openRunRelay, resultFromPersistedRun, RunEventPublisher, type PersistedRun, type RunEventName } from "./services/run-event-relay.js";
 import { runStarterId, type RedactedNodeEvent, type RunWorkflowExecutionInput, type WorkflowExecutionEventHooks } from "./run-types.js";
-import { ERROR_WORKFLOW_TRIGGER_TYPE, claimErrorWorkflowRun, errorWorkflowRunId, type ErrorWorkflowInput } from "./error-workflow-run.js";
+import { ERROR_WORKFLOW_TRIGGER_TYPE, claimErrorWorkflowRun, errorWorkflowRunId, releaseErrorWorkflowRun, type ErrorWorkflowInput } from "./error-workflow-run.js";
 import type { WorkflowExecutionResult } from "@ai-orchestrator/shared";
 import { createRunAccess, type RunAccessDenial } from "./run-access.js";
 import { ProjectNotEmptyError, ReleaseGateEnforcedError, StoreReferenceMissingError } from "./db/store-errors.js";
@@ -3006,8 +3006,16 @@ export async function createApp(
             // Recorded like any other run (Runs, budgets, the queue), under an id the failed run's record can name.
             // It belongs to whoever owns the failed run: their own-runs view and their sessions.
             const errorExecutionId = payload.executionId ? errorWorkflowRunId(payload.executionId) : crypto.randomUUID();
+            // A dispatch refused before the run started (a budget, a full or failing queue) gives the claim back, so the
+            // failed run executed again tries again.
+            const releaseClaim = async (reason: string) => {
+              if (!payload.executionId) return;
+              const released = await releaseErrorWorkflowRun(store, payload.executionId);
+              app.log.warn({ executionId: payload.executionId, errorWorkflowId: payload.errorWorkflowId, reason, released }, "Error workflow run was refused");
+            };
+            let started: Awaited<ReturnType<typeof runDispatcher.start>>;
             try {
-              await runDispatcher.fire(
+              started = await runDispatcher.start(
                 {
                   v: DISPATCH_SPEC_VERSION,
                   run: {
@@ -3031,6 +3039,14 @@ export async function createApp(
                 },
                 { pool: dispatchPoolOf(errorWf), queueItemId: errorExecutionId }
               );
+            } catch (err) {
+              await releaseClaim(String(secretService.redact(err instanceof Error ? err.message : String(err))));
+              return;
+            }
+            if (started.queued) return;
+            if (started.refused) await releaseClaim(started.refused.message);
+            try {
+              await started.done;
             } catch (err) {
               app.log.warn({ err: err instanceof Error ? err.message : String(err), errorWorkflowId: payload.errorWorkflowId }, "Error workflow execution failed");
             }
