@@ -469,3 +469,118 @@ describe("runWorkflowBuilder", () => {
     expect((globalThis as Record<string, unknown>).__builderRan).toBeUndefined();
   });
 });
+
+/**
+ * The end-user validation's Describe-it build (2026-11-19): "When a webhook receives a JSON body with a customer message
+ * in the field 'message', use an LLM to classify it ... and reply to the webhook caller with JSON". The model wired a
+ * Webhook Response body of {{response}}, a field the LLM Call never outputs, and the webhook answered 200 with an empty
+ * body.
+ */
+const classifyWebhook = (body: string) => ({
+  name: "Classify customer messages",
+  nodes: [
+    { id: "incoming", type: "webhook_input", label: "Incoming message", config: { path: "classify", method: "POST" } },
+    {
+      id: "build_prompt",
+      type: "prompt_template",
+      label: "Build prompt",
+      config: { template: "Classify as billing, shipping or other and summarise in one sentence. Answer JSON {\"category\", \"summary\"}: {{webhook.message}}" }
+    },
+    { id: "classify", type: "llm_call", label: "Classify", config: {} },
+    { id: "reply", type: "webhook_response", label: "Reply", config: { statusCode: 200, bodyTemplate: body } }
+  ],
+  edges: [
+    { source: "incoming", target: "build_prompt" },
+    { source: "build_prompt", target: "classify" },
+    { source: "classify", target: "reply" }
+  ]
+});
+
+describe("template paths in a draft", () => {
+  it("sends back a {{ }} path the step before does not output, naming the fields it does output", () => {
+    const check = checkBuilderDraft(classifyWebhook("{{response}}"), { workflowId: "wf", nodeModel: NODE_MODEL });
+    expect(check.issues).toHaveLength(1);
+    expect(check.issues[0]).toMatchObject({ nodeId: "reply" });
+    expect(check.issues[0]!.message).toMatch(/\{\{response\}\}/);
+    expect(check.issues[0]!.message).toMatch(/'classify' \(llm_call\) outputs answer/);
+    // The older alias is not offered.
+    expect(check.issues[0]!.message).not.toMatch(/\btext\b/);
+  });
+
+  it("accepts the fields the steps output, earlier steps through results, and run-wide names", () => {
+    for (const body of ["{{answer}}", "{{text}}", "{{results.classify.answer}}", "{{results.build_prompt.prompt}}", "{\"from\": \"{{webhook.email}}\", \"q\": \"{{user_prompt}}\"}"]) {
+      expect(checkBuilderDraft(classifyWebhook(body), { workflowId: "wf", nodeModel: NODE_MODEL }).issues).toEqual([]);
+    }
+  });
+
+  it("sends back a results path to a node that does not exist or a field it does not output", () => {
+    const missingNode = checkBuilderDraft(classifyWebhook("{{results.classifier.answer}}"), { workflowId: "wf", nodeModel: NODE_MODEL });
+    expect(missingNode.issues[0]!.message).toMatch(/no node with that id/);
+    const missingField = checkBuilderDraft(classifyWebhook("{{results.classify.summary}}"), { workflowId: "wf", nodeModel: NODE_MODEL });
+    expect(missingField.issues[0]!.message).toMatch(/'classify' \(llm_call\) outputs answer, toolCalls, raw, not 'summary'/);
+  });
+
+  it("does not check what an open step passes on (a webhook's payload, a branch's item, code)", () => {
+    const draft = {
+      name: "open",
+      nodes: [
+        { id: "incoming", type: "webhook_input", config: { path: "x", method: "POST" } },
+        { id: "check", type: "if_node", config: { condition: "{{amount}} > 10" } },
+        { id: "reply", type: "webhook_response", config: { bodyTemplate: "{{customer.name}}" } }
+      ],
+      edges: [
+        { source: "incoming", target: "check" },
+        { source: "check", target: "reply", sourceHandle: "true" }
+      ]
+    };
+    expect(checkBuilderDraft(draft, { workflowId: "wf", nodeModel: NODE_MODEL }).issues).toEqual([]);
+  });
+
+  it("lists each node's output fields in the catalog and the details", () => {
+    const catalog = new Map(builderNodeCatalog().map((entry) => [entry.type as string, entry]));
+    expect(catalog.get("llm_call")).toMatchObject({ outputFields: ["answer", "toolCalls", "raw"] });
+    expect(catalog.get("http_request")).toMatchObject({ outputFields: ["status", "ok", "headers", "body"] });
+    const { nodeTypes } = builderNodeDetails(["llm_call", "webhook_input"]);
+    const llm = nodeTypes.find((entry) => entry.type === "llm_call")!;
+    expect(llm.outputFields).toEqual(expect.arrayContaining([expect.objectContaining({ name: "answer" })]));
+    expect(JSON.stringify(llm.outputFields)).not.toMatch(/"text"/);
+    expect(nodeTypes.find((entry) => entry.type === "webhook_input")!.outputNote).toMatch(/body/);
+  });
+
+  it("repairs the validation's classify webhook: {{response}} goes back to the model, which answers {{answer}}", async () => {
+    const model = new ScriptedModel([
+      { toolCalls: [call("t1", "submit_workflow", classifyWebhook("{{response}}"))] },
+      { toolCalls: [call("t2", "submit_workflow", classifyWebhook("{{answer}}"))] }
+    ]);
+    const result = await runWorkflowBuilder({
+      workflowId: "wf-built",
+      resolveSecret: async () => undefined,
+      provider: NODE_MODEL,
+      prompt: "When a webhook receives a JSON body with a customer message in the field 'message', classify it and reply with JSON",
+      providerRegistry: registryWith(model)
+    });
+    expect(result.status).toBe("ready");
+    if (result.status !== "ready") return;
+    expect(result.attempts).toBe(2);
+    expect(result.workflow.nodes.find((node) => node.id === "reply")!.config).toMatchObject({ bodyTemplate: "{{answer}}" });
+    const feedback = model.calls[1]!.messages.filter((message) => message.role === "tool").map((message) => String(message.content)).at(-1);
+    expect(feedback).toMatch(/\{\{response\}\}/);
+    expect(feedback).toMatch(/outputs answer/);
+  });
+
+  it("lets a draft whose only problems are template paths through on the last submission, listing them as unfinished", async () => {
+    const model = new ScriptedModel([1, 2, 3].map((n) => ({ toolCalls: [call(`t${n}`, "submit_workflow", classifyWebhook("{{response}}"))] })));
+    const result = await runWorkflowBuilder({
+      workflowId: "wf-built",
+      resolveSecret: async () => undefined,
+      provider: NODE_MODEL,
+      prompt: "classify webhook messages",
+      providerRegistry: registryWith(model),
+      maxAttempts: 3
+    });
+    expect(result.status).toBe("ready");
+    if (result.status !== "ready") return;
+    expect(result.attempts).toBe(3);
+    expect(result.preview.unfinished.map((issue) => issue.message).join("\n")).toMatch(/\{\{response\}\}/);
+  });
+});

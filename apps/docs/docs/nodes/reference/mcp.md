@@ -35,6 +35,15 @@ Directly invokes an MCP tool outside the agent loop.
 | `argValues` | `object` | no | — |
 | `connection` | `object` | no | — |
 
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `tool_output` | What the tool returned. |
+| `structured` | The tool's structured result, when it has an output schema. |
+| `content` | The tool's content blocks. |
+| `tool_name` | The tool that was called. |
+
 **Example config**
 
 ```json

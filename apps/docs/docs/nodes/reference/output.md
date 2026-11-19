@@ -112,6 +112,14 @@ Formats final workflow output payload.
 | `responseTemplate` | `string` | no | — |
 | `outputKey` | `string` | no | — |
 
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `result` | The value the workflow returns. |
+
+Also under the name set in Output Key, when one is set.
+
 **Example config**
 
 ```json
@@ -169,6 +177,12 @@ Overrides the outgoing webhook HTTP response (status, headers, and body).
 | `statusCode` | `number` | no | — |
 | `headersTemplate` | `string` | no | — |
 | `bodyTemplate` | `string` | no | — |
+
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `result` | The body sent to the caller. |
 
 **Example config**
 

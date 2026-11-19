@@ -34,6 +34,10 @@ Receive chat messages via POST /api/chat/:workflowId. Pairs naturally with agent
 | `welcomeMessage` | `string` | no | — |
 | `active` | `boolean` | no | — |
 
+**Outputs**
+
+The chat message: <span v-pre>`{{user_prompt}}`</span> and <span v-pre>`{{session_id}}`</span>.
+
 **Example config**
 
 ```json
@@ -135,6 +139,10 @@ Public HTML form that starts a workflow. GET /api/forms/:path renders the form, 
 | `successMessage` | `string` | no | — |
 | `active` | `boolean` | no | — |
 | `fields` | `array<object>` | yes | — |
+
+**Outputs**
+
+One field per form field, named by its key.
 
 **Example config**
 
@@ -315,6 +323,10 @@ Start the workflow manually from the editor or via POST /api/triggers/manual/:wo
 |---|---|---|---|
 | `testData` | `any` | no | — |
 | `label` | `string` | no | — |
+
+**Outputs**
+
+The run's input. <span v-pre>`{{user_prompt}}`</span> reads the prompt the run was given.
 
 **Example config**
 
@@ -522,6 +534,14 @@ Triggers workflow execution automatically from a cron schedule.
 | `cronExpression` | `string` | yes | — |
 | `timezone` | `string` | yes | — |
 | `active` | `boolean` | yes | — |
+
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `trigger_type` | How the run started (cron for a scheduled run). |
+| `scheduled_at` | When the run started (ISO time). |
+| `schedule` | The schedule's cron expression, time zone and on/off state. |
 
 **Example config**
 
@@ -740,6 +760,10 @@ Injects webhook payload into workflow context.
 | `inputTrust` | `string` | no | `user` \| `untrusted_external` |
 | `allowedIps` | `array<string>` | no | — |
 | `active` | `boolean` | no | — |
+
+**Outputs**
+
+The request's JSON body fields (only the Pass-through fields when set). <span v-pre>`{{webhook.<field>}}`</span> reads them from any step.
 
 **Example config**
 

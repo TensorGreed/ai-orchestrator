@@ -1,5 +1,6 @@
 import type { NodeDefinition } from "./types";
 import { withCredentialSpecs } from "./node-credentials";
+import { withOutputSpecs } from "./node-outputs";
 import { CONTENT_SAFETY_CATEGORY_VALUES, OUTPUT_GUARDRAIL_CHECK_VALUES } from "./guard";
 import { AGENT_DEFAULT_MAX_ITERATIONS } from "./agent-tools";
 
@@ -3454,7 +3455,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
   }
 ];
 
-export const nodeDefinitions: NodeDefinition[] = withCredentialSpecs(baseNodeDefinitions);
+export const nodeDefinitions: NodeDefinition[] = withOutputSpecs(withCredentialSpecs(baseNodeDefinitions));
 
 export function getNodeDefinition(type: string): NodeDefinition | undefined {
   return nodeDefinitions.find((node) => node.type === type);

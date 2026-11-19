@@ -125,6 +125,10 @@ Runs custom JavaScript transformation logic in a sandboxed VM context.
 | `code` | `string` | yes | — |
 | `timeout` | `number` | no | — |
 
+**Outputs**
+
+Whatever the code returns.
+
 **Example config**
 
 ```json
@@ -393,6 +397,10 @@ Items mode sends the matching items of a list to Kept and the rest to Rejected; 
 | `combineWith` | `string` | no | `AND` \| `OR` |
 | `passMode` | `string` | no | `pass` \| `reject` |
 
+**Outputs**
+
+The items that passed, as received.
+
 **Example config**
 
 ```json
@@ -569,6 +577,15 @@ Evaluates a condition and routes execution to the true or false branch. A condit
 | `trueLabel` | `string` | no | — |
 | `falseLabel` | `string` | no | — |
 
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `result` | Whether the condition was true. |
+| `evaluatedValue` | What the condition evaluated to. |
+
+Also passes on the item it received.
+
 **Example config**
 
 ```json
@@ -708,6 +725,10 @@ Iterates over an input array and runs its body (the nodes connected straight aft
 | `collectResults` | `boolean` | no | — |
 | `routeBranches` | `boolean` | no | — |
 
+**Outputs**
+
+Each pass's results, collected; inside the loop body <span v-pre>`{{item}}`</span> is the current item.
+
 **Example config**
 
 ```json
@@ -732,6 +753,10 @@ Merges outputs from multiple parent branches after fan-in, or collects every pas
 |---|---|---|---|
 | `mode` | `string` | yes | `append` \| `combine_by_key` \| `choose_branch` \| `collect_loop_passes` |
 | `combineKey` | `string` | no | — |
+
+**Outputs**
+
+The fields of every input, combined as the mode says.
 
 **Example config**
 
@@ -836,6 +861,14 @@ Builds a prompt using handlebars-style placeholders.
 |---|---|---|---|
 | `template` | `string` | yes | — |
 | `outputKey` | `string` | no | — |
+
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `prompt` | The rendered template. |
+
+Also under the name set in Output Key, when one is set.
 
 **Example config**
 
@@ -977,6 +1010,10 @@ Builds a structured output object from key/template assignments; each field can 
 | Field | Type | Required | Values |
 |---|---|---|---|
 | `assignments` | `array<object>` | no | — |
+
+**Outputs**
+
+One field per row, named by the row's key (only those fields).
 
 **Example config**
 
@@ -1140,6 +1177,15 @@ Routes execution to one of several branches based on a matched value.
 | `switchValue` | `string` | yes | — |
 | `cases` | `array<object>` | yes | — |
 | `defaultLabel` | `string` | no | — |
+
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `matched` | The label of the case that matched (or the default label). |
+| `evaluatedValue` | The value that was compared. |
+
+Also passes on the item it received.
 
 **Example config**
 
