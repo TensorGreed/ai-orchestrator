@@ -15,7 +15,7 @@ To find them, open **Templates** and pick **Starters**, or turn on **Runs withou
 | Schedule: fetch, filter and notify | Schedule Trigger, HTTP Request, Filter (items), a POST | **Run**. The schedule is off until you turn **Active** on |
 | Form intake: route requests | Form Trigger, Switch, one Set per team | **Webhook run** with the sample answers, or open the form URL |
 | CSV to JSON: parse, sort and total | Extract from File, Sort, Summarize, Convert to File | **Run**; paste your own CSV into **Parse CSV** |
-| Approval before it goes out | Approval Gate with an editable amount | **Run**, then decide in **Approvals** |
+| Approval before it goes out | Approval Gate with an editable amount | **Run**, then decide in **Approvals**. Self-approval is on, so you can try it alone; before real use, clear **Let the person who started the run approve it** on its **Approve refund** node |
 | Retry, then fall back | HTTP Request retries and its **Error** output | **Run**; change `503` to `200` in the URL to see the success path |
 | Loop over items and collect | Loop, a Set per item, Merge (collect loop passes) | **Run** |
 | Call a sub-workflow | Execute Workflow with an input mapping | **Run**. Using the template also creates the sub-workflow it calls |

@@ -57,4 +57,10 @@ describe("starter templates", () => {
       }
     }
   });
+
+  it.each(starterFiles)("%s says so plainly when it lets the person who started a run approve it", (file) => {
+    const workflow = importWorkflowFromJson(fs.readFileSync(path.join(STARTERS, file), "utf8").split("$L2M_API_BASE").join("http://127.0.0.1:4000"));
+    const selfApproval = workflow.nodes.some((node) => (node.config as Record<string, unknown> | undefined)?.allowSelfApproval === true);
+    if (selfApproval) expect(workflow.description ?? "").toMatch(/Self-approval is on/);
+  });
 });
