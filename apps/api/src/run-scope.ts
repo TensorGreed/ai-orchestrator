@@ -38,13 +38,14 @@
  * project runs on its owner's execute share, not on the user.
  */
 
-import { DEFAULT_PROJECT_ID, type DataLabels, type MCPServerConfig, type ReleaseChannel, type SecretReference, type Workflow } from "@ai-orchestrator/shared";
+import { DEFAULT_PROJECT_ID, ErrorCategory, WorkflowError, type DataLabels, type MCPServerConfig, type ReleaseChannel, type SecretReference, type Workflow } from "@ai-orchestrator/shared";
 import type {
   AgentSessionArtifactStore,
   KnowledgeBaseStore,
   WorkflowExecutionDependencies
 } from "@ai-orchestrator/workflow-engine";
 import type { SafeUser } from "./services/auth-service.js";
+import { productionRefusalCode } from "./services/release-service.js";
 
 type MemoryStore = NonNullable<WorkflowExecutionDependencies["memoryStore"]>;
 type ToolDataStore = NonNullable<WorkflowExecutionDependencies["toolDataStore"]>;
@@ -145,7 +146,12 @@ export function createRunScope(deps: RunScopeDeps) {
     const target = channel === "production" && deps.getRunnableWorkflow ? await deps.getRunnableWorkflow(targetId, "production") : await deps.getWorkflow(targetId);
     if (!target) {
       const refusal = channel === "production" ? await deps.productionRefusal?.(targetId) : null;
-      if (refusal) throw new Error(`${purpose} '${targetId}': ${refusal}`);
+      if (refusal) {
+        const code = productionRefusalCode(refusal);
+        if (!code) throw new Error(`${purpose} '${targetId}': ${refusal}`);
+        // An unfinished version: the parent's run reports the same code the HTTP entry points send.
+        throw new WorkflowError(`${purpose} '${targetId}': ${refusal}`, ErrorCategory.NODE_CONFIG, false, { code }, "Finish the called workflow's settings in the editor and save it.");
+      }
       return undefined;
     }
     if (!target.projectId) return target;

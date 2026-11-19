@@ -41,3 +41,14 @@ export function splitDraftIssues(issues: readonly WorkflowValidationIssue[] | nu
   }
   return { toFix, notes };
 }
+
+/**
+ * Warnings shown when a workflow is opened, not only after a save: each one is something to fix that a run does not
+ * stop at (an `errorConfig` stored with invalid values blocks the next save until it is removed).
+ */
+const SHOWN_ON_OPEN_WARNING_CODES: ReadonlySet<string> = new Set(["invalid_error_config"]);
+
+/** Whether the editor shows `issue` for a workflow just opened (`afterSave` false) or just saved. */
+export function draftIssueShown(issue: WorkflowValidationIssue, afterSave: boolean): boolean {
+  return afterSave || issue.severity !== "warning" || SHOWN_ON_OPEN_WARNING_CODES.has(issue.code);
+}

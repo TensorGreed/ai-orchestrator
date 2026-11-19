@@ -320,6 +320,20 @@ export const DEACTIVATED_MESSAGE = "This workflow is deactivated, so production 
 export const PAUSED_MESSAGE =
   "Live triggers of this workflow are paused: it has unfinished settings. Finish them in the editor and save to serve production again.";
 
+/** The `code` every production refusal of an unfinished version carries, so clients can tell it from other refusals. */
+export const WORKFLOW_UNFINISHED_CODE = "workflow_unfinished";
+
+/** The `code` for a refusal `productionRefusal` gave, when it has one (only the unfinished-version refusal does). */
+export function productionRefusalCode(refusal: string | null | undefined): typeof WORKFLOW_UNFINISHED_CODE | undefined {
+  return refusal === PAUSED_MESSAGE ? WORKFLOW_UNFINISHED_CODE : undefined;
+}
+
+/** The JSON body of a production refusal: its reason (or `fallback` when there is none) and its `code`, if any. */
+export function productionRefusalBody(refusal: string | null | undefined, fallback: string): { error: string; code?: string } {
+  const code = productionRefusalCode(refusal);
+  return { error: refusal ?? fallback, ...(code ? { code } : {}) };
+}
+
 /** The unfinished node settings a saved draft may have: production's live triggers do not run a version with them. */
 function unfinishedIssues(workflow: Workflow): WorkflowValidationIssue[] {
   return unfinishedDraftIssues(validateWorkflowGraph(workflow));

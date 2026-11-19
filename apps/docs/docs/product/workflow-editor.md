@@ -35,7 +35,8 @@ Open the palette with **Add node**, a double-click on empty canvas, or the `+` b
   agent's ports). The connection follows the same rules as one you drag: when they refuse it (for example a model
   picked before an agent), the node is placed unconnected and the editor shows why.
 - **From an output**: the `+` beside an output (shown on outputs with no connection, and on hover) opens the palette
-  connected after that output, for example an IF node's **false** branch. Dragging a connection out of an output and
+  connected after that output, for example an IF node's **false** branch or a node's red **Error** output (a node
+  added after an Error output goes on the row below). Dragging a connection out of an output and
   dropping it on empty canvas does the same, and places the node where you dropped it.
 - **Drag and drop** a palette row onto the canvas to place a node at that point without connecting it.
 
@@ -211,7 +212,8 @@ and attachment rules.
 
 These save unfinished; each one stops a run until it is filled in:
 
-- Templates: a Prompt Template's template, an HTTP Request URL, a Set node's fields (and their names and values)
+- Templates: a Prompt Template's template, an HTTP Request URL and its Retry on status list, a Set node's fields (and
+  their names and values)
 - Branching: an IF condition, a Switch value and its cases, a Merge node's combine key and its second input
 - Loops: a Loop's input key and item variable
 - Models: an LLM Call's provider, a Gemini model, a chat model's model or gateway base URL, an agent's attached chat
@@ -228,8 +230,8 @@ While the version production would run has unfinished settings (a saved draft wi
 triggers are paused and the editor says so above the canvas: a production webhook (`/webhook/:path`, after its own
 address and authentication checks), form submission, chat message or MCP trigger call answers `409` with
 `code: "workflow_unfinished"` and starts no run (the form page and the tool's manifest still show), and a schedule or
-app trigger skips its tick. Other production runs of that version (an API key's `/execute`, a sub-workflow call) are
-refused with `409` too. The audit log records the pause once per version (`workflow.triggers_paused`, "Live triggers paused:
+app trigger skips its tick. Other production runs of that version (an API key's `/execute`, a sub-workflow call, a call through the MCP gateway)
+are refused with `409` and the same `code: "workflow_unfinished"`. The audit log records the pause once per version (`workflow.triggers_paused`, "Live triggers paused:
 unfinished settings"). Webhook run and the test webhook URL (`/webhook-test/:path`) still run the draft, so you can
 see where it stops. Save it finished and the triggers serve again.
 

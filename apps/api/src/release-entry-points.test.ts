@@ -140,6 +140,7 @@ const WORKFLOW_LOADS: LoadSite[] = [
   // Other route files and services.
   { file: "mcp-gateway-routes.ts", match: "deps.loadProductionWorkflow ? deps.loadProductionWorkflow(id) : store.getWorkflow(id)", kind: "production", why: "the gateway's tool list and tool calls (the app always passes the production loader)", defaultOnly: true },
   { file: "mcp-gateway-routes.ts", match: "const workflow = productionWorkflow(tool.workflowId);", kind: "production", why: "a gateway tool call runs the published version" },
+  { file: "mcp-gateway-routes.ts", match: "deps.loadCatalogWorkflow ? deps.loadCatalogWorkflow(id) : productionWorkflow(id)", kind: "production", why: "the gateway's tool list: production's version, unfinished or not (its call answers workflow_unfinished)" },
   { file: "mcp-gateway-routes.ts", match: "const workflow = store.getWorkflow(member.workflowId);", kind: "not_run", why: "admin toolset views and member validation", count: 2 },
   { file: "mcp-gateway-routes.ts", match: "const workflow = store.getWorkflow(summary.id);", kind: "not_run", why: "listing workflows that can be toolset members" },
   { file: "services/mcp-gateway-catalog.ts", match: "const workflow = store.getWorkflow(member.workflowId);", kind: "production", why: "the catalog store is the gateway's production loader (catalogStore)", defaultOnly: true },
@@ -356,7 +357,9 @@ describe("production entry points load the published version", () => {
     // The tool call loads the workflow first thing, right after reading its input.
     const runGateway = gateway.slice(start, start + 900);
     expect(runGateway).toContain("productionWorkflow(tool.workflowId)");
-    expect(gateway).toMatch(/const catalogStore = \{\s*getWorkflow: productionWorkflow,/);
+    expect(gateway).toMatch(/const catalogStore = \{\s*getWorkflow: catalogWorkflow,/);
+    expect(gateway).toContain("deps.loadCatalogWorkflow ? await deps.loadCatalogWorkflow(id) : await productionWorkflow(id)");
+    expect(appSource).toMatch(/loadCatalogWorkflow:\s*productionTriggerWorkflow/);
   });
 
   it("schedules and app triggers register from the production loader", () => {

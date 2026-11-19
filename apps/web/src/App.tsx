@@ -176,7 +176,7 @@ import { ExternalImportDialog, type ExternalImportSource } from "./components/Ex
 import { SecretSaveWarnings } from "./components/SecretSaveWarnings";
 import { DraftWarnings } from "./components/DraftWarnings";
 import { WebhookTestPayloadDialog } from "./components/WebhookTestPayloadDialog";
-import { apiErrorText } from "./lib/draft-validation";
+import { apiErrorText, draftIssueShown } from "./lib/draft-validation";
 import { canvasLabelBadge, type CanvasLabelBadge } from "./lib/taint-sources";
 import {
   forgetImportReport,
@@ -1768,7 +1768,7 @@ function StudioApp() {
     inBackground(() => validateStoredWorkflow(workflowId))
       .then((validation) => {
         if (cancelled) return;
-        const issues = (validation.issues ?? []).filter((issue) => afterSave || issue.severity !== "warning");
+        const issues = (validation.issues ?? []).filter((issue) => draftIssueShown(issue, afterSave));
         setDraftIssues({ workflowId, issues, liveTriggersPaused: validation.liveTriggersPaused === true });
       })
       .catch(() => {
@@ -4414,6 +4414,7 @@ function StudioApp() {
       config: Record<string, unknown>;
       disabled?: boolean;
       color?: EditorNodeData["color"];
+      nodeExtras?: Record<string, unknown>;
     }) => {
       if (!editingNodeId) {
         return;
@@ -4422,20 +4423,21 @@ function StudioApp() {
       const normalizedLabel = payload.label.trim();
       pushHistorySnapshot();
       setNodes((existing) =>
-        existing.map((node) =>
-          node.id === editingNodeId
-            ? {
-                ...node,
-                data: {
-                  ...node.data,
-                  label: normalizedLabel || node.data.label,
-                  config: payload.config,
-                  disabled: payload.disabled,
-                  color: payload.color
-                }
-              }
-            : node
-        )
+        existing.map((node) => {
+          if (node.id !== editingNodeId) return node;
+          const data: EditorNodeData = {
+            ...node.data,
+            label: normalizedLabel || node.data.label,
+            config: payload.config,
+            disabled: payload.disabled,
+            color: payload.color
+          };
+          if (payload.nodeExtras) {
+            if (Object.keys(payload.nodeExtras).length > 0) data.nodeExtras = payload.nodeExtras;
+            else delete data.nodeExtras;
+          }
+          return { ...node, data };
+        })
       );
       setEditingNodeId(null);
       setError(null);

@@ -387,3 +387,168 @@ describe("live triggers of an unfinished draft", () => {
     expect(await pausedNotes(context, "wf-hook-draft")).toHaveLength(0);
   });
 });
+
+describe("production refusals of an unfinished version carry workflow_unfinished", () => {
+  const unfinishedChild = (): Workflow =>
+    hookFlow({
+      nodes: [...hookFlow().nodes, { id: "http", type: "http_request", name: "HTTP", position, config: { method: "POST" } }],
+      edges: [...hookFlow().edges, { id: "e2", source: "set", target: "http" }]
+    });
+
+  async function loginAs(context: TestContext, role: "admin" | "builder", email: string): Promise<string> {
+    const password = "draft-Pass-123!";
+    await context.authService.register({ email, password, role });
+    const response = await context.app.inject({ method: "POST", url: "/api/auth/login", payload: { email, password } });
+    const raw = response.headers["set-cookie"];
+    const values = Array.isArray(raw) ? raw : [raw ?? ""];
+    const cookie = values.find((value) => value.startsWith(`${context.config.SESSION_COOKIE_NAME}=`));
+    if (!cookie) throw new Error("No session cookie");
+    return cookie.split(";")[0]!;
+  }
+
+  it("an API key's /execute (plain and streamed) and the compat execute routes answer 409 with the code", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context);
+    expect((await context.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie }, payload: unfinishedChild() })).statusCode).toBe(200);
+    const key = (await context.app.inject({ method: "POST", url: "/api/auth/api-keys", headers: { cookie }, payload: { name: "CI" } })).json<{ key: string }>().key;
+    for (const url of ["/api/workflows/wf-hook-draft/execute", "/api/workflows/wf-hook-draft/execute/stream"]) {
+      const viaKey = await context.app.inject({ method: "POST", url, headers: { authorization: `Bearer ${key}` }, payload: {} });
+      expect(viaKey.statusCode, `${url} ${viaKey.body}`).toBe(409);
+      expect(viaKey.json<{ code?: string; error: string }>()).toMatchObject({ code: "workflow_unfinished" });
+      expect(viaKey.json<{ error: string }>().error).toContain("Live triggers of this workflow are paused");
+    }
+    for (const url of ["/api/webhooks/execute", "/api/webhooks/execute/stream"]) {
+      const viaKey = await context.app.inject({ method: "POST", url, headers: { authorization: `Bearer ${key}` }, payload: { workflow_id: "wf-hook-draft" } });
+      expect(viaKey.statusCode, `${url} ${viaKey.body}`).toBe(409);
+      expect(viaKey.json<{ code?: string }>().code).toBe("workflow_unfinished");
+    }
+    // The editor's own run (session cookie, draft channel) still runs the draft and reports what is missing.
+    const editorRun = await context.app.inject({ method: "POST", url: "/api/workflows/wf-hook-draft/execute", headers: { cookie }, payload: {} });
+    expect(editorRun.statusCode).not.toBe(409);
+  });
+
+  it("a production parent that calls an unfinished sub-workflow fails with the code", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context);
+    expect((await context.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie }, payload: unfinishedChild() })).statusCode).toBe(200);
+    const parent: Workflow = {
+      id: "wf-parent",
+      name: "Parent",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      nodes: [
+        { id: "hook", type: "webhook_input", name: "Hook", position, config: { path: "draft-parent", method: "POST" } },
+        { id: "call", type: "execute_workflow", name: "Call", position, config: { workflowId: "wf-hook-draft" } },
+        { id: "out", type: "output", name: "Out", position, config: { responseTemplate: "got {{result}}" } }
+      ],
+      edges: [
+        { id: "p1", source: "hook", target: "call" },
+        { id: "p2", source: "call", target: "out" }
+      ]
+    };
+    expect((await context.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie }, payload: parent })).statusCode).toBe(200);
+    const fired = await context.app.inject({ method: "POST", url: "/webhook/draft-parent", payload: {} });
+    expect(fired.body).toContain("Sub-workflow 'wf-hook-draft': Live triggers of this workflow are paused");
+    expect(fired.json<{ code?: string }>().code).toBe("workflow_unfinished");
+  });
+
+  it("an MCP gateway call of an unfinished workflow tool fails with the code in the result's _meta", async () => {
+    const context = await createTestContext();
+    const admin = await loginAs(context, "admin", "admin@example.com");
+    const toolFlow: Workflow = {
+      id: "wf-gw-draft",
+      name: "Gateway draft",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "default",
+      nodes: [
+        { id: "trigger", type: "mcp_server_trigger", name: "Tool", position, config: { path: "gw-draft", toolName: "draft_tool", toolDescription: "Draft", inputSchema: { type: "object", properties: {} }, authMode: "public" } },
+        { id: "out", type: "output", name: "Out", position, config: { outputKey: "result", responseTemplate: "ok" } }
+      ],
+      edges: [{ id: "e1", source: "trigger", target: "out" }]
+    };
+    expect((await context.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie: admin }, payload: toolFlow })).statusCode).toBe(200);
+    const toolset = await context.app.inject({ method: "POST", url: "/api/mcp/toolsets", headers: { cookie: admin }, payload: { name: "Drafts", projectId: "default", members: [{ kind: "workflow", workflowId: "wf-gw-draft" }] } });
+    expect(toolset.statusCode, toolset.body).toBe(201);
+    const slug = toolset.json<{ toolset: { id: string; slug: string } }>().toolset;
+    const client = await context.app.inject({ method: "POST", url: "/api/mcp/clients", headers: { cookie: admin }, payload: { name: "IDE", toolsetIds: [slug.id], role: "builder" } });
+    expect(client.statusCode, client.body).toBe(201);
+    const token = client.json<{ token: string }>().token;
+    const rpc = (body: unknown, headers: Record<string, string> = {}) =>
+      context.app.inject({
+        method: "POST",
+        url: `/mcp/${slug.slug}`,
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${token}`, ...headers },
+        payload: JSON.stringify(body)
+      });
+    const init = await rpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "raw", version: "1" } } });
+    expect(init.statusCode, init.body).toBe(200);
+    const session = { "mcp-session-id": init.headers["mcp-session-id"] as string };
+    // The tool is listed while finished; the draft is then saved unfinished.
+    const listed = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, session);
+    expect(JSON.stringify(listed.json())).toContain("draft_tool");
+    const unfinished: Workflow = {
+      ...toolFlow,
+      nodes: [...toolFlow.nodes, { id: "http", type: "http_request", name: "HTTP", position, config: { method: "POST" } }],
+      edges: [...toolFlow.edges, { id: "e2", source: "out", target: "http" }]
+    };
+    expect((await context.app.inject({ method: "PUT", url: "/api/workflows/wf-gw-draft", headers: { cookie: admin }, payload: unfinished })).statusCode).toBe(200);
+    const called = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "draft_tool", arguments: {} } }, session);
+    const result = called.json<{ result: { isError?: boolean; content: Array<{ text: string }>; _meta?: { code?: string } } }>().result;
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("Live triggers of this workflow are paused");
+    expect(result._meta?.code).toBe("workflow_unfinished");
+  });
+});
+
+describe("a workflow stored with an invalid errorConfig", () => {
+  // A save refuses an invalid errorConfig; a workflow stored before that check (or written straight to the store) keeps working.
+  const stored = (): Workflow =>
+    ({
+      ...hookFlow(),
+      nodes: [
+        hookFlow().nodes[0]!,
+        { ...hookFlow().nodes[1]!, errorConfig: { maxRetries: -1, retryIntervalMs: "soon", continueOnFail: true } }
+      ]
+    }) as unknown as Workflow;
+
+  it("loads, validates with a warning, runs, exports and re-imports; a save with it is still refused", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context);
+    await context.store.upsertWorkflow(stored());
+
+    const loaded = await context.app.inject({ method: "GET", url: "/api/workflows/wf-hook-draft", headers: { cookie } });
+    expect(loaded.statusCode, loaded.body).toBe(200);
+    expect(loaded.json<Workflow>().nodes[1]!.errorConfig).toMatchObject({ maxRetries: -1 });
+
+    const validation = await context.app.inject({ method: "POST", url: "/api/workflows/wf-hook-draft/validate", headers: { cookie }, payload: {} });
+    const body = validation.json<{ valid: boolean; issues: Array<{ code: string; nodeId?: string; severity?: string; message: string }> }>();
+    expect(body.valid).toBe(true);
+    const warning = body.issues.find((issue) => issue.code === "invalid_error_config");
+    expect(warning).toMatchObject({ nodeId: "set", severity: "warning" });
+    expect(warning!.message).toContain("maxRetries, retryIntervalMs");
+
+    const run = await context.app.inject({ method: "POST", url: "/api/workflows/wf-hook-draft/execute", headers: { cookie }, payload: { input: { customer: "Ana" } } });
+    expect(run.statusCode, run.body).toBe(200);
+    expect(run.json<{ status: string }>().status).toBe("success");
+    const prod = await context.app.inject({ method: "POST", url: "/webhook/draft-orders", payload: { customer: "Ana" } });
+    expect(prod.statusCode, prod.body).toBe(200);
+
+    const exported = await context.app.inject({ method: "GET", url: "/api/workflows/wf-hook-draft/export", headers: { cookie } });
+    expect(exported.statusCode, exported.body).toBe(200);
+    const json = exported.json<{ json?: string }>().json ?? exported.body;
+    const imported = await context.app.inject({ method: "POST", url: "/api/workflows/import", headers: { cookie }, payload: { json: json.replaceAll("wf-hook-draft", "wf-hook-copy").replaceAll("draft-orders", "draft-orders-copy") } });
+    expect(imported.statusCode, imported.body).toBe(200);
+    // The valid field survives the round trip; the invalid ones are left out.
+    const copy = await context.store.getWorkflow("wf-hook-copy");
+    expect(copy?.nodes.find((node) => node.id === "set")?.errorConfig).toEqual({ continueOnFail: true });
+
+    // Saving it unchanged is still refused, naming the field; removing the invalid values saves.
+    const resaved = await context.app.inject({ method: "PUT", url: "/api/workflows/wf-hook-draft", headers: { cookie }, payload: stored() });
+    expect(resaved.statusCode).toBe(400);
+    expect(resaved.body).toContain("errorConfig");
+    const fixed = stored();
+    fixed.nodes[1]!.errorConfig = { continueOnFail: true };
+    expect((await context.app.inject({ method: "PUT", url: "/api/workflows/wf-hook-draft", headers: { cookie }, payload: fixed })).statusCode).toBe(200);
+  });
+});

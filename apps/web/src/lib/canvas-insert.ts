@@ -4,6 +4,7 @@
  */
 import { ORBIT, isHubType } from "./stages";
 import { validateConnection, type RuleEdge, type RuleNode } from "./connection-rules";
+import { ERROR_OUTPUT_HANDLE } from "./error-output";
 
 export interface InsertNode {
   id: string;
@@ -91,10 +92,11 @@ export function chooseSourceHandle(node: InsertNode, edges: readonly InsertEdge[
  * notes and an agent's port nodes are simply placed). An offered edge still goes through the editor's connection
  * rules (`validateConnection`), which may refuse it with a notice.
  */
-export function canAutoConnect(sourceType: string, targetType: string): boolean {
+export function canAutoConnect(sourceType: string, targetType: string, sourceHandle: string | null = null): boolean {
   if (sourceType === "sticky_note" || targetType === "sticky_note") return false;
   if (isInputType(targetType)) return false;
-  if (isHubType(sourceType) && AGENT_PORT_TYPES.has(targetType)) return false;
+  // A node added after an agent's Error output is a step (the fallback), never one of its ports.
+  if (isHubType(sourceType) && AGENT_PORT_TYPES.has(targetType) && sourceHandle !== ERROR_OUTPUT_HANDLE) return false;
   return true;
 }
 
@@ -130,7 +132,8 @@ export function findFreePosition(candidate: Point, nodes: readonly InsertNode[])
 /** Where a node inserted after `source`'s `handle` goes: to its right, on that output's row, clear of `nodes`. */
 export function insertPositionAfter(source: InsertNode, handle: string | null, nodes: readonly InsertNode[]): Point {
   const handles = sourceHandleIds(source);
-  const index = Math.max(0, handles.indexOf(handle));
+  // The Error output sits below the node's other outputs, so its node goes on the row after theirs.
+  const index = handle === ERROR_OUTPUT_HANDLE && !handles.includes(handle) ? handles.length : Math.max(0, handles.indexOf(handle));
   const candidate = {
     x: source.position.x + sizeOf(source).width + INSERT_GAP_X,
     y: source.position.y + index * INSERT_ROW_STEP
@@ -154,7 +157,7 @@ export function planInsertConnection(
   nodes: readonly RuleNode[],
   edges: readonly RuleEdge[]
 ): InsertConnectionPlan {
-  if (!canAutoConnect(source.data.nodeType, inserted.data.nodeType)) return { kind: "place" };
+  if (!canAutoConnect(source.data.nodeType, inserted.data.nodeType, handle)) return { kind: "place" };
   const verdict = validateConnection({ source: source.id, target: inserted.id, sourceHandle: handle }, [...nodes, inserted], edges);
   return verdict.ok ? { kind: "connect", sourceHandle: verdict.sourceHandle } : { kind: "refused", message: verdict.message };
 }

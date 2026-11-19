@@ -23,6 +23,7 @@ import {
   builtInToolProviderOf,
   httpErrorStatusMode,
   parseStatusList,
+  repairNodeErrorConfig,
   deriveWorkflowToolDescriptor,
   getNodeDefinition,
   nodeEmbeddingModelTarget,
@@ -161,6 +162,8 @@ export interface NodeInspectorProps {
     config: Record<string, unknown>;
     disabled?: boolean;
     color?: EditorNodeData["color"];
+    /** The node's other fields (errorConfig, ...) when the inspector changed them; absent: kept as they are. */
+    nodeExtras?: Record<string, unknown>;
   }) => void;
   onExecuteStep: () => void;
   onPinNodeOutput?: (nodeId: string) => Promise<void> | void;
@@ -1228,7 +1231,11 @@ export function NodeInspector({
   const [config, setConfig] = useState<Record<string, unknown>>(asRecord(node.data.config));
   const [nodeDisabled, setNodeDisabled] = useState<boolean>(Boolean(node.data.disabled));
   // Retry and continue settings a workflow JSON (or an import) set on the node; the engine reads them before the fields below.
-  const nodeErrorConfig = node.data.nodeExtras?.errorConfig && typeof node.data.nodeExtras.errorConfig === "object" ? (node.data.nodeExtras.errorConfig as NodeErrorConfig) : undefined;
+  // A workflow stored before saves checked them may hold invalid values: the engine ignores those, and so does the editor.
+  const errorConfigRepair = useMemo(() => repairNodeErrorConfig(node.data.nodeExtras?.errorConfig), [node.data.nodeExtras]);
+  const nodeErrorConfig: NodeErrorConfig | undefined = errorConfigRepair.errorConfig;
+  // Set when the user removes the invalid values; applied with the node's save.
+  const [removeInvalidErrorConfig, setRemoveInvalidErrorConfig] = useState(false);
   const [nodeColor, setNodeColor] = useState<EditorNodeData["color"]>(node.data.color);
   const [activeTab, setActiveTab] = useState<InspectorTab>("parameters");
   // A new node starts from its definition's sample config: those values count as defaults on the Advanced sections.
@@ -9749,6 +9756,23 @@ export function NodeInspector({
         </section>
         <section className="insp-settings-group" aria-label="Error handling">
           <h4>Error handling</h4>
+          {errorConfigRepair.invalidFields.length > 0 && (
+            <div className="cfg-tip cfg-tip-warn" role="alert" data-testid="node-error-config-invalid">
+              {removeInvalidErrorConfig ? (
+                <>
+                  The invalid <code>errorConfig</code> values are removed when you save this node.
+                </>
+              ) : (
+                <>
+                  This node&apos;s <code>errorConfig</code> has invalid values ({errorConfigRepair.invalidFields.join(", ")}). Runs
+                  ignore them, but the workflow cannot be saved until they are removed.{" "}
+                  <button type="button" className="auth-link-btn" onClick={() => setRemoveInvalidErrorConfig(true)}>
+                    Remove invalid values
+                  </button>
+                </>
+              )}
+            </div>
+          )}
           {(nodeErrorConfig?.retryOnFail === true || nodeErrorConfig?.continueOnFail === true) && (
             <div className="cfg-tip" data-testid="node-error-config-tip">
               This node&apos;s workflow JSON sets its error handling (<code>errorConfig</code>), which takes precedence:
@@ -9901,16 +9925,23 @@ export function NodeInspector({
     if (label !== node.data.label) return true;
     if (nodeDisabled !== Boolean(node.data.disabled)) return true;
     if ((nodeColor ?? undefined) !== (node.data.color ?? undefined)) return true;
+    if (removeInvalidErrorConfig) return true;
     return stableStringify(getConfigForSave()) !== stableStringify(stripAgentOnlyKeys(node.data.nodeType, savedConfig));
-  }, [config, label, mcpServerDefinitions, node.data, nodeColor, nodeDisabled]);
+  }, [config, label, mcpServerDefinitions, node.data, nodeColor, nodeDisabled, removeInvalidErrorConfig]);
   isDirtyRef.current = isDirty;
+
+  const extrasWithoutInvalidErrorConfig = (): Record<string, unknown> => {
+    const { errorConfig: _invalid, ...rest } = node.data.nodeExtras ?? {};
+    return errorConfigRepair.errorConfig ? { ...rest, errorConfig: errorConfigRepair.errorConfig } : rest;
+  };
 
   const handleSave = () =>
     onSave({
       label,
       config: getConfigForSave(),
       disabled: nodeDisabled || undefined,
-      color: nodeColor
+      color: nodeColor,
+      ...(removeInvalidErrorConfig ? { nodeExtras: extrasWithoutInvalidErrorConfig() } : {})
     });
 
   const resolvePendingClose = (choice: "save" | "discard" | "keep") => {

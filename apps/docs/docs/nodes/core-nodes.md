@@ -121,7 +121,10 @@ Every node has the same error settings on its **Settings** tab.
   statuses on its retry list are retried and fail the node once the retries are spent; other error statuses are still
   returned. The editor says so on such a node. Turn the option on to fail on every error status, or off to never fail.
 - A node's `errorConfig` in the workflow JSON (`retryOnFail`, `maxRetries`, `retryIntervalMs`, `continueOnFail`) is
-  kept when the workflow is saved and takes precedence over the Settings fields; the Settings tab shows it.
+  kept when the workflow is saved and takes precedence over the Settings fields; the Settings tab shows it. A save
+  refuses invalid values (a negative `maxRetries`, for example). A workflow stored with such values before saves
+  checked them still runs, with the invalid fields ignored; the editor names them when the workflow is opened, and
+  **Remove invalid values** on the node's Settings tab removes them with the next save.
 - Network failures and timeouts name the method and URL the same way and are retried as set under Retries on Failure.
 
 ## Output Parser (`output_parser`)

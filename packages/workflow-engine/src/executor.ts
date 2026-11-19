@@ -70,6 +70,8 @@ import {
   DEFAULT_RETRY_MAX_DELAY_MS,
   httpStatusFailsNode,
   parseRetryAfterMs,
+  repairNodeErrorConfig,
+  type NodeErrorConfig,
   retryDelayFor,
   statusInList,
   type DataDestinationRow,
@@ -4718,7 +4720,7 @@ async function executeNodeHandler(
         });
 
         // 304 Not Modified answers a conditional request: it is not an error. An older node fails only on its retried statuses.
-        if (!response.ok && httpStatusFailsNode(response.status, config, node.errorConfig)) {
+        if (!response.ok && httpStatusFailsNode(response.status, config, nodeErrorConfigOf(node))) {
           // The error body is not read into the run: it is outside content the error output would carry unlabelled.
           await response.body?.cancel().catch(() => undefined);
           throw HttpStatusError.fromResponse({
@@ -8478,14 +8480,20 @@ const RETRYABLE_NODE_TYPES = new Set([
   ...Array.from(TIER2_NODE_TYPES)
 ]);
 
+/** The node's `errorConfig` without fields a save would refuse (a workflow stored before that check may hold some). */
+function nodeErrorConfigOf(node: WorkflowNode): NodeErrorConfig | undefined {
+  return repairNodeErrorConfig(node.errorConfig).errorConfig;
+}
+
 function getRetryConfigForNode(node: WorkflowNode): RetryConfig | undefined {
   const config = toRecord(node.config);
   // Check node-level errorConfig first
-  if (node.errorConfig?.retryOnFail === true) {
-    const delayMs = node.errorConfig.retryIntervalMs ?? 1000;
+  const errorConfig = nodeErrorConfigOf(node);
+  if (errorConfig?.retryOnFail === true) {
+    const delayMs = errorConfig.retryIntervalMs ?? 1000;
     return {
       enabled: true,
-      maxAttempts: (node.errorConfig.maxRetries ?? 2) + 1,
+      maxAttempts: (errorConfig.maxRetries ?? 2) + 1,
       delayMs,
       backoffMultiplier: 2,
       maxDelayMs: retryMaxDelay(config, delayMs)
@@ -10142,7 +10150,7 @@ async function executeWorkflowRun(
     const startedAtNode = nowIso();
     const nodeConfig = toRecord(node.config);
     const requestedOnError: "stop" | "continue" | "branch" =
-      node.errorConfig?.continueOnFail === true ? "continue" : getOnError(nodeConfig);
+      nodeErrorConfigOf(node)?.continueOnFail === true ? "continue" : getOnError(nodeConfig);
     // Phase 11.2 — a failed Approval Gate or Human Approval (rejected with
     // nowhere to go, or a request that could not be rendered) never continues:
     // "continue" would run the next step with nobody asked. The error branch still works.
@@ -10608,9 +10616,12 @@ async function executeWorkflowRun(
           : remediationForCategory(errorCategoryName, providerError ? { providerId: providerError.provider } : undefined);
       const errorRetryable =
         error instanceof WorkflowError ? error.retryable : providerError?.retryable;
+      // A stable code the error carries (such as `workflow_unfinished` for a refused sub-workflow), for API callers.
+      const errorCode = error instanceof WorkflowError && typeof error.metadata?.code === "string" ? error.metadata.code : undefined;
       const errorFields = {
         error: errorMessage,
         errorCategory: errorCategoryName,
+        ...(errorCode ? { errorCode } : {}),
         errorRemediation,
         retryable: errorRetryable,
         // Phase 12 coverage — check and retry model calls of a failed node still count in the run's usage.
@@ -10791,6 +10802,7 @@ async function executeWorkflowRun(
           nodeResults,
           error: failedError,
           errorCategory: errorCategoryName,
+          ...(errorCode ? { errorCode } : {}),
           errorRemediation
         };
         // Phase 6.4 — the error can quote what the failed node read: a caller (a Workflow Tool) keeps those labels.

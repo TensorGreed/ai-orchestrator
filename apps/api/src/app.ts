@@ -311,7 +311,7 @@ import { registerDataDestinationRoutes } from "./data-destination-routes.js";
 import { DataDestinationService } from "./services/data-destination-service.js";
 import { ModelAllowlistService, type ModelAllowlistScope } from "./services/model-allowlist-service.js";
 import { registerModelAllowlistRoutes } from "./model-allowlist-routes.js";
-import { DEACTIVATED_MESSAGE, ReleaseService, withUniqueTriggerPaths } from "./services/release-service.js";
+import { DEACTIVATED_MESSAGE, ReleaseService, productionRefusalBody, withUniqueTriggerPaths } from "./services/release-service.js";
 import { GateAdmissionService } from "./services/gate-admission-service.js";
 import { STUCK_JOB_MARGIN_MS } from "./db/queue-timeouts.js";
 import { ApprovalResumeRunner, ApprovalService, approvalDecisionOf, approvalPersonCheck, type ApprovalResumeJob } from "./services/approval-service.js";
@@ -6078,8 +6078,7 @@ export async function createApp(
   const productionMissing = async (reply: FastifyReply, workflowId: string): Promise<{ error: string; code?: string }> => {
     const refusal = await releaseService.productionRefusal(workflowId);
     reply.code(refusal ? 409 : 404);
-    if (refusal && (await releaseService.unfinishedProductionWorkflow(workflowId))) return { error: refusal, code: "workflow_unfinished" };
-    return { error: refusal ?? "Workflow not found" };
+    return productionRefusalBody(refusal, "Workflow not found");
   };
   /** Phase 15.4 — the deactivated gated workflow whose published version has a node matching `matches`, for a "deactivated" answer. */
   const deactivatedMatch = async (matches: (workflow: Workflow) => boolean): Promise<Workflow | null> => {
@@ -12283,7 +12282,7 @@ export async function createApp(
       const named = parsed.data.workflow_id;
       const refusal = named && (await runAccess.workflow(user, named, "workflow:read")).ok ? await releaseService.productionRefusal(named) : null;
       reply.code(refusal ? 409 : 404);
-      return { error: refusal ?? "No workflows available" };
+      return productionRefusalBody(refusal, "No workflows available");
     }
     const executeAccess = await runAccess.workflow(user, workflow.id, "workflow:execute");
     if (!executeAccess.ok) return denyRunAccess(reply, executeAccess);
@@ -13137,6 +13136,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     config,
     store,
     loadProductionWorkflow: productionWorkflow,
+    // An unfinished version stays listed; its calls answer `workflow_unfinished`, as the MCP trigger's do.
+    loadCatalogWorkflow: productionTriggerWorkflow,
     productionRefusal: async (id) => await releaseService.productionRefusal(id),
     mcpRegistry,
     providerRegistry,
@@ -13345,7 +13346,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const named = parsed.data.workflow_id;
       const refusal = named && (await runAccess.workflow(user, named, "workflow:read")).ok ? await releaseService.productionRefusal(named) : null;
       reply.code(refusal ? 409 : 404);
-      return { error: refusal ?? "No workflows available" };
+      return productionRefusalBody(refusal, "No workflows available");
     }
     const executeAccess = await runAccess.workflow(user, workflow.id, "workflow:execute");
     if (!executeAccess.ok) return denyRunAccess(reply, executeAccess);
@@ -13821,6 +13822,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           output: result.output ?? null,
           // Phase 12 coverage — under response rules the error text (which can quote run data) stays in the history.
           error: result.status === "error" ? callerErrorOf(result, "Workflow execution failed") : undefined,
+          // A stable code for the failure, when it has one (`workflow_unfinished`: a sub-workflow production refuses).
+          ...(result.status === "error" && result.errorCode ? { code: result.errorCode } : {}),
           ...(result.status === "error" && responseRulesApply(result) ? { executionId } : {}),
           idempotency: security.idempotencyEnabled
             ? {

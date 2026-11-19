@@ -69,6 +69,7 @@ the envelope `GET /api/executions` uses:
 - `POST /api/workflows/:id/validate`
 - `POST /api/workflows/:id/execute` (`record: true` records the run's MCP calls into a cassette; the result carries `mcpCassette`)
 - `POST /api/workflows/:id/execute/stream` — SSE: `node_start`, `node_complete`, `llm_delta`, `node_progress` (MCP progress: `nodeId`, `toolName`, `serverId`, `registryServerId`, `progress`, `total`, `percent`, `message`, `at`), `result`
+- On the production channel (an API key), `/execute`, `/execute/stream` and `POST /api/webhooks/execute(/stream)` answer `409` when production refuses the workflow; when the version production would run has unfinished settings the body is `{ error, code: "workflow_unfinished" }`. A run that fails because a sub-workflow it calls is refused that way carries `errorCode: "workflow_unfinished"` on the run and the node (and `code` in a webhook's answer).
 
 ## Execution history
 

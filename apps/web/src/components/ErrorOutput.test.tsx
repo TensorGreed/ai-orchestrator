@@ -8,6 +8,8 @@ import * as api from "../lib/api";
 import { showsErrorOutput } from "../lib/error-output";
 import { NodeInspector } from "./NodeConfigModal";
 import { WorkflowCanvasNode } from "./WorkflowCanvasNode";
+import { CanvasInsertContext } from "./canvas-insert-context";
+import { draftIssueShown } from "../lib/draft-validation";
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
@@ -162,5 +164,98 @@ describe("HTTP Request saved before the option", () => {
     expect(screen.getByTestId("http-retry-list-only-tip")).toBeInTheDocument();
     await user.click(screen.getByRole("tab", { name: /Settings/ }));
     expect(screen.getByTestId("node-error-config-tip")).toHaveTextContent("3 retries, first wait 250 ms");
+  });
+});
+
+describe("the Error output's +", () => {
+  function renderWithInsert(data: Partial<EditorNodeData> & Pick<EditorNodeData, "nodeType" | "config">, connected: string[] = []) {
+    const onAddAfter = vi.fn();
+    const props = {
+      id: "n1",
+      type: "workflowNode",
+      selected: false,
+      zIndex: 0,
+      isConnectable: true,
+      xPos: 0,
+      yPos: 0,
+      dragging: false,
+      data: { label: "Node", ...data } as EditorNodeData
+    } as NodeProps<EditorNodeData>;
+    const view = render(
+      <ReactFlowProvider>
+        <CanvasInsertContext.Provider value={{ onAddAfter, isConnected: (_node, handle) => connected.includes(handle ?? "") }}>
+          <WorkflowCanvasNode {...props} />
+        </CanvasInsertContext.Provider>
+      </ReactFlowProvider>
+    );
+    return { ...view, onAddAfter };
+  }
+
+  it("opens the palette connected after the error output, on cards and hubs", async () => {
+    const user = userEvent.setup();
+    for (const nodeType of ["http_request", "agent_orchestrator"] as const) {
+      const { onAddAfter, unmount } = renderWithInsert({ nodeType, config: { onError: "branch" } });
+      const output = screen.getByTestId("node-error-output");
+      await user.click(within(output).getByRole("button", { name: "Add a node after the error output" }));
+      expect(onAddAfter).toHaveBeenCalledWith("n1", "error");
+      unmount();
+    }
+  });
+
+  it("is hidden once the error output is connected, like any other output's", () => {
+    renderWithInsert({ nodeType: "http_request", config: { onError: "branch" }, errorOutputConnected: true }, ["error"]);
+    expect(within(screen.getByTestId("node-error-output")).getByRole("button", { name: "Add a node after the error output" })).toHaveClass("wf-handle-add-connected");
+  });
+
+  it("is not drawn for a hub on a Supervisor's worker port", () => {
+    renderWithInsert({ nodeType: "agent_orchestrator", config: { onError: "branch" }, attachedAs: "worker" } as never);
+    expect(within(screen.getByTestId("node-error-output")).queryByRole("button")).toBeNull();
+  });
+});
+
+describe("an errorConfig stored with invalid values", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(api.previewExpression).mockResolvedValue({ ok: true, result: "" });
+  });
+
+  it("is named in Settings, and Remove invalid values saves the node without them", async () => {
+    const user = userEvent.setup();
+    const props = inspectorProps({ method: "GET", urlTemplate: "https://x.test" });
+    props.node = {
+      ...props.node,
+      data: { ...props.node.data, nodeExtras: { errorConfig: { continueOnFail: true, maxRetries: -1, retryIntervalMs: "soon" }, notes: "kept" } }
+    };
+    render(<NodeInspector {...props} />);
+    await user.click(screen.getByRole("tab", { name: /Settings/ }));
+    const warning = screen.getByTestId("node-error-config-invalid");
+    expect(warning).toHaveTextContent("invalid values (maxRetries, retryIntervalMs)");
+    // The valid part still shows as the node's error handling.
+    expect(screen.getByTestId("node-error-config-tip")).toHaveTextContent("a failure continues the run");
+    await user.click(within(warning).getByRole("button", { name: "Remove invalid values" }));
+    expect(screen.getByTestId("node-error-config-invalid")).toHaveTextContent("removed when you save");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(props.onSave).toHaveBeenCalledWith(expect.objectContaining({ nodeExtras: { errorConfig: { continueOnFail: true }, notes: "kept" } }));
+  });
+
+  it("does not change the node's extras when nothing is removed", async () => {
+    const user = userEvent.setup();
+    const props = inspectorProps({ method: "GET", urlTemplate: "https://x.test" });
+    props.node = { ...props.node, data: { ...props.node.data, label: "Fetch", nodeExtras: { errorConfig: { maxRetries: -1 } } } };
+    render(<NodeInspector {...props} />);
+    await user.selectOptions(screen.getByLabelText("Method"), "POST");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(vi.mocked(props.onSave).mock.calls[0]![0]).not.toHaveProperty("nodeExtras");
+  });
+
+  it("is listed when the workflow is opened, unlike other notes", () => {
+    const invalid = { code: "invalid_error_config", message: "x", severity: "warning" as const };
+    const note = { code: "missing_output_node", message: "y", severity: "warning" as const };
+    const unconnected = { code: "error_output_not_connected", message: "z", severity: "warning" as const };
+    expect(draftIssueShown(invalid, false)).toBe(true);
+    expect(draftIssueShown(note, false)).toBe(false);
+    expect(draftIssueShown(unconnected, false)).toBe(false);
+    expect(draftIssueShown(unconnected, true)).toBe(true);
+    expect(draftIssueShown({ code: "missing_http_request_url_template", message: "w" }, false)).toBe(true);
   });
 });

@@ -364,6 +364,8 @@ export interface NodeExecutionResult {
   warnings?: string[];
   retriedNodes?: Array<{ nodeId: string; attempts: number; nodeType: string }>;
   errorCategory?: string;
+  /** A stable code for errors callers may act on (such as `workflow_unfinished`), when the error has one. */
+  errorCode?: string;
   /** One-sentence human-readable hint on how to recover from this error.
    *  Auto-derived from errorCategory by the executor; surfaced in the UI
    *  below the raw error message so users don't have to read source. */
@@ -478,6 +480,8 @@ export interface WorkflowExecutionResult {
   /** Same shape as NodeExecutionResult.errorCategory, attached to the
    *  workflow when execution stopped on a node error. */
   errorCategory?: string;
+  /** Same shape as NodeExecutionResult.errorCode, attached to the workflow when execution stopped on a node error. */
+  errorCode?: string;
   /** Same shape as NodeExecutionResult.errorRemediation, attached to the
    *  workflow when execution stopped on a node error. */
   errorRemediation?: string;

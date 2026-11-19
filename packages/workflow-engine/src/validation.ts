@@ -8,6 +8,7 @@ import {
   OUTPUT_GUARDRAIL_CHECK_VALUES,
   parseIpAllowlist,
   parseStatusList,
+  repairWorkflowErrorConfigs,
   workflowSchema,
   type Workflow,
   type WorkflowValidationIssue,
@@ -1388,7 +1389,9 @@ function validateGuardPlacement(workflow: Workflow): WorkflowValidationIssue[] {
 }
 
 export function validateWorkflowGraph(rawWorkflow: unknown): WorkflowValidationResult {
-  const parsed = workflowSchema.safeParse(rawWorkflow);
+  // A workflow stored before errorConfig was checked still validates and runs: its invalid fields are ignored, with a warning.
+  const { workflow: repairedWorkflow, repaired } = repairWorkflowErrorConfigs(rawWorkflow);
+  const parsed = workflowSchema.safeParse(repairedWorkflow);
   if (!parsed.success) {
     return {
       valid: false,
@@ -1400,7 +1403,12 @@ export function validateWorkflowGraph(rawWorkflow: unknown): WorkflowValidationR
   }
 
   const workflow = parsed.data;
-  const issues: WorkflowValidationIssue[] = [];
+  const issues: WorkflowValidationIssue[] = repaired.map(({ nodeId, invalidFields }) => ({
+    code: "invalid_error_config",
+    message: `This node's error settings (errorConfig) have invalid values (${invalidFields.join(", ")}), which are ignored, and the workflow cannot be saved until they are removed. Open the node's Settings tab and remove them.`,
+    nodeId,
+    severity: "warning" as const
+  }));
   const nodeIds = new Set<string>();
 
   for (const node of workflow.nodes) {
@@ -1489,6 +1497,7 @@ const DRAFT_SAVEABLE_ISSUE_CODES = new Set([
   "missing_llm_provider",
   "missing_if_condition",
   "missing_http_request_url_template",
+  "invalid_http_retry_on_status",
   "missing_gemini_model",
   "missing_execute_workflow_id",
   "missing_workflow_tool_id",

@@ -460,3 +460,45 @@ describe("error output (On Error = branch)", () => {
     expect(validateWorkflowGraph(badList).issues).toContainEqual(expect.objectContaining({ code: "invalid_http_retry_on_status", nodeId: "http" }));
   });
 });
+
+describe("a stored errorConfig with invalid values", () => {
+  // A save refuses these; a workflow stored before that check still validates (with a warning) and runs on its valid fields.
+  const invalid = { retryOnFail: true, maxRetries: -3, retryIntervalMs: "soon" } as unknown as NodeErrorConfig;
+
+  it("validates with an invalid_error_config warning naming the fields", () => {
+    const validation = validateWorkflowGraph(single({ urlTemplate: "https://api.example.com/x" }, invalid));
+    expect(validation.valid).toBe(true);
+    const issue = validation.issues.find((entry) => entry.code === "invalid_error_config");
+    expect(issue).toMatchObject({ nodeId: "http", severity: "warning" });
+    expect(issue?.message).toContain("maxRetries, retryIntervalMs");
+  });
+
+  it("runs, ignoring the invalid fields (default retry count and wait) and keeping the valid ones", async () => {
+    const calls = stubStatuses([502, 502, 200]);
+    const result = await executeWorkflow({ workflow: single({ urlTemplate: "https://api.example.com/x" }, invalid) }, deps());
+    // retryOnFail stays on; maxRetries falls back to 2 and retryIntervalMs to its default.
+    expect(result.status).toBe("success");
+    expect(calls).toHaveLength(3);
+  }, 20_000);
+
+  it("a continueOnFail kept from an invalid errorConfig still continues", async () => {
+    stubStatuses([500]);
+    const result = await executeWorkflow(
+      { workflow: single({ urlTemplate: "https://api.example.com/x", failOnHttpError: true, retryCount: 0 }, { continueOnFail: true, maxRetries: "x" } as unknown as NodeErrorConfig) },
+      deps()
+    );
+    // A continued failure makes the run partial, not failed.
+    expect(result.status).toBe("partial");
+    expect(resultOf(result, "http").status).toBe("error");
+  });
+});
+
+describe("an invalid Retry on status list", () => {
+  it("is an unfinished setting: it stops a run but not a draft save", async () => {
+    const { saveBlockingIssues, unfinishedDraftIssues } = await import("./validation");
+    const validation = validateWorkflowGraph(single({ urlTemplate: "https://api.example.com/x", failOnHttpError: true, retryOnStatus: "5xx, soon" }));
+    expect(validation.valid).toBe(false);
+    expect(unfinishedDraftIssues(validation).map((issue) => issue.code)).toEqual(["invalid_http_retry_on_status"]);
+    expect(saveBlockingIssues(validation)).toEqual([]);
+  });
+});

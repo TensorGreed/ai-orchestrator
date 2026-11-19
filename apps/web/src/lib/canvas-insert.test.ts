@@ -123,3 +123,36 @@ describe("planInsertConnection", () => {
     expect(planInsertConnection(agent, null, rule("m", "openai_chat_model"), [agent], [])).toEqual({ kind: "place" });
   });
 });
+
+describe("inserting after a node's Error output", () => {
+  const rule = (id: string, nodeType: string, label = id) => ({ id, data: { nodeType, label } });
+
+  it("places the node on the row below the node's other outputs", () => {
+    const card = node("a", "http_request", 100, 50);
+    expect(insertPositionAfter(card, "error", [card]).y).toBeGreaterThan(insertPositionAfter(card, null, [card]).y);
+    const ifNode = node("if", "if_node", 0, 0);
+    expect(insertPositionAfter(ifNode, "error", [ifNode]).y).toBeGreaterThan(insertPositionAfter(ifNode, "false", [ifNode]).y);
+  });
+
+  it("connects from the error handle, through the connection rules, for cards and agents", () => {
+    expect(planInsertConnection(rule("http", "http_request"), "error", rule("notify", "set_node"), [rule("http", "http_request")], [])).toEqual({
+      kind: "connect",
+      sourceHandle: "error"
+    });
+    // An agent's Error output is a step edge, not one of its attachment ports.
+    expect(planInsertConnection(rule("agent", "agent_orchestrator"), "error", rule("fallback", "set_node"), [rule("agent", "agent_orchestrator")], [])).toEqual({
+      kind: "connect",
+      sourceHandle: "error"
+    });
+    // An LLM Call after an agent's Error output is a step too, not a chat model attachment.
+    expect(planInsertConnection(rule("agent", "agent_orchestrator"), "error", rule("llm", "llm_call"), [rule("agent", "agent_orchestrator")], [])).toEqual({
+      kind: "connect",
+      sourceHandle: "error"
+    });
+  });
+
+  it("is never picked as the free output when chaining from a selected node", () => {
+    const card = node("a", "http_request", 0, 0);
+    expect(chooseSourceHandle({ ...card, data: { ...card.data, config: { onError: "branch" } } }, [])).toBeNull();
+  });
+});

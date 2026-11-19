@@ -21,6 +21,15 @@ export const llmProviderConfigSchema = z.object({
   extra: z.record(z.string(), z.unknown()).optional()
 });
 
+/** A node's retry and continue settings (`errorConfig`). */
+export const nodeErrorConfigSchema = z.object({
+  continueOnFail: z.boolean().optional(),
+  retryOnFail: z.boolean().optional(),
+  maxRetries: z.number().int().min(0).optional(),
+  retryIntervalMs: z.number().min(0).optional(),
+  alwaysOutputData: z.boolean().optional()
+});
+
 export const workflowNodeSchema = z.object({
   id: z.string().min(1),
   type: z.enum([
@@ -190,16 +199,58 @@ export const workflowNodeSchema = z.object({
   disabled: z.boolean().optional(),
   color: z.string().optional(),
   /** Per-node retry and continue settings (imported workflows and the JSON contract); the engine reads them before `config`. */
-  errorConfig: z
-    .object({
-      continueOnFail: z.boolean().optional(),
-      retryOnFail: z.boolean().optional(),
-      maxRetries: z.number().int().min(0).optional(),
-      retryIntervalMs: z.number().min(0).optional(),
-      alwaysOutputData: z.boolean().optional()
-    })
-    .optional()
+  errorConfig: nodeErrorConfigSchema.optional()
 });
+
+export interface ErrorConfigRepair {
+  /** The settings that are valid; undefined when none are left. */
+  errorConfig?: z.infer<typeof nodeErrorConfigSchema>;
+  /** The fields that were invalid and are ignored (`errorConfig` itself when it is not an object). */
+  invalidFields: string[];
+}
+
+/**
+ * Splits a stored `errorConfig` into its valid settings and the fields that are not. A save refuses an invalid
+ * `errorConfig`, but a workflow stored before that check (or written straight to the store) may hold one: it still
+ * loads, runs and exports, with the invalid fields ignored.
+ */
+export function repairNodeErrorConfig(raw: unknown): ErrorConfigRepair {
+  if (raw === undefined) return { invalidFields: [] };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { invalidFields: ["errorConfig"] };
+  const record = raw as Record<string, unknown>;
+  const kept: Record<string, unknown> = {};
+  const invalidFields: string[] = [];
+  for (const [key, fieldSchema] of Object.entries(nodeErrorConfigSchema.shape)) {
+    if (!(key in record) || record[key] === undefined) continue;
+    if ((fieldSchema as z.ZodTypeAny).safeParse(record[key]).success) kept[key] = record[key];
+    else invalidFields.push(key);
+  }
+  return {
+    ...(Object.keys(kept).length > 0 ? { errorConfig: kept as z.infer<typeof nodeErrorConfigSchema> } : {}),
+    invalidFields
+  };
+}
+
+/**
+ * A copy of a raw workflow whose nodes keep only the valid fields of their `errorConfig`, with the nodes that had
+ * invalid ones. Anything that is not a workflow-shaped object comes back unchanged.
+ */
+export function repairWorkflowErrorConfigs<T>(raw: T): { workflow: T; repaired: Array<{ nodeId: string; invalidFields: string[] }> } {
+  const record = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
+  if (!record || !Array.isArray(record.nodes)) return { workflow: raw, repaired: [] };
+  const repaired: Array<{ nodeId: string; invalidFields: string[] }> = [];
+  const nodes = record.nodes.map((node: unknown) => {
+    if (!node || typeof node !== "object" || !("errorConfig" in node)) return node;
+    const nodeRecord = node as Record<string, unknown>;
+    const repair = repairNodeErrorConfig(nodeRecord.errorConfig);
+    if (repair.invalidFields.length === 0) return node;
+    repaired.push({ nodeId: String(nodeRecord.id ?? ""), invalidFields: repair.invalidFields });
+    const { errorConfig: _dropped, ...rest } = nodeRecord;
+    return repair.errorConfig ? { ...rest, errorConfig: repair.errorConfig } : rest;
+  });
+  if (repaired.length === 0) return { workflow: raw, repaired };
+  return { workflow: { ...record, nodes } as T, repaired };
+}
 
 export const workflowEdgeSchema = z.object({
   id: z.string().min(1),
