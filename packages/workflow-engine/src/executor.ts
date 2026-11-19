@@ -1283,6 +1283,27 @@ function categorizedProviderError(
   };
 }
 
+/** Whether a webhook started the run (or the recorded run a replay replays): its caller is answered with a reply. */
+function runAnswersWebhook(request: { triggerType?: string; inputTriggerType?: string }): boolean {
+  const triggerType = (request.inputTriggerType ?? request.triggerType ?? "").trim().toLowerCase();
+  return triggerType.startsWith("webhook");
+}
+
+/** The last Webhook Response node that ran successfully in this run, with its output (the reply), or undefined. */
+function lastWebhookReply(workflow: Workflow, nodeResults: NodeExecutionResult[]): { nodeId: string; output: unknown } | undefined {
+  const replyNodes = new Set(workflow.nodes.filter((node) => node.type === "webhook_response").map((node) => node.id));
+  if (replyNodes.size === 0) return undefined;
+  for (let index = nodeResults.length - 1; index >= 0; index -= 1) {
+    const entry = nodeResults[index]!;
+    if (!replyNodes.has(entry.nodeId) || entry.status !== "success") continue;
+    const output = entry.output;
+    if (output && typeof output === "object" && !Array.isArray(output) && "__webhookResponse" in output) {
+      return { nodeId: entry.nodeId, output };
+    }
+  }
+  return undefined;
+}
+
 function isWebhookTrigger(globals: Record<string, unknown>): boolean {
   const triggerType = typeof globals.trigger_type === "string" ? globals.trigger_type.trim().toLowerCase() : "";
   return triggerType.startsWith("webhook");
@@ -11479,6 +11500,14 @@ async function executeWorkflowRun(
     } finally {
       finishNodeSpan(nodeSpan, nodeResults, node.id);
     }
+  }
+
+  // A webhook's caller gets the reply of the last Webhook Response node that ran, even when nodes ran after it, so the
+  // run records what the caller got. Runs no webhook started (the editor's Run, sub-workflows) keep their Output node's.
+  const webhookReply = runAnswersWebhook(request) ? lastWebhookReply(workflow, nodeResults) : undefined;
+  if (webhookReply) {
+    finalOutput = webhookReply.output;
+    labelState.outputNodeId = webhookReply.nodeId;
   }
 
   // No Output node ran: the result is the output of the last node, in run order, that produced one (a skipped branch has none).
