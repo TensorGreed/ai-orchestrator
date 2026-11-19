@@ -203,6 +203,12 @@ export interface RunWorkflowExecutionInput {
    */
   budgetSubject?: { userEmail: string | null; userId: string | null };
   /**
+   * The person whose session memory, session tool cache and session artifacts the run uses (run-editor-options.ts
+   * personalSessionOwner): set by the run routes for operators and for people who run a workflow only through a share
+   * with them, kept across a pause in the paused state. Absent: the workflow's sessions, as before.
+   */
+  sessionOwner?: string;
+  /**
    * The queue attempt that runs this (its job context): a stopped attempt then closes only its own sub-workflow spend
    * record, not one a retry of the same execution has started since.
    */

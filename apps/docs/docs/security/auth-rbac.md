@@ -183,7 +183,9 @@ in `MFA_REQUIRED_ROLES`, see [MFA required per role](#mfa-required-per-role)).
 - **What the editor shows.** Viewers and operators open workflows read-only: Save, Add node and Clear are disabled, and
   their tooltip says why; viewers cannot run. Operators run the saved workflow where they have `workflow:execute`
   (Run and Webhook run). A builder sees the same for a workflow they may only view (one shared with them, or in a
-  project where their role is view-only); a workflow they may run but not change runs as saved.
+  project where their role is view-only); a workflow they may run but not change runs as saved. On a read-only
+  workflow nodes open but cannot be moved, connected or saved, outputs show no `+`, the inspector offers no `{{`
+  suggestions and no Input fields to drag in, and the workflow settings in **More actions** are not offered.
   `GET /api/workflows/:id/access` answers what the signed-in user may do.
 - **Shared with this project.** The Workflows page lists the workflows other projects share to the active one, with
   the access members get there (`GET /api/projects/:id/shared-workflows`).
@@ -198,9 +200,17 @@ for an API key, as before) with the caller's input: `input`, `payload`, `variabl
 `WORKFLOW_EXECUTION_TIMEOUT_MS`. Options that change what runs stay with builders and admins: `startNodeId`,
 `runMode: "single_node"`, `usePinnedData`, `pinnedData`, `nodeOutputs`, `sourceExecutionId`, `nodeOutputsExecutionId`,
 `record`, and a `workflow`, `nodes` or `edges` sent with the request; an operator who sends one gets `403` with
-`refusedOptions`, before any other check. Viewers are refused. Runs are audited as before. A session id is not tied
-to a person: anyone who may run a workflow and knows a session id can continue that session's memory, as before for
-builders and webhook callers.
+`refusedOptions`, before any other check. Viewers are refused. Runs are audited as before.
+
+**Session memory is kept to the person for operators and share-only runners.** A run started by a signed-in operator,
+or by anyone who may run the workflow only through a share with them, reads and writes session memory, the session
+tool cache and session artifacts under that person's own key. Another person who sends the same session id starts an
+empty session, so knowing someone's session id does not continue their conversation. The run's sub-workflows and
+error workflow, and its resumed part after an approval (whoever decides it), use the same person's key. Builders and
+admins with access through their projects, API keys and service accounts (whatever role the key has), schedules and
+webhooks keep the workflow's sessions, as before; their runs do not see the sessions kept to a person, and a person's
+runs do not see theirs. A retry from history runs as the person who retries it. A Simple Memory or Session Artifact
+namespace that starts with `~person:` is refused, since that prefix marks one person's sessions.
 
 ## Sharing a workflow with people
 
@@ -380,6 +390,10 @@ its own project, whichever trigger started it:
   the default project, under any namespace that no workflow of another project
   uses (as its default namespace or a literal custom one). Other projects stop
   seeing them; rows are not migrated.
+  Runs kept to one person (operators, share-only runners; see
+  [Running workflows by role](#running-workflows-by-role)) key their rows by
+  the person as well, inside the project's prefix, and read no rows from
+  before scoping.
 - Deleting a workflow also deletes its versions, shares, queue and dead-letter
   rows, eval runs, elicitations and its legacy default-namespace session state
   (exactly `<workflowId>:<nodeId>` for its nodes), so a new workflow that

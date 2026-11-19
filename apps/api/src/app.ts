@@ -208,7 +208,7 @@ import {
   oidcUserErrorCode,
   type FetchLike as OidcFetch
 } from "./services/oidc-service.js";
-import { editorRunOptionsError, editorRunOptionsRefused, savedRunLimits } from "./run-editor-options.js";
+import { editorRunOptionsError, editorRunOptionsRefused, personalSessionOwner, savedRunLimits } from "./run-editor-options.js";
 import {
   ALL_PERMISSIONS,
   RbacService,
@@ -346,6 +346,7 @@ import {
   DispatchTimeoutError,
   QUEUE_DISPATCH_CAPABILITY,
   SENSITIVE_INPUT_CAPABILITY,
+  SESSION_OWNER_CAPABILITY,
   RESPONSE_BOUNDARY_CAPABILITY,
   readDispatchedRunSpec,
   resultForQueue,
@@ -2705,7 +2706,8 @@ export async function createApp(
     const scoped = runScope.dependenciesFor(mergedWorkflow, {
       actor: input.policyActor,
       resolveRegisteredMcpServer: runPlan?.resolveRegisteredMcpServer,
-      channel
+      channel,
+      ...(input.sessionOwner ? { sessionOwner: input.sessionOwner } : {})
     });
     // The execution timeout aborts the run's signal, so it interrupts a
     // model call, MCP call or retry wait that is in flight instead of only
@@ -2880,7 +2882,9 @@ export async function createApp(
                 // 12.7 — an eval run's resumed part still records its Content rules verdicts as eval traffic.
                 ...(input.guardRunSource === "eval" ? { guardRunSource: "eval" as const } : {}),
                 // Who the run's budgets are matched against, kept for the resumed part (not the approver).
-                budgetSubject: input.budgetSubject ?? (({ userEmail, userId }) => ({ userEmail, userId }))(runBudgetContext(input))
+                budgetSubject: input.budgetSubject ?? (({ userEmail, userId }) => ({ userEmail, userId }))(runBudgetContext(input)),
+                // Whose sessions the run uses, so the resumed part (decided by someone else) reads the same ones.
+                ...(input.sessionOwner ? { sessionOwner: input.sessionOwner } : {})
               })
             }, queueFence ? { fence: queueFence } : {});
             if (!pausedHere) {
@@ -2941,7 +2945,12 @@ export async function createApp(
             const errorWf = errorTarget.workflow;
             // Like a sub-workflow: the run's user carries over only within the same project.
             const sameProject = (errorWf.projectId ?? DEFAULT_PROJECT_ID) === (failingWorkflow.projectId ?? DEFAULT_PROJECT_ID);
-            const errorScoped = runScope.dependenciesFor(errorWf, { actor: sameProject ? input.policyActor : null, channel });
+            // A run kept to one person's sessions keeps its error workflow to them too.
+            const errorScoped = runScope.dependenciesFor(errorWf, {
+              actor: sameProject ? input.policyActor : null,
+              channel,
+              ...(input.sessionOwner ? { sessionOwner: input.sessionOwner } : {})
+            });
             const errorModelRun: ModelRun = { runKey: `error:${payload.executionId}:${errorWf.id}`, sourceExecutionId: payload.executionId };
             try {
               const errorToolPolicySubject = await resolveToolPolicySubject(errorWf.id);
@@ -4031,6 +4040,18 @@ export async function createApp(
    * toolset's project.
    */
   /** A run's budget user from its trigger's name (paused states written before the subject was kept). */
+  // Whose sessions a run by this person uses, when they are kept to the person: operators, and anyone who runs the
+  // workflow only through a share with them (run-editor-options.ts personalSessionOwner). The share lookup is made
+  // only for builders signed in as themselves; API keys and service accounts keep the workflow's sessions.
+  const sessionOwnerFor = async (user: SafeUser, workflow: Workflow): Promise<string | undefined> => {
+    const shareOnly =
+      user.role === "builder" && !user.apiKeyId && !user.serviceAccount ? await rbacService.runsOnlyThroughUserShare(user, workflow) : false;
+    return personalSessionOwner(user, shareOnly);
+  };
+  const sessionOwnerOptionFor = async (user: SafeUser, workflow: Workflow): Promise<{ sessionOwner?: string }> => {
+    const owner = await sessionOwnerFor(user, workflow);
+    return owner ? { sessionOwner: owner } : {};
+  };
   const budgetSubjectOf = (triggeredBy: string | undefined): { userEmail: string | null; userId: string | null } => {
     const user = usageUserOf(triggeredBy, undefined);
     return { userEmail: user.email, userId: user.id };
@@ -5389,7 +5410,7 @@ export async function createApp(
         concurrency: runsBackgroundWorkers && queueService ? queueService.concurrency() : null,
         // In cluster mode a queue consumer claims under heartbeat leases with fencing tokens.
         // ... and runs jobs another instance dispatched (EXECUTION_DISPATCH=queue checks every live consumer has this).
-        capabilities: clusterMode ? ["bus-v1", ...(runsBackgroundWorkers && queueService ? ["fenced-claims-v1", QUEUE_DISPATCH_CAPABILITY, RESPONSE_BOUNDARY_CAPABILITY, SENSITIVE_INPUT_CAPABILITY] : [])] : [],
+        capabilities: clusterMode ? ["bus-v1", ...(runsBackgroundWorkers && queueService ? ["fenced-claims-v1", QUEUE_DISPATCH_CAPABILITY, RESPONSE_BOUNDARY_CAPABILITY, SENSITIVE_INPUT_CAPABILITY, SESSION_OWNER_CAPABILITY] : [])] : [],
         appVersion: config.OTEL_SERVICE_VERSION || process.env.npm_package_version || null,
         schemaVersion: Math.max(...MIGRATIONS.map((migration) => migration.version)),
         runtime: () => ({
@@ -5920,6 +5941,8 @@ export async function createApp(
           ...(state.guardRunSource === "eval" ? { guardRunSource: "eval" as const } : {}),
           // Sub-workflows the resumed part starts are checked against the budgets of the user who started the run.
           budgetSubject: state.budgetSubject ?? budgetSubjectOf(pending.triggeredBy ?? undefined),
+          // A run kept to one person's sessions stays so after the approval, whoever decided it.
+          ...(typeof state.sessionOwner === "string" && state.sessionOwner ? { sessionOwner: state.sessionOwner } : {}),
           policyActor: actor,
           workflow: resumeWorkflow,
           executionId: job.executionId,
@@ -12137,6 +12160,7 @@ export async function createApp(
     openExecutionRelay,
     executionRelayWaitMs: config.WORKFLOW_EXECUTION_TIMEOUT_MS + STUCK_JOB_MARGIN_MS,
     responseRulesExist: async () => await guardService.mayCheckChannel("response"),
+    sessionOwnerFor: (user, workflow) => sessionOwnerFor(user, workflow),
     announce
   });
 
@@ -12597,6 +12621,8 @@ export async function createApp(
           systemPrompt: parsed.data.system_prompt,
           userPrompt: parsed.data.user_prompt,
           sessionId: parsed.data.session_id,
+          // Operators' and share-only runners' session memory is kept to them.
+          ...await sessionOwnerOptionFor(user, workflow),
           customData: parsed.data.customData,
           executionId,
           triggerType: "webhook_api",
@@ -13721,6 +13747,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             systemPrompt: parsed.data.system_prompt,
             userPrompt: parsed.data.user_prompt,
             sessionId: parsed.data.session_id,
+            // Operators' and share-only runners' session memory is kept to them.
+            ...await sessionOwnerOptionFor(user, workflow),
             executionId,
             triggerType: "webhook_api_stream",
             triggeredBy: user.email,

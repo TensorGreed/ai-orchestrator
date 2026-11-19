@@ -642,6 +642,11 @@ export interface WorkflowExecutionState {
    */
   budgetSubject?: { userEmail: string | null; userId: string | null };
   /**
+   * The person whose session memory the run uses (kept to them for operators and share-only runners), so the resumed
+   * part reads the same sessions. Written and read only by the API.
+   */
+  sessionOwner?: string;
+  /**
    * Phase 16 — the run's data labels, beside `nodeOutputs`: the input's
    * labels, every completed node's labels, and whether labels are tracked
    * (stored and scanned). A resumed run carries on with them.

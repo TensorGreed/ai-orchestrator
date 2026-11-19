@@ -360,6 +360,19 @@ export class RbacService {
     return share.accessLevel === "execute" && roleMayRunWorkflows(user.role) ? "execute" : "read";
   }
 
+  /**
+   * True when the person may run this workflow only through a share with them: no execute in its project and no execute
+   * share to a project where they may run workflows. Such runs keep session memory to the person (run-scope.ts).
+   */
+  async runsOnlyThroughUserShare(user: SafeUser, workflow: { id: string; projectId?: string | null }): Promise<boolean> {
+    if (await this.userShareAccess(user, workflow) !== "execute") return false;
+    if (await this.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "workflow:execute")) return false;
+    for (const share of await this.store.listWorkflowShares(workflow.id)) {
+      if (share.accessLevel === "execute" && await this.can(user, share.projectId, "workflow:execute")) return false;
+    }
+    return true;
+  }
+
   async shareWorkflowWithUser(input: { workflowId: string; userId: string; accessLevel: "read" | "execute"; sharedBy?: string | null }): Promise<boolean> {
     return await this.store.upsertWorkflowUserShare(input);
   }

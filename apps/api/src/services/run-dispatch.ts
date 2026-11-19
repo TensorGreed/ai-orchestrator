@@ -38,12 +38,22 @@ export const RESPONSE_BOUNDARY_CAPABILITY = "content-rules-response-v1";
  * worker would ignore the field. Until then such runs go inline.
  */
 export const SENSITIVE_INPUT_CAPABILITY = "content-capture-sensitive-input-v1";
+/**
+ * A worker that keeps a run's session memory to the person who started it (`run.sessionOwner`, run-scope.ts). A job
+ * that carries it is dispatched only while every live consumer of its pool advertises this: an older worker would
+ * ignore the field and use the workflow's sessions. Until then such runs go inline.
+ */
+export const SESSION_OWNER_CAPABILITY = "session-owner-v1";
 
 /** The capabilities a worker needs, besides QUEUE_DISPATCH_CAPABILITY, to run this spec. */
 export function capabilitiesFor(spec: DispatchedRunSpec): string[] {
   // v74 — pinned data copied from a sensitive run is marked on the workflow itself; an older worker would ignore it.
   const markedPins = spec.run.usePinnedData !== false && (spec.run.workflow.pinnedDataSensitive?.length ?? 0) > 0;
-  return [...(spec.run.responseBoundary ? [RESPONSE_BOUNDARY_CAPABILITY] : []), ...(spec.run.sensitiveInput === true || markedPins ? [SENSITIVE_INPUT_CAPABILITY] : [])];
+  return [
+    ...(spec.run.responseBoundary ? [RESPONSE_BOUNDARY_CAPABILITY] : []),
+    ...(spec.run.sensitiveInput === true || markedPins ? [SENSITIVE_INPUT_CAPABILITY] : []),
+    ...(spec.run.sessionOwner ? [SESSION_OWNER_CAPABILITY] : [])
+  ];
 }
 
 /** The DispatchedRunSpec format this build writes and reads. */

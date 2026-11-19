@@ -64,3 +64,19 @@ export function savedRunLimits(
   if (roleMayUseEditorRunOptions(role)) return { executionTimeoutMs: timeoutMs };
   return { usePinnedData: false, pinnedData: undefined, executionTimeoutMs: Math.min(timeoutMs, defaultTimeoutMs) };
 }
+
+/**
+ * Whose session memory a run uses, when it is kept to one person: the id of a signed-in person below builder
+ * (operators), or of anyone who runs the workflow only through a share with them. Their runs read and write session
+ * memory, the session tool cache and session artifacts under their own key, so knowing someone else's session id does
+ * not continue that person's conversation. Builders and admins with access through their projects, API keys and
+ * service accounts get `undefined`: their runs use the workflow's sessions as before.
+ */
+export function personalSessionOwner(
+  user: { id: string; role: UserRole; apiKeyId?: string; serviceAccount?: true },
+  runsOnlyThroughUserShare: boolean
+): string | undefined {
+  if (user.apiKeyId || user.serviceAccount) return undefined;
+  if (!roleMayUseEditorRunOptions(user.role) || runsOnlyThroughUserShare) return user.id;
+  return undefined;
+}

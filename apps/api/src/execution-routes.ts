@@ -125,9 +125,15 @@ export interface ExecutionRoutesDeps {
   executionRelayWaitMs: number;
   /** Phase 12 coverage — whether a stored rule set has a `response` channel (run views below builder hide node data). */
   responseRulesExist: () => Promise<boolean>;
+  /** Whose sessions a run by this person uses, when they are kept to the person (run-editor-options.ts personalSessionOwner). */
+  sessionOwnerFor: (user: SafeUser, workflow: Workflow) => Promise<string | undefined>;
 }
 
 export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
+  const sessionOwnerOption = async (user: SafeUser, workflow: Workflow): Promise<{ sessionOwner?: string }> => {
+    const owner = await deps.sessionOwnerFor(user, workflow);
+    return owner ? { sessionOwner: owner } : {};
+  };
   const {
     app,
     store,
@@ -158,7 +164,8 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     dispatchPoolOf,
     openExecutionRelay,
     executionRelayWaitMs,
-    responseRulesExist
+    responseRulesExist,
+    sessionOwnerFor
   } = deps;
 
   app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/execute", async (request, reply) => {
@@ -252,6 +259,8 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       systemPrompt: executionPayload.system_prompt,
       userPrompt: executionPayload.user_prompt,
       sessionId: normalizeSessionId(executionPayload.sessionId, executionPayload.session_id),
+      // Operators' and share-only runners' session memory is kept to them.
+      ...await sessionOwnerOption(user, workflow),
       customData: executionPayload.customData,
       executionId,
       triggerType: executeTrigger,
@@ -399,6 +408,8 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
         systemPrompt: executionPayload.system_prompt,
         userPrompt: executionPayload.user_prompt,
         sessionId: normalizeSessionId(executionPayload.sessionId, executionPayload.session_id),
+      // Operators' and share-only runners' session memory is kept to them.
+      ...await sessionOwnerOption(user, workflow),
         customData: executionPayload.customData,
         executionId,
         triggerType: executeTrigger,
@@ -637,6 +648,8 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
       systemPrompt: executionPayload.system_prompt,
       userPrompt: executionPayload.user_prompt,
       sessionId: normalizeSessionId(executionPayload.sessionId, executionPayload.session_id),
+      // Operators' and share-only runners' session memory is kept to them.
+      ...await sessionOwnerOption(user, workflow),
       executionTimeoutMs: normalizeExecutionTimeoutMs(
         executionPayload.executionTimeoutMs,
         executionPayload.execution_timeout_ms,
