@@ -5043,8 +5043,11 @@ async function executeNodeHandler(
       function evaluateFilterCondition(cond: Record<string, unknown>, scope: Record<string, unknown>, item?: { value: unknown }): boolean {
         const field = typeof cond.field === "string" ? cond.field : "";
         const operator = typeof cond.operator === "string" ? cond.operator : "eq";
-        const expectedRaw =
-          typeof cond.value === "string" ? renderTemplate(String(cond.value), scope) : cond.value;
+        // is_empty / is_not_empty never compare the value, so a leftover template there is not rendered (nor strict).
+        const valueUnused = operator === "is_empty" || operator === "is_not_empty";
+        const expectedRaw = valueUnused
+          ? ""
+          : typeof cond.value === "string" ? renderTemplate(String(cond.value), scope) : cond.value;
 
         let actual: unknown;
         if (item) {

@@ -194,8 +194,10 @@ in `MFA_REQUIRED_ROLES`, see [MFA required per role](#mfa-required-per-role)).
 
 `POST /api/workflows/:id/execute`, `/execute/stream`, `POST /api/webhooks/execute` and `/stream` take operators and up,
 with `workflow:execute` on the workflow (a project membership, an execute share to a project, or an execute share to
-the person). They run the saved workflow the route runs for that id (the draft from a signed-in session, production
-for an API key, as before) with the caller's input: `input`, `payload`, `variables`, `system_prompt`, `user_prompt`,
+the person). Someone who may edit the workflow runs the draft from a signed-in session, as before; anyone else
+(an operator, a share-only runner, an API key) runs the released version (production: the published version, or the
+saved workflow while nothing is published and no release gate is on), and gets `403` for `channel=draft`. They run it
+with the caller's input: `input`, `payload`, `variables`, `system_prompt`, `user_prompt`,
 `sessionId`, `customData` and a timeout. An operator's run uses no pinned data, and its timeout is at most
 `WORKFLOW_EXECUTION_TIMEOUT_MS`. Options that change what runs stay with builders and admins: `startNodeId`,
 `runMode: "single_node"`, `usePinnedData`, `pinnedData`, `nodeOutputs`, `sourceExecutionId`, `nodeOutputsExecutionId`,
@@ -206,9 +208,11 @@ for an API key, as before) with the caller's input: `input`, `payload`, `variabl
 or by anyone who may run the workflow only through a share with them, reads and writes session memory, the session
 tool cache and session artifacts under that person's own key. Another person who sends the same session id starts an
 empty session, so knowing someone's session id does not continue their conversation. The run's sub-workflows and
-error workflow, and its resumed part after an approval (whoever decides it), use the same person's key. Builders and
-admins with access through their projects, API keys and service accounts (whatever role the key has), schedules and
-webhooks keep the workflow's sessions, as before; their runs do not see the sessions kept to a person, and a person's
+error workflow, and its resumed part after an approval (whoever decides it), use the same person's key, and so do the
+person's queued runs (`POST /api/workflows/:id/enqueue`) and their messages to a chat trigger set to signed-in
+sessions. Someone who may run a workflow only through a share with them keeps their own key with an API key of their
+own too. Builders and admins with access through their projects, other API keys and service accounts (whatever role
+the key has), schedules and webhooks keep the workflow's sessions, as before; their runs do not see the sessions kept to a person, and a person's
 runs do not see theirs. A retry from history runs as the person who retries it. A Simple Memory or Session Artifact
 namespace that starts with `~person:` is refused, since that prefix marks one person's sessions.
 
@@ -221,10 +225,11 @@ or `POST /api/workflows/:id/user-shares` with `{ "email": "...", "accessLevel": 
   without a membership there in `role` isolation, and admins), with the same step-up as adding a member
   (`project_member.change`). A project editor may change the workflow but not open it to people. The person must have
   an account (invite them first); service accounts and yourself are refused.
-- **What it gives.** `read`: they find it under **Shared with you** on the Workflows page, open it and read its runs.
+- **What it gives.** `read`: they find it under **Shared with you** on the Workflows page, open it and read its runs,
+  all of them (other people's runs, their inputs and outputs included), as a viewer of its project would.
   `execute`: they may also run it (see [Running workflows by role](#running-workflows-by-role)) and act on its runs
   (approve, cancel, answer a tool's question) when their role may run workflows; an execute share with a viewer reads
-  only. A share never gives write, delete, publish or the right to
+  only. Their runs use the released version and their own session memory. A share never gives write, delete, publish or the right to
   share it on. Their runs may use the workflow's secrets, as runs of its own project do.
 - **Limits.** An API key limited to projects gets nothing from a share outside them. A deactivated user's shares stay
   but give nothing while they cannot sign in; enabling the user again brings them back, as with project memberships.

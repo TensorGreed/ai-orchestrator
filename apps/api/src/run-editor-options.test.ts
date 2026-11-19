@@ -46,6 +46,8 @@ describe("whose sessions a run uses", () => {
     expect(personalSessionOwner({ id: "b", role: "builder" }, true)).toBe("b");
     expect(personalSessionOwner({ id: "a", role: "admin" }, false)).toBeUndefined();
     expect(personalSessionOwner({ id: "o", role: "operator", apiKeyId: "k" }, false)).toBeUndefined();
+    // A share-only runner's own key does not leave their sessions.
+    expect(personalSessionOwner({ id: "b", role: "builder", apiKeyId: "k" }, true)).toBe("b");
     expect(personalSessionOwner({ id: "s", role: "operator", serviceAccount: true }, true)).toBeUndefined();
   });
 });

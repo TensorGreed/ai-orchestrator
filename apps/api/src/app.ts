@@ -4041,11 +4041,11 @@ export async function createApp(
    */
   /** A run's budget user from its trigger's name (paused states written before the subject was kept). */
   // Whose sessions a run by this person uses, when they are kept to the person: operators, and anyone who runs the
-  // workflow only through a share with them (run-editor-options.ts personalSessionOwner). The share lookup is made
-  // only for builders signed in as themselves; API keys and service accounts keep the workflow's sessions.
+  // workflow only through a share with them, also with a key of their own (run-editor-options.ts personalSessionOwner).
+  // Other API keys and service accounts keep the workflow's sessions.
   const sessionOwnerFor = async (user: SafeUser, workflow: Workflow): Promise<string | undefined> => {
     const shareOnly =
-      user.role === "builder" && !user.apiKeyId && !user.serviceAccount ? await rbacService.runsOnlyThroughUserShare(user, workflow) : false;
+      user.role === "builder" && !user.serviceAccount ? await rbacService.runsOnlyThroughUserShare(user, workflow) : false;
     return personalSessionOwner(user, shareOnly);
   };
   const sessionOwnerOptionFor = async (user: SafeUser, workflow: Workflow): Promise<{ sessionOwner?: string }> => {
@@ -5998,7 +5998,12 @@ export async function createApp(
   const dispatchApprovalResume = async (job: ApprovalResumeJob): Promise<{ queued: true } | { queued: false; result: Awaited<ReturnType<typeof runWorkflowExecution>> } | null> => {
     // Phase 13.1 — with EXECUTION_DISPATCH=queue an instance without a consumer (WORKER_MODE=api) sends the resume to
     // the workers through the producer too, unless the capability gate falls back to inline.
-    if (queueService || (runDispatcher.mode === "queue" && (await runDispatcher.useQueue(DEFAULT_QUEUE_POOL)))) {
+    // A run kept to one person's sessions resumes on the queue only where every consumer keeps it so (in a cluster an
+    // older instance would ignore the owner); otherwise it resumes here.
+    const pausedOwner = asRecord((await store.getWorkflowExecutionState(job.executionId))?.state).sessionOwner;
+    const ownerNeedsCapability = typeof pausedOwner === "string" && pausedOwner !== "" && clusterMode;
+    const ownerCapable = !ownerNeedsCapability || (runDispatcher.mode === "queue" && (await runDispatcher.useQueue(DEFAULT_QUEUE_POOL, [SESSION_OWNER_CAPABILITY])));
+    if (ownerCapable && (queueService || (runDispatcher.mode === "queue" && (await runDispatcher.useQueue(DEFAULT_QUEUE_POOL))))) {
       const pending = await store.getWorkflowExecutionState(job.executionId);
       // One item per decision: a request that is reopened and decided again must not collide with the first.
       const decidedAt = Date.parse((await store.getApprovalRequest(job.requestId))?.decidedAt ?? "") || Date.now();
@@ -6143,7 +6148,13 @@ export async function createApp(
       return { ok: false, status: 400, error: "channel can only be draft" };
     }
     const viaKey = (await resolveRequestAuth(request))?.credential === "api_key";
-    if (!viaKey) return { channel: "draft" };
+    if (!viaKey) {
+      // A signed-in person who may edit the workflow runs what they see (the draft). One who may only run it (an
+      // operator, a share-only runner) runs the released version, as an API key does: never a draft nobody released.
+      if ((await runAccess.workflow(user, workflowId, "workflow:write")).ok) return { channel: "draft" };
+      if (asked === "draft") return { ok: false, status: 403, error: "Running the draft needs workflow:write on the workflow." };
+      return { channel: "production" };
+    }
     if (asked === undefined) return { channel: "production" };
     const write = await runAccess.workflow(user, workflowId, "workflow:write");
     if (!write.ok) return { ok: false, status: write.status, error: "Running the draft with an API key (channel=draft) needs workflow:write on the workflow." };
@@ -13257,12 +13268,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       }
       const cfg = asRecord(chatNode.config);
       const authMode = typeof cfg.authMode === "string" ? cfg.authMode : "public";
+      // A signed-in chat by a viewer, an operator or a share-only reader keeps its session memory to that person.
+      let chatSessionOwner: { sessionOwner?: string } = {};
       if (authMode === "session") {
         const user = await requireRole(request, reply, ["viewer"]);
         if (!user) return;
         // Session chats are for people who can see the workflow's project.
         const access = await runAccess.workflow(user, workflow.id, "workflow:read");
         if (!access.ok) return denyRunAccess(reply, access);
+        chatSessionOwner = await sessionOwnerOptionFor(user, workflow);
       } else if (authMode === "bearer") {
         const secretRef = toSecretReference(cfg.secretRef);
         const secret = await secretService.resolveSecret(secretRef);
@@ -13307,6 +13321,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
               ...body
             },
             sessionId,
+            ...chatSessionOwner,
             userPrompt: message || undefined,
             executionId,
             triggerType: "chat",
@@ -16344,9 +16359,18 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       systemPrompt: payload.systemPrompt,
       userPrompt: payload.userPrompt,
       sessionId: payload.sessionId,
+      // Decided when the job runs, as the run routes decide it: an operator's (or share-only runner's) queued run keeps
+      // session memory to them, uses no pinned data and runs no longer than the deployment's timeout.
+      ...(enqueuedBy ? await sessionOwnerOptionFor(enqueuedBy, workflow) : {}),
       triggerType: payload.triggerType ?? "queue",
       triggeredBy: payload.triggeredBy,
-      executionTimeoutMs: payload.executionTimeoutMs,
+      ...(enqueuedBy
+        ? savedRunLimits(
+            enqueuedBy.role,
+            normalizeExecutionTimeoutMs(payload.executionTimeoutMs, undefined, config.WORKFLOW_EXECUTION_TIMEOUT_MS),
+            config.WORKFLOW_EXECUTION_TIMEOUT_MS
+          )
+        : { executionTimeoutMs: payload.executionTimeoutMs }),
       customData: payload.customData,
       channel: "production",
       // A caller may name its queued run anything ("cron" included): it is a user's run, never the scheduler's.

@@ -388,8 +388,8 @@ export class RunDispatcher {
     return this.waiting;
   }
 
-  async useQueue(pool: string): Promise<boolean> {
-    return await this.deps.gate.useQueue(pool);
+  async useQueue(pool: string, required: readonly string[] = []): Promise<boolean> {
+    return await this.deps.gate.useQueue(pool, required);
   }
 
   /**

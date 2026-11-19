@@ -186,7 +186,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const executeChannel = await executeChannelFor(request, user, access.workflow.id);
     // Phase 15.6 — an API-key run on the production channel may be captured; it stays a `manual` run everywhere else.
     const executeTrigger = "manual";
-    const captureSource: CaptureSource | undefined = "channel" in executeChannel && executeChannel.channel === "production" ? "api_key" : undefined;
+    const captureSource: CaptureSource | undefined = "channel" in executeChannel && executeChannel.channel === "production" && user.apiKeyId ? "api_key" : undefined;
     if ("error" in executeChannel) return denyRunAccess(reply, executeChannel);
     const workflow = executeChannel.channel === "production" ? await productionWorkflow(access.workflow.id) : access.workflow;
     if (!workflow) {
@@ -305,7 +305,7 @@ export function registerExecutionRoutes(deps: ExecutionRoutesDeps): void {
     const executeChannel = await executeChannelFor(request, user, access.workflow.id);
     // Phase 15.6 — an API-key run on the production channel may be captured; it stays a `manual_stream` run everywhere else.
     const executeTrigger = "manual_stream";
-    const captureSource: CaptureSource | undefined = "channel" in executeChannel && executeChannel.channel === "production" ? "api_key" : undefined;
+    const captureSource: CaptureSource | undefined = "channel" in executeChannel && executeChannel.channel === "production" && user.apiKeyId ? "api_key" : undefined;
     if ("error" in executeChannel) return denyRunAccess(reply, executeChannel);
     const workflow = executeChannel.channel === "production" ? await productionWorkflow(access.workflow.id) : access.workflow;
     if (!workflow) {

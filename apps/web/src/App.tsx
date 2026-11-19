@@ -4550,6 +4550,8 @@ function StudioApp() {
     (action: RadialAction) => {
       if (!soloSelectedNode) return;
       const nodeId = soloSelectedNode.id;
+      // A view-only workflow opens the node to look at; it is not duplicated, removed, disabled or recoloured.
+      if (editDisabledReason && action.kind !== "edit") return;
       switch (action.kind) {
         case "edit":
           openNodeConfig(nodeId);
@@ -4609,7 +4611,7 @@ function StudioApp() {
         }
       }
     },
-    [editingNodeId, openNodeConfig, pushHistorySnapshot, setEdges, setNodes, soloSelectedNode]
+    [editDisabledReason, editingNodeId, openNodeConfig, pushHistorySnapshot, setEdges, setNodes, soloSelectedNode]
   );
 
   const saveNodeConfig = useCallback(
@@ -5315,7 +5317,7 @@ function StudioApp() {
           subjectRefsSet={(currentWorkflow.settings?.dataProtection?.subjectRefs?.length ?? 0) > 0}
           onEditSubjectRefs={canEditOpenWorkflow ? () => setSubjectRefsDialogOpen(true) : undefined}
           errorWorkflowSet={Boolean(currentWorkflow.settings?.errorWorkflowId)}
-          onEditErrorWorkflow={canManageWorkflows ? () => setErrorWorkflowDialogOpen(true) : undefined}
+          onEditErrorWorkflow={canEditOpenWorkflow ? () => setErrorWorkflowDialogOpen(true) : undefined}
           recordMcp={recordMcp}
           onToggleRecordMcp={canManageWorkflows ? () => setRecordMcp((value) => !value) : undefined}
           docsUrl={docsUrl}
@@ -6437,7 +6439,7 @@ function StudioApp() {
       )}
 
       {soloSelectedNode && radialCenter && (
-        <RadialActionRing node={soloSelectedNode} center={radialCenter} onAction={onRadialAction} />
+        <RadialActionRing node={soloSelectedNode} center={radialCenter} onAction={onRadialAction} readOnly={Boolean(editDisabledReason)} />
       )}
       {editingNode && (
         <NodeInspector

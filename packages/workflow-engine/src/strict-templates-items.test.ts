@@ -122,6 +122,14 @@ describe("per-item Filter conditions under strict templates", () => {
     expect(lenient.nodeResults.find((node) => node.nodeId === "filter")?.output).toMatchObject({ count: 2 });
   });
 
+  it("an is_empty condition ignores a leftover template in its unused value under strict", async () => {
+    const workflow = itemsFilter("{{ 10 * 2 }}", true);
+    (workflow.nodes[1]!.config as { conditions: unknown[] }).conditions = [{ field: "min", operator: "is_empty", value: "{{ nope }}" }];
+    const result = await executeWorkflow({ workflow }, dependencies());
+    expect(result.status).toBe("success");
+    expect(result.nodeResults.find((node) => node.nodeId === "filter")?.output).toMatchObject({ count: 1 });
+  });
+
   it("a condition field that an item lacks is not a template and never fails under strict", async () => {
     const workflow = itemsFilter("{{ 10 * 2 }}", true);
     (workflow.nodes[1]!.config as { conditions: unknown[] }).conditions = [{ field: "min", operator: "is_empty", value: "" }];

@@ -14,6 +14,7 @@ import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
 import { AuthService } from "./services/auth-service.js";
+import { QueueService } from "./services/queue-service.js";
 import { SecretService } from "./services/secret-service.js";
 import { openTestStore } from "./test-support/test-store.js";
 
@@ -27,7 +28,7 @@ interface TestContext {
 
 const contexts: TestContext[] = [];
 
-async function createTestContext(env: Record<string, string> = {}): Promise<TestContext> {
+async function createTestContext(env: Record<string, string> = {}, options: { queue?: boolean } = {}): Promise<TestContext> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ao-session-owner-"));
   const store = await openTestStore(path.join(tempDir, "orchestrator.db"));
   await store.ensureDefaultProject();
@@ -43,7 +44,8 @@ async function createTestContext(env: Record<string, string> = {}): Promise<Test
   });
   const secretService = new SecretService(store, config.SECRET_MASTER_KEY_BASE64);
   const authService = new AuthService(store, config.SESSION_TTL_HOURS);
-  const app = await createApp(config, store, secretService, authService);
+  const queue = options.queue ? new QueueService(store, { pollIntervalMs: 20 }) : undefined;
+  const app = await createApp(config, store, secretService, authService, undefined, queue);
   await app.ready();
   const context: TestContext = { app, store, authService, config, tempDir };
   contexts.push(context);
@@ -198,5 +200,79 @@ describe("session memory kept to the person for operators and share-only runners
     // The same namespace and session from another workflow of the project: Olivia sees it, the builder does not.
     expect(await runNote(context, lead.cookie, "wf-notes", "lead-1")).toBe("");
     expect(await runNote(context, olivia.cookie, "wf-notes", "olivia-1")).toBe("approved-note");
+  });
+
+  it("a queued run by an operator uses the operator's sessions, decided when the job runs", async () => {
+    const context = await createTestContext({}, { queue: true });
+    const olivia = await login(context, "operator", "olivia");
+    const otto = await login(context, "operator", "otto");
+    await context.store.upsertWorkflow(notebook("wf-notes", "default"));
+    expect(await runNote(context, olivia.cookie, "wf-notes", "olivia-1")).toBe("");
+    const queued = async (cookie: string, note: string) => {
+      const enqueued = await call(context, "POST", "/api/workflows/wf-notes/enqueue", cookie, { input: { note }, sessionId: "shared-session" });
+      expect(enqueued.statusCode, enqueued.body).toBe(200);
+      const executionId = enqueued.json<{ executionId: string }>().executionId;
+      const until = Date.now() + 20_000;
+      for (;;) {
+        const history = await context.store.getExecutionHistory(executionId);
+        if (history && ["success", "error"].includes(history.status)) return JSON.stringify(history.nodeResults);
+        if (Date.now() > until) throw new Error("The queued run did not finish");
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    };
+    // Otto's queued run with Olivia's session id sees nothing of hers; Olivia's own queued run does.
+    expect(await queued(otto.cookie, "otto-1")).toContain("seen=[]");
+    expect(await queued(olivia.cookie, "olivia-2")).toContain("seen=[olivia-1]");
+  });
+
+  it("a signed-in chat by a viewer or an operator keeps its memory to that person", async () => {
+    const context = await createTestContext();
+    const vera = await login(context, "viewer", "vera");
+    const olivia = await login(context, "operator", "olivia");
+    const chat: Workflow = {
+      ...notebook("wf-chat", "default"),
+      nodes: [
+        { id: "start", type: "chat_trigger", name: "Chat", position: { x: 0, y: 0 }, config: { authMode: "session" } },
+        ...notebook("wf-chat", "default").nodes.slice(1).map((node) => (node.id === "save" ? { ...node, config: { ...node.config, valueTemplate: "{{message}}" } } : node))
+      ]
+    };
+    await context.store.upsertWorkflow(chat);
+    const say = async (cookie: string, message: string) => {
+      const response = await call(context, "POST", "/api/chat/wf-chat", cookie, { message, session_id: "chat-1" });
+      expect(response.statusCode, response.body).toBe(200);
+      return /seen=\[([^\]]*)\]/.exec(response.body)?.[1] ?? "";
+    };
+    expect(await say(vera.cookie, "vera-1")).toBe("");
+    expect(await say(vera.cookie, "vera-2")).toBe("vera-1");
+    expect(await say(olivia.cookie, "olivia-1")).toBe("");
+  });
+});
+
+describe("operators run the released version", () => {
+  it("an operator runs the published version while a builder runs the draft; an operator cannot ask for the draft", async () => {
+    const context = await createTestContext();
+    const olivia = await login(context, "operator", "olivia");
+    const bea = await login(context, "builder", "bea");
+    const flow = (text: string): Workflow => ({
+      id: "wf-rel",
+      name: "Released",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "default",
+      nodes: [
+        { id: "start", type: "manual_trigger", name: "Start", position: { x: 0, y: 0 }, config: {} },
+        { id: "out", type: "output", name: "Out", position: { x: 200, y: 0 }, config: { responseTemplate: text } }
+      ],
+      edges: [{ id: "e1", source: "start", target: "out" }]
+    });
+    expect((await call(context, "POST", "/api/workflows", bea.cookie, flow("released"))).statusCode).toBe(200);
+    expect((await call(context, "POST", "/api/workflows/wf-rel/publish", bea.cookie, { version: 1 })).statusCode).toBe(200);
+    expect((await call(context, "PUT", "/api/workflows/wf-rel", bea.cookie, flow("unreleased draft"))).statusCode).toBe(200);
+    const operatorRun = await call(context, "POST", "/api/workflows/wf-rel/execute", olivia.cookie, { input: {} });
+    expect(operatorRun.statusCode, operatorRun.body).toBe(200);
+    expect(operatorRun.body).toContain("released");
+    expect(operatorRun.body).not.toContain("unreleased draft");
+    expect((await call(context, "POST", "/api/workflows/wf-rel/execute", bea.cookie, { input: {} })).body).toContain("unreleased draft");
+    expect((await call(context, "POST", "/api/workflows/wf-rel/execute?channel=draft", olivia.cookie, { input: {} })).statusCode).toBe(403);
   });
 });

@@ -6,6 +6,15 @@ import { RadialActionRing } from "./RadialActionRing";
 const node = { id: "agent", type: "workflowNode", position: { x: 0, y: 0 }, data: { label: "Agent", nodeType: "agent_orchestrator", config: {} } } as EditorNode;
 
 describe("RadialActionRing", () => {
+  it("offers only Edit on a view-only workflow", () => {
+    const onAction = vi.fn();
+    render(<RadialActionRing node={node} center={{ x: 100, y: 100 }} onAction={onAction} readOnly />);
+    expect(screen.queryByRole("button", { name: "Delete (Del)" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Duplicate (Ctrl+D)" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Edit (Enter)" }), { detail: 1 });
+    expect(onAction).toHaveBeenCalledWith({ kind: "edit" });
+  });
+
   it("acts on a single click", () => {
     const onAction = vi.fn();
     render(<RadialActionRing node={node} center={{ x: 100, y: 100 }} onAction={onAction} />);
