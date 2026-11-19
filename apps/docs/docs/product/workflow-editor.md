@@ -129,7 +129,10 @@ clean-up (`settings.errorWorkflowId` in the workflow JSON). Start it with an **E
 run's `source_workflow_id`, `source_workflow_name`, `execution_id`, `error`, `error_stack` and `timestamp`. The failed
 run's caller still gets the error, replays never start it, and an error workflow in another project runs only when
 that project shared it with execute access (see [what a running workflow can reach](../security/auth-rbac.md#what-a-running-workflow-can-reach)). Pick **None** to turn it
-off.
+off. Its runs are listed in **Runs** like any other, with the trigger `error`: the failed run's details say
+**Error workflow ran → run …**, and the error workflow's run says which failed run it handled. Each belongs to the
+person who started the failed run, so someone who sees only their own runs sees the error runs of their runs. An
+error workflow that fails does not start another one.
 
 ## Running from the editor
 

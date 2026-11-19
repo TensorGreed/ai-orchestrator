@@ -162,6 +162,12 @@ Generates a downloadable PDF link from upstream content (plain text or HTML rend
 
 Overrides the outgoing webhook HTTP response (status, headers, and body).
 
+A run started by a webhook (its URL, `/webhook-test/`, `POST /api/webhooks/execute` and its stream) answers with the
+reply of the last Webhook Response node that ran, even when other nodes (an Output node, a notification) run after it.
+The run's output in Runs is that reply too, so it shows what the caller got. With no Webhook Response in the run, the
+caller gets the run's output as before. A run that fails after its Webhook Response answers with the error. Runs that
+no webhook started (the editor's **Run**, sub-workflows, schedules) keep their Output node's result.
+
 **Config fields**
 
 | Field | Type | Required | Values |
