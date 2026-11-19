@@ -44,7 +44,7 @@ Nodes added before this change, and workflows from elsewhere, keep ids such as `
 fetch → summarize → report
 ```
 
-In `report`, `{{summarize.text}}` works, but `{{fetch.body}}` renders empty because `fetch` is not a direct parent of `report`. Use `{{results.fetch.body}}` (or `{{ $node('fetch').output.body }}`) to read any step that has already finished, wherever it is in the graph.
+In `report`, `{{summarize.answer}}` works, but `{{fetch.body}}` renders empty because `fetch` is not a direct parent of `report`. Use `{{results.fetch.body}}` (or `{{ $node('fetch').output.body }}`) to read any step that has already finished, wherever it is in the graph.
 
 Steps that pass their input on keep the parent's data in reach: after a No-op, Wait, Filter, IF, Switch or Chat Intent Router step, or a disabled node, for example, `{{fetch.body}}` still works in the next node. `parent_outputs` holds the direct parents only, so `{{parent_outputs.fetch.body}}` does not see through them.
 
@@ -66,7 +66,7 @@ Two shorter ways to get every pass:
 On the canvas, a body node's card counts its passes and the items of all of them ("success · 25 passes · 25 items"); its Run data shows the last pass.
 
 ```text
-{{ results.loop.items.map(pass => pass.outputs.summarize.text).join('\n') }}
+{{ results.loop.items.map(pass => pass.outputs.summarize.answer).join('\n') }}
 ```
 
 ## Writing templates in the editor

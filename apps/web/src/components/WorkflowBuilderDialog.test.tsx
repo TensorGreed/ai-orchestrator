@@ -162,6 +162,45 @@ describe("WorkflowBuilderDialog", () => {
     expect(await screen.findByText("Model: Anthropic · claude-x")).toBeInTheDocument();
   });
 
+  it("shows the saved credential the default model uses, not None (the validation's B14)", async () => {
+    const saved = { id: "sec-ant", name: "Team Anthropic key", provider: "anthropic", createdAt: "2026-11-01T00:00:00.000Z" };
+    vi.mocked(api.fetchSecrets).mockResolvedValue([saved]);
+    vi.mocked(api.fetchWorkflowBuilderStatus).mockResolvedValue({
+      enabled: true,
+      defaultModel: { providerId: "anthropic", model: "claude-x", secretRef: { secretId: "sec-ant" } }
+    });
+    // The studio's default (loaded before the server answered) agrees on the model but had no credential.
+    render(<WorkflowBuilderDialog {...defaults} defaultModel={{ providerId: "anthropic", model: "claude-x" }} onCreate={vi.fn()} onUseTemplate={vi.fn()} />);
+    expect(await screen.findByText("Model: Anthropic · claude-x")).toBeInTheDocument();
+    const credential = screen.getByLabelText<HTMLSelectElement>("Credential");
+    await vi.waitFor(() => expect(credential.value).toBe("sec-ant"));
+    expect(credential.selectedOptions[0]!.textContent).toBe("Team Anthropic key (anthropic)");
+  });
+
+  it("names a saved credential the list does not show, and says no server key for a keyless model server", async () => {
+    vi.mocked(api.fetchSecrets).mockResolvedValue([]);
+    vi.mocked(api.fetchWorkflowBuilderStatus).mockResolvedValue({
+      enabled: true,
+      defaultModel: { providerId: "anthropic", model: "claude-x", secretRef: { secretId: "sec-elsewhere" } }
+    });
+    const { unmount } = render(<WorkflowBuilderDialog {...defaults} onCreate={vi.fn()} onUseTemplate={vi.fn()} />);
+    const credential = screen.getByLabelText<HTMLSelectElement>("Credential");
+    await vi.waitFor(() => expect(credential.value).toBe("sec-elsewhere"));
+    expect(credential.selectedOptions[0]!.textContent).toBe("Saved credential");
+    unmount();
+    vi.mocked(api.fetchWorkflowBuilderStatus).mockResolvedValue({ enabled: true, defaultModel: { providerId: "ollama", model: "llama3.1" } });
+    render(<WorkflowBuilderDialog {...defaults} onCreate={vi.fn()} onUseTemplate={vi.fn()} />);
+    expect(await screen.findByText(/llama3\.1/)).toBeInTheDocument();
+    expect(screen.getByLabelText<HTMLSelectElement>("Credential").selectedOptions[0]!.textContent).toBe("None (or the server's key)");
+  });
+
+  it("says the server's key is used when the default model's key comes from the server", async () => {
+    vi.mocked(api.fetchWorkflowBuilderStatus).mockResolvedValue({ enabled: true, defaultModel: { providerId: "openai", model: "gpt-4o-mini" } });
+    render(<WorkflowBuilderDialog {...defaults} onCreate={vi.fn()} onUseTemplate={vi.fn()} />);
+    const credential = screen.getByLabelText<HTMLSelectElement>("Credential");
+    await vi.waitFor(() => expect(credential.selectedOptions[0]!.textContent).toBe("The server's key"));
+  });
+
   it("another provider drops the base URL and a credential saved for a different provider; a deleted credential is not sent", async () => {
     vi.mocked(api.buildWorkflowFromDescription).mockResolvedValue({ status: "question", question: "?", model: { providerId: "openai", model: "m" } });
     window.localStorage.setItem(

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import type { TemplateListItem } from "../lib/api";
 import * as api from "../lib/api";
-import { TemplateGallery } from "./TemplateGallery";
+import { TemplateGallery, modelPillText } from "./TemplateGallery";
 
 vi.mock("../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../lib/api")>("../lib/api");
@@ -81,7 +81,7 @@ describe("TemplateGallery", () => {
           id: "tpl-needs-openai",
           name: "OpenAI flow",
           dependencies: [
-            { kind: "provider", label: "OpenAI", envVar: "OPENAI_API_KEY" },
+            { kind: "provider", label: "OpenAI", envVar: "OPENAI_API_KEY", needsKey: true },
             { kind: "vector_store", label: "Pinecone", envVar: "PINECONE_API_KEY" }
           ]
         }
@@ -97,7 +97,21 @@ describe("TemplateGallery", () => {
     expect(depsContainer).toHaveTextContent("OPENAI_API_KEY");
     expect(depsContainer).toHaveTextContent("Pinecone");
     expect(depsContainer).toHaveTextContent("PINECONE_API_KEY");
-    expect(screen.getByTestId("tpl-needs-model-tpl-needs-openai")).toHaveTextContent("Needs a model");
+    // The validation's B12: say which key, not just "a model".
+    expect(screen.getByTestId("tpl-needs-model-tpl-needs-openai")).toHaveTextContent("Needs an OpenAI key");
+  });
+
+  it("names every key a template needs, and says 'Needs a model' for a model server without a key", () => {
+    expect(modelPillText([{ kind: "provider", label: "Anthropic", needsKey: true }])).toBe("Needs an Anthropic key");
+    expect(modelPillText([{ kind: "provider", label: "Google Gemini", needsKey: true }])).toBe("Needs a Google Gemini key");
+    expect(
+      modelPillText([
+        { kind: "provider", label: "OpenAI", needsKey: true },
+        { kind: "provider", label: "Cohere", needsKey: true },
+        { kind: "provider", label: "Ollama (local model server)" }
+      ])
+    ).toBe("Needs OpenAI and Cohere keys");
+    expect(modelPillText([{ kind: "provider", label: "Ollama (local model server)" }])).toBe("Needs a model");
   });
 
   it("does not say a template needs a model when it only needs other setup", async () => {

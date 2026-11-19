@@ -40,6 +40,17 @@ Runs iterative tool-aware agent loop.
 | `toolPayloadMaxArrayItems` | `number` | no | — |
 | `toolPayloadMaxStringChars` | `number` | no | — |
 
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `answer` | The agent's final answer as text. |
+| `iterations` | How many model turns it took. |
+| `stopReason` | Why the agent stopped (final_answer, max_iterations, clarification_requested...). |
+| `steps` | Each turn: what the model asked for and the tools it called. |
+| `messages` | The whole conversation with the model. |
+| `clarification` | The question the agent asked back, when it paused to ask one. |
+
 **Example config**
 
 ```json
@@ -79,6 +90,17 @@ Swarm Supervisor that coordinates attached Worker nodes.
 | `toolPayloadMaxObjectKeys` | `number` | no | — |
 | `toolPayloadMaxArrayItems` | `number` | no | — |
 | `toolPayloadMaxStringChars` | `number` | no | — |
+
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `answer` | The agent's final answer as text. |
+| `iterations` | How many model turns it took. |
+| `stopReason` | Why the agent stopped (final_answer, max_iterations, clarification_requested...). |
+| `steps` | Each turn: what the model asked for and the tools it called. |
+| `messages` | The whole conversation with the model. |
+| `clarification` | The question the agent asked back, when it paused to ask one. |
 
 **Example config**
 

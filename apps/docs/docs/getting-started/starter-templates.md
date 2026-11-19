@@ -9,6 +9,8 @@ The **Starters** in **Templates** are ten small workflows you can run the moment
 
 **Home** shows four of them first, each with **Use**. To see all ten, open **Templates** and pick **Starters**, or turn on **Runs without setup** to see every template, starter or not, that needs nothing set up. Click **Use Template**: the workflow opens as a new draft. Nothing changes in the template.
 
+Other templates say on their card what they need. One whose model or embedder calls a provider that needs a key is marked **Needs an OpenAI key** (or the provider it names); save the key under **Secrets** and pick it on the node, or set the provider's key variable on the API server. A run without the key stops at that node with a message that names the missing key.
+
 A starter's webhook, form and schedule **start switched off**: nothing outside the editor can start a run until you turn them on. **Run** and **Webhook run** in the editor work straight away. To take live calls, open the trigger node and click **Turn on** in the line above its form, then save. Until then its production address answers `404` with `"code": "trigger_off"`.
 
 | Starter | What it shows | How to try it |

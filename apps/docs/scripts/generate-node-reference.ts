@@ -123,6 +123,30 @@ function renderFieldsTable(rows: FieldRow[]): string {
   return lines.join("\n") + "\n";
 }
 
+/** `{{x}}` in a description as code VitePress does not read as a Vue template. */
+function withTemplates(text: string): string {
+  return text.replace(/\{\{([^}]*)\}\}/g, "<span v-pre>`{{$1}}`</span>");
+}
+
+/** The fields the node outputs (shared NODE_OUTPUT_SPECS), with the older aliases named once. */
+function renderOutputs(node: NodeDefinition): string | undefined {
+  const spec = node.outputs;
+  if (!spec) return undefined;
+  const lines = ["**Outputs**", ""];
+  if (spec.fields.length > 0) {
+    lines.push("| Field | What it holds |", "|---|---|");
+    for (const entry of spec.fields) lines.push(`| \`${entry.name}\` | ${withTemplates(entry.description).replace(/\|/g, "\\|")} |`);
+    lines.push("");
+  }
+  const notes: string[] = [];
+  if (spec.note) notes.push(spec.note);
+  for (const [alias, primary] of Object.entries(spec.aliases ?? {})) {
+    notes.push(`\`${alias}\` holds the same value as \`${primary}\` and is kept for workflows that read it; use \`${primary}\`.`);
+  }
+  if (notes.length > 0) lines.push(withTemplates(notes.join(" ")), "");
+  return lines.join("\n");
+}
+
 function renderNodeSection(node: NodeDefinition): string {
   const parts: string[] = [];
   parts.push(`### \`${node.type}\` — ${node.label}`);
@@ -132,6 +156,8 @@ function renderNodeSection(node: NodeDefinition): string {
   parts.push("**Config fields**");
   parts.push("");
   parts.push(renderFieldsTable(fieldRows(node.configSchema)));
+  const outputs = renderOutputs(node);
+  if (outputs) parts.push(outputs);
   parts.push("**Example config**");
   parts.push("");
   parts.push("```json");

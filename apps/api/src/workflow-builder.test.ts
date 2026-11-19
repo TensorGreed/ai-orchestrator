@@ -336,6 +336,61 @@ describe("POST /api/workflow-builder/build", () => {
     expect(modelRequests).toHaveLength(0);
   });
 
+  it("names the saved credential the default model uses, so the dialog shows the key a build will use", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context, "builder");
+    const secret = await context.app.inject({
+      method: "POST",
+      url: "/api/secrets",
+      headers: { cookie },
+      payload: { name: "Team Anthropic key", provider: "anthropic", value: "sk-ant-not-a-real-key" }
+    });
+    expect(secret.statusCode).toBeLessThan(300);
+    const secretId = secret.json<{ id: string }>().id;
+    const status = await context.app.inject({ method: "GET", url: "/api/workflow-builder", headers: { cookie } });
+    expect(status.json()).toMatchObject({ enabled: true, defaultModel: { providerId: "anthropic", secretRef: { secretId } } });
+    // Only the id: never the key.
+    expect(status.body).not.toContain("sk-ant-not-a-real-key");
+  });
+
+  it("repairs the validation's classify webhook: a {{response}} body goes back to the model and comes back as {{answer}}", async () => {
+    const context = await createTestContext();
+    const cookie = await login(context, "builder");
+    const classify = (body: string) => ({
+      name: "Classify customer messages",
+      nodes: [
+        { id: "incoming", type: "webhook_input", label: "Incoming message", config: { path: "classify", method: "POST" } },
+        { id: "build_prompt", type: "prompt_template", label: "Build prompt", config: { template: "Classify as billing, shipping or other: {{webhook.message}}" } },
+        { id: "classify", type: "llm_call", label: "Classify", config: {} },
+        { id: "reply", type: "webhook_response", label: "Reply", config: { statusCode: 200, bodyTemplate: body } }
+      ],
+      edges: [
+        { source: "incoming", target: "build_prompt" },
+        { source: "build_prompt", target: "classify" },
+        { source: "classify", target: "reply" }
+      ]
+    });
+    script = [
+      { toolCalls: [{ name: "submit_workflow", arguments: classify("{{response}}") }] },
+      { toolCalls: [{ name: "submit_workflow", arguments: classify("{{answer}}") }] }
+    ];
+    const response = await build(context, cookie, {
+      prompt:
+        "When a webhook receives a JSON body with a customer message in the field 'message', use an LLM to classify it as billing, shipping or other, and reply to the webhook caller with JSON {\"category\": ..., \"summary\": one sentence}.",
+      model: mockModel()
+    });
+    const result = response.json<WorkflowBuilderResult>();
+    expect(result.status).toBe("ready");
+    if (result.status !== "ready") return;
+    expect(result.attempts).toBe(2);
+    expect(result.workflow.nodes.find((node) => node.id === "reply")!.config).toMatchObject({ bodyTemplate: "{{answer}}" });
+    const feedback = String(modelRequests[1]!.messages.filter((message) => message.role === "tool").at(-1)?.content);
+    expect(feedback).toMatch(/\{\{response\}\}/);
+    expect(feedback).toMatch(/'classify' \(llm_call\) outputs answer/);
+    // The catalog the model reads names each node's outputs.
+    expect(JSON.stringify(modelRequests[0]!.messages[0]!.content)).toMatch(/outputFields/);
+  });
+
   it("refuses a secret of another project, even one the person may use there", async () => {
     const context = await createTestContext();
     const cookie = await login(context, "builder");
@@ -421,6 +476,13 @@ describe("Describe it and model spending limits", () => {
     expect(rollup.json<{ rows: Array<{ workflowName?: string; totalTokens: number }> }>().rows).toEqual(
       expect.arrayContaining([expect.objectContaining({ workflowName: "Describe it (builds)", totalTokens: 30 })])
     );
+
+    // Settings > FinOps reads the totals and the provider / model breakdown: the build is in both.
+    const totals = await context.app.inject({ method: "GET", url: "/api/usage/totals", headers: { cookie: admin } });
+    expect(totals.statusCode).toBe(200);
+    expect(totals.json<{ totals: { totalTokens: number; executions: number } }>().totals).toMatchObject({ totalTokens: 30 });
+    const byModel = await context.app.inject({ method: "GET", url: "/api/usage/rollup?groupBy=provider", headers: { cookie: admin } });
+    expect(JSON.stringify(byModel.json())).toMatch(/mock-builder|openai_compatible/);
 
     // A build that fails after a call is charged for that call.
     script = [{ toolCalls: [{ name: "list_node_types", arguments: {} }] }, { fail: "upstream broke" }];

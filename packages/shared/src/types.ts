@@ -326,6 +326,26 @@ export interface NodeCredentialSpec {
   required: boolean;
 }
 
+/** One field of a node's output that a later step reads with `{{field}}` or `{{results.<nodeId>.field}}`. */
+export interface NodeOutputField {
+  name: string;
+  description: string;
+}
+
+/**
+ * What a node outputs: the fields later steps read. `closed` means the node outputs only these fields (plus the fields a
+ * setting names, see `nodeOutputFieldNames`), so a template reading any other field of it reads nothing. An open node
+ * also passes on fields it received (a trigger's payload, a branch's item) and its fields are not checked.
+ */
+export interface NodeOutputSpec {
+  fields: NodeOutputField[];
+  closed: boolean;
+  /** Older names kept so saved workflows keep working: alias -> the field to use. Not offered for new templates. */
+  aliases?: Readonly<Record<string, string>>;
+  /** A short note on what else the output holds (a field a setting names, what an open node passes on). */
+  note?: string;
+}
+
 export interface NodeDefinition {
   type: WorkflowNodeType;
   label: string;
@@ -335,6 +355,8 @@ export interface NodeDefinition {
   sampleConfig: Record<string, unknown>;
   /** Optional, additive: credentials the handler needs. Does not change the workflow JSON contract. */
   credentials?: NodeCredentialSpec[];
+  /** Optional, additive: the fields the node outputs (see NodeOutputSpec). Does not change the workflow JSON contract. */
+  outputs?: NodeOutputSpec;
   /**
    * Optional: an entry node (Input category) whose executor only passes the run's input through, so running it has no
    * effect outside the run. Unset means the node may read or consume from an external system.

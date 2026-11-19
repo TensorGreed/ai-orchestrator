@@ -2,8 +2,30 @@ import { useCallback, useEffect, useState } from "react";
 import {
   fetchTemplates,
   useTemplate,
+  type TemplateDependency,
   type TemplateListItem
 } from "../lib/api";
+
+/** The providers whose API key a template's model or embedder needs, in the order listed. */
+function keyedProviders(dependencies: readonly TemplateDependency[]): TemplateDependency[] {
+  const seen = new Set<string>();
+  return dependencies.filter((dep) => dep.kind === "provider" && dep.needsKey && !seen.has(dep.label) && Boolean(seen.add(dep.label)));
+}
+
+/** "Needs an OpenAI key", "Needs OpenAI and Cohere keys", or "Needs a model" (a model server, no key). */
+export function modelPillText(dependencies: readonly TemplateDependency[]): string {
+  const keyed = keyedProviders(dependencies).map((dep) => dep.label);
+  if (keyed.length === 0) return "Needs a model";
+  if (keyed.length === 1) return `Needs ${/^[aeiou]/i.test(keyed[0]!) ? "an" : "a"} ${keyed[0]} key`;
+  return `Needs ${keyed.slice(0, -1).join(", ")} and ${keyed.at(-1)} keys`;
+}
+
+function modelPillHint(dependencies: readonly TemplateDependency[]): string {
+  const keyed = keyedProviders(dependencies);
+  if (keyed.length === 0) return "Set a provider on the model node before running, or switch it to the built-in Echo model to try the flow.";
+  const envVars = keyed.map((dep) => dep.envVar).filter(Boolean);
+  return `Save the key under Secrets and pick it on the node${envVars.length ? ` (or set ${envVars.join(", ")} on the server)` : ""}, or switch the model node to the built-in Echo model to try the flow.`;
+}
 
 const CATEGORIES = [
   "All",
@@ -172,9 +194,9 @@ export function TemplateGallery({ onWorkflowCreated, initialCategory, projectId 
                     <span
                       className="tpl-dep-pill tpl-dep-pill-needs-model"
                       data-testid={`tpl-needs-model-${tpl.id}`}
-                      title="Set a provider on the model node before running, or switch it to the built-in Echo model to try the flow."
+                      title={modelPillHint(tpl.dependencies)}
                     >
-                      Needs a model
+                      {modelPillText(tpl.dependencies)}
                     </span>
                   ) : null}
                   <span className="tpl-deps-eyebrow">Requires</span>

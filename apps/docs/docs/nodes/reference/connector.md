@@ -616,6 +616,15 @@ Performs a configurable HTTP request with templated URL, headers, and body.
 | `openapiOperation` | `object` | no | — |
 | `operationValues` | `object` | no | — |
 
+**Outputs**
+
+| Field | What it holds |
+|---|---|
+| `status` | The HTTP status code. |
+| `ok` | true for a 2xx status. |
+| `headers` | The response headers (lower-case names). |
+| `body` | The response body: parsed JSON when the response is JSON, else text. |
+
 **Example config**
 
 ```json

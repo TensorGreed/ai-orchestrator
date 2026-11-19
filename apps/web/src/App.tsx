@@ -216,6 +216,7 @@ import { ApiCatalogDialog } from "./components/ApiCatalogDialog";
 import { paletteKey } from "./components/NodePalette";
 import { GraphHistory, movedNodeIds } from "./lib/graph-history";
 import { AUXILIARY_HANDLES, CHAT_MODEL_NODE_TYPES, validateConnection } from "./lib/connection-rules";
+import { agentModelPeers, applyModelToPeers } from "./lib/agent-models";
 import { BreakGlassBanner } from "./components/BreakGlassBanner";
 import { BreakGlassConfirmCard } from "./components/BreakGlassConfirmCard";
 import { breakGlassLinkFromHash, stripBreakGlassFragment, type BreakGlassLink } from "./lib/break-glass";
@@ -1419,6 +1420,11 @@ function StudioApp() {
   const nodeLabelById = useMemo(
     () => new Map(nodes.map((node) => [node.id, node.data.label] as const)),
     [nodeLabelSignature]
+  );
+  const nodeTypeSignature = nodes.map((node) => `${node.id}\u0000${node.data.nodeType}`).join("\u0001");
+  const nodeTypeById = useMemo(
+    () => new Map(nodes.map((node) => [node.id, node.data.nodeType] as const)),
+    [nodeTypeSignature]
   );
   const testDataSignature = nodes
     .filter((node) => hasTestData(node.data.config))
@@ -4879,6 +4885,7 @@ function StudioApp() {
       disabled?: boolean;
       color?: EditorNodeData["color"];
       nodeExtras?: Record<string, unknown>;
+      applyModelTo?: string[];
     }) => {
       if (!editingNodeId) {
         return;
@@ -4886,8 +4893,14 @@ function StudioApp() {
 
       const normalizedLabel = payload.label.trim();
       pushHistorySnapshot();
+      // "Use for all agents in this workflow": the other agents' chat models get this node's model (one undo step).
+      const chosenProvider = payload.config.provider;
+      const applyTo =
+        payload.applyModelTo?.length && chosenProvider && typeof chosenProvider === "object"
+          ? new Set(payload.applyModelTo.filter((id) => id !== editingNodeId))
+          : null;
       setNodes((existing) =>
-        existing.map((node) => {
+        (applyTo ? applyModelToPeers(existing, applyTo, chosenProvider as Record<string, unknown>) : existing).map((node) => {
           if (node.id !== editingNodeId) return node;
           const data: EditorNodeData = {
             ...node.data,
@@ -6825,6 +6838,8 @@ function StudioApp() {
           inputOptions={editingNodeInputOptions}
           executionResult={isDebugMode ? executionResult : null}
           nodeLabels={nodeLabelById}
+          nodeTypes={nodeTypeById}
+          agentModelPeers={agentModelPeers(nodes, edges, editingNode.id)}
           onNavigateNode={openNodeConfig}
           workflowContext={{
             id: currentWorkflow.id,
