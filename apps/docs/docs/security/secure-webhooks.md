@@ -69,8 +69,8 @@ that check; anyone else gets the plain `404`. One with Auth Mode **None** says i
 the token or signature checks out); anyone else gets the plain `404`.
 
 Forms (`/api/forms/:path`) and the MCP Server Trigger (`/api/mcp-server/:path/*`) do the same: switched off or
-deactivated, they answer as a missing form or tool ("Form not found", "MCP server not found", `404`) to anyone but a
-signed-in editor of the workflow, who gets `trigger_off` or the `409`.
+deactivated, or (open ones) with an unfinished version, they answer as a missing form or tool ("Form not found", "MCP
+server not found", `404`) to anyone but a signed-in editor of the workflow, who gets `trigger_off` or the `409`.
 
 ## Chat (`/api/chat/:workflowId`)
 

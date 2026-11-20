@@ -422,11 +422,14 @@ describe("live triggers of an unfinished draft", () => {
       expect(saved.statusCode, saved.body).toBe(200);
     }
     expect((await context.app.inject({ method: "GET", url: "/api/forms/draft-form" })).statusCode).toBe(200);
-    const submitted = await context.app.inject({ method: "POST", url: "/api/forms/draft-form", payload: { name: "Ana" } });
+    // Open triggers say they are paused only to a signed-in editor; anyone else gets the plain not-found.
+    expect((await context.app.inject({ method: "POST", url: "/api/forms/draft-form", payload: { name: "Ana" } })).json()).toEqual({ error: "Form not found" });
+    const submitted = await context.app.inject({ method: "POST", url: "/api/forms/draft-form", headers: { cookie }, payload: { name: "Ana" } });
     expect(submitted.statusCode).toBe(409);
     expect((submitted.json() as { code: string }).code).toBe("workflow_unfinished");
     expect((await context.app.inject({ method: "GET", url: "/api/mcp-server/draft-tool/manifest" })).statusCode).toBe(200);
-    const called = await context.app.inject({ method: "POST", url: "/api/mcp-server/draft-tool/invoke", payload: { arguments: {} } });
+    expect((await context.app.inject({ method: "POST", url: "/api/mcp-server/draft-tool/invoke", payload: { arguments: {} } })).json()).toEqual({ error: "MCP server not found" });
+    const called = await context.app.inject({ method: "POST", url: "/api/mcp-server/draft-tool/invoke", headers: { cookie }, payload: { arguments: {} } });
     expect(called.statusCode).toBe(409);
     expect((called.json() as { code: string }).code).toBe("workflow_unfinished");
     expect(await runs(context, "wf-form-draft")).toHaveLength(0);

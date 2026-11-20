@@ -13521,9 +13521,14 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         if (!access.ok) return denyRunAccess(reply, access);
         submitter = { triggeredByUserId: user.id, ...await sessionOwnerOptionFor(user, found.workflow) };
       }
-      // Production's version has unfinished settings: the form still shows, a submission starts no run.
+      // Production's version has unfinished settings: the form still shows, a submission starts no run. On an open form
+      // only a signed-in editor is told why (a signed-in form's submitter already passed its check).
       const paused = await releaseService.pausedRefusal(found.workflow);
       if (paused) {
+        if (cfg.authMode !== "session" && !(await signedInEditorOf(request, found.workflow.id))) {
+          reply.code(404);
+          return { error: "Form not found" };
+        }
         reply.code(409);
         return { error: paused, code: "workflow_unfinished" };
       }
@@ -13747,9 +13752,14 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           return { error: "Invalid bearer token" };
         }
       }
-      // Production's version has unfinished settings: the tool is listed, a call starts no run.
+      // Production's version has unfinished settings: the tool is listed, a call starts no run. On an open tool only a
+      // signed-in editor is told why; a bearer caller already passed the token check.
       const paused = await releaseService.pausedRefusal(found.workflow);
       if (paused) {
+        if (cfg.authMode !== "bearer" && !(await signedInEditorOf(request, found.workflow.id))) {
+          reply.code(404);
+          return { error: "MCP server not found" };
+        }
         reply.code(409);
         return { error: paused, code: "workflow_unfinished" };
       }

@@ -327,7 +327,7 @@ describe.each(["role", "strict"] as const)("the production webhook URL lists not
     expect((await chat("wf-chaton")).statusCode).toBe(200);
   });
 
-  it("an off form or MCP trigger, and an open webhook's unfinished version, answer the plain 404 to all but a signed-in editor", async () => {
+  it("an off form or MCP trigger, and an open webhook's, form's or tool's unfinished version, answer the plain 404 to all but a signed-in editor", async () => {
     const { context, owner, operator } = await seed();
     const withTrigger = (id: string, trigger: Workflow["nodes"][number]): Workflow => ({
       ...hookWorkflow(id),
@@ -337,6 +337,17 @@ describe.each(["role", "strict"] as const)("the production webhook URL lists not
     await context.store.upsertWorkflow(withTrigger("wf-form-off", { id: "form", type: "form_trigger", name: "Form", position: { x: 0, y: 0 }, config: { path: "form-off", active: false, fields: [] } }));
     await context.store.upsertWorkflow(withTrigger("wf-tool-off", { id: "tool", type: "mcp_server_trigger", name: "Tool", position: { x: 0, y: 0 }, config: { path: "tool-off", toolName: "t", authMode: "public", active: false } }));
     const unfinished = hookWorkflow("wf-unfinished");
+    const unfinishedNode: Workflow["nodes"][number] = { id: "http", type: "http_request", name: "HTTP", position: { x: 400, y: 0 }, config: { method: "POST" } };
+    await context.store.upsertWorkflow({
+      ...withTrigger("wf-form-unfinished", { id: "form", type: "form_trigger", name: "Form", position: { x: 0, y: 0 }, config: { path: "form-unfinished", fields: [] } }),
+      nodes: [{ id: "form", type: "form_trigger", name: "Form", position: { x: 0, y: 0 }, config: { path: "form-unfinished", fields: [] } }, unfinishedNode],
+      edges: [{ id: "e1", source: "form", target: "http" }]
+    });
+    await context.store.upsertWorkflow({
+      ...withTrigger("wf-tool-unfinished", { id: "tool", type: "mcp_server_trigger", name: "Tool", position: { x: 0, y: 0 }, config: { path: "tool-unfinished", toolName: "u", authMode: "public" } }),
+      nodes: [{ id: "tool", type: "mcp_server_trigger", name: "Tool", position: { x: 0, y: 0 }, config: { path: "tool-unfinished", toolName: "u", authMode: "public" } }, unfinishedNode],
+      edges: [{ id: "e1", source: "tool", target: "http" }]
+    });
     await context.store.upsertWorkflow({
       ...unfinished,
       nodes: [...unfinished.nodes, { id: "http", type: "http_request", name: "HTTP", position: { x: 400, y: 0 }, config: { method: "POST" } }],
@@ -352,7 +363,11 @@ describe.each(["role", "strict"] as const)("the production webhook URL lists not
       const paused = await ask("POST", "/webhook/orders-wf-unfinished", cookie);
       expect(paused.statusCode).toBe(404);
       expect(paused.json()).toEqual(PLAIN_404);
+      expect((await ask("POST", "/api/forms/form-unfinished", cookie)).json()).toEqual({ error: "Form not found" });
+      expect((await ask("POST", "/api/mcp-server/tool-unfinished/invoke", cookie)).json()).toEqual({ error: "MCP server not found" });
     }
+    expect((await ask("POST", "/api/forms/form-unfinished", owner.cookie)).json()).toMatchObject({ code: "workflow_unfinished" });
+    expect((await ask("POST", "/api/mcp-server/tool-unfinished/invoke", owner.cookie)).json()).toMatchObject({ code: "workflow_unfinished" });
     expect((await ask("POST", "/api/forms/form-off", owner.cookie)).json()).toMatchObject({ code: LIVE_ENTRY_OFF_CODE });
     expect((await ask("POST", "/api/mcp-server/tool-off/invoke", owner.cookie)).json()).toMatchObject({ code: LIVE_ENTRY_OFF_CODE });
     const told = await ask("POST", "/webhook/orders-wf-unfinished", owner.cookie);
