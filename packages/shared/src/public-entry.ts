@@ -9,23 +9,48 @@ function configOf(node: EntryNode): Record<string, unknown> {
   return node.config && typeof node.config === "object" && !Array.isArray(node.config) ? (node.config as Record<string, unknown>) : {};
 }
 
+/** The Auth Modes each live trigger knows. Unset is the trigger's default (open, as before); "none" reads as public. */
+const KNOWN_AUTH_MODES: Readonly<Record<string, readonly string[]>> = {
+  webhook_input: ["none", "bearer_token", "hmac_sha256"],
+  form_trigger: ["none", "public", "session"],
+  chat_trigger: ["none", "public", "session", "bearer"],
+  mcp_server_trigger: ["none", "public", "bearer"]
+};
+
+/**
+ * A set Auth Mode the trigger does not know (a typo, a padded value, a hand-edited import), or null. Its routes refuse
+ * every call for it instead of treating it as public.
+ */
+export function unknownAuthMode(node: EntryNode): string | null {
+  const modes = KNOWN_AUTH_MODES[node.type];
+  if (!modes) return null;
+  const value = configOf(node).authMode;
+  if (value === undefined || value === null || value === "") return null;
+  return typeof value === "string" && modes.includes(value) ? null : String(value);
+}
+
+/** The error code a trigger with an unknown Auth Mode answers with. */
+export const UNKNOWN_AUTH_MODE_CODE = "unknown_auth_mode";
+
+/** What a trigger with an unknown Auth Mode answers, and the editor's warning for it. */
+export function unknownAuthModeMessage(mode: string): string {
+  return `Auth Mode '${mode.slice(0, 40)}' is not one this trigger knows, so it refuses every call. Pick an Auth Mode in its settings.`;
+}
+
 /**
  * The open door a node leaves, or null: a webhook with no token or signature, a public form, an Expose as MCP Tool
- * trigger whose REST route takes no token, or a public chat. Read as the routes read them: anything but a protected
+ * trigger whose REST route takes no token, or a public chat. (App triggers verify their provider's signature or token
+ * and refuse every call until it is set, so none of them is an open door.) Read as the routes read them: anything but a protected
  * mode is open (webhook: `bearer_token` or `hmac_sha256`; form: `session`; MCP trigger: `bearer`; chat: `session` or
- * `bearer`), so unset and unknown values count as public. A trigger that is switched off (`active: false`) takes no
+ * `bearer`), so unset counts as public. A mode the trigger does not know is refused by its routes (`unknownAuthMode`). A trigger that is switched off (`active: false`) takes no
  * live calls, so it is not one.
  */
 export function publicEntryMessage(node: EntryNode): string | null {
   const config = configOf(node);
-  if (node.type === "telegram_trigger") {
-    // Its route checks the secret token only when one is set, and takes calls whatever `active` says.
-    const ref = config.signingSecretRef;
-    const hasSecret = Boolean(ref && typeof ref === "object" && typeof (ref as Record<string, unknown>).secretId === "string" && (ref as Record<string, unknown>).secretId);
-    return hasSecret ? null : "Public Telegram trigger: without a secret token anyone who knows the workflow's id can start it. Pick the secret that holds the token.";
-  }
   if (config.active === false) return null;
-  // Compared exactly as the routes compare it: a padded value (" bearer") is not a protected mode there either.
+  // A mode the trigger does not know refuses every call: not open, but worth saying.
+  const unknown = unknownAuthMode(node);
+  if (unknown !== null) return unknownAuthModeMessage(unknown);
   const authMode = typeof config.authMode === "string" ? config.authMode : "";
   switch (node.type) {
     case "webhook_input":

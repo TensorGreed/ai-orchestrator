@@ -89,10 +89,13 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "app.ts", match: "const stored = await store.getWorkflow(sourceId);", kind: "not_run", why: "a JSON import reads the stored workflow with the file's id: to name and diff it, and (12.2) to keep its trigger trust settings on a replace; nothing runs" },
   { file: "app.ts", match: "if (!await store.getWorkflow(workflowId)) {", kind: "not_run", why: "a tool policy rule's workflow principal must exist when the rule is saved; nothing runs" },
   { file: "app.ts", match: "const gatedWorkflow = await store.getWorkflow(workflowId);", kind: "not_run", why: "whether the reader of a release gate's cases sees every run of the workflow; nothing runs" },
+  { file: "app.ts", match: "const editedWorkflow = await store.getWorkflow(workflowId);", kind: "not_run", why: "whether a production entry point's caller may edit the workflow, to tell them why it takes no call; nothing runs" },
   { file: "app.ts", match: "const releasedWorkflow = await store.getWorkflow(workflowId);", kind: "not_run", why: "whether the reader of the publish preview or the release history sees every run of the workflow; nothing runs" },
 
   // app.ts: production traffic.
-  { file: "app.ts", match: "const workflow = productionWorkflow(request.params.workflowId);", kind: "production", why: "Slack, GitHub, Stripe, Telegram, Discord app webhooks and chat", count: 6 },
+  { file: "app.ts", match: "const workflow = productionWorkflow(request.params.workflowId);", kind: "production", why: "the chat trigger" },
+  { file: "app.ts", match: "const live = productionTriggerWorkflow(workflowId);", kind: "production", why: "Slack, GitHub, Stripe, Telegram and Discord app webhooks (appTriggerTarget): production's version, an unfinished one too, so the provider's signature is checked before it answers 409" },
+  { file: "app.ts", match: "const deactivated = live ? null : releaseService.deactivatedProductionWorkflow(workflowId);", kind: "not_run", why: "an app webhook of a deactivated gated workflow: only to check the provider's signature before answering \"deactivated\"; never run" },
   { file: "app.ts", match: "const workflow = productionWorkflow(input.workflowId);", kind: "production", why: "a schedule firing" },
   { file: "app.ts", match: "const workflow = productionWorkflow(input.workflow.id);", kind: "production", why: "an app or polling trigger firing: the version current now, not the one it registered from" },
   { file: "app.ts", match: "schedulerService.setWorkflowLoader?.((workflowId) => productionTriggerWorkflow(workflowId));", kind: "production", why: "schedules register from the published version (an unfinished one too: its ticks are skipped)" },
@@ -331,7 +334,7 @@ describe("production entry points load the published version", () => {
 
   it.each(productionRoutes)("%s never loads the draft", (routePath) => {
     const block = routeBlock(appSource, routePath);
-    expect(block).toMatch(/runWorkflowExecution\(|productionWorkflow\(|selectWebhookWorkflow\(|findFormWorkflow\(/);
+    expect(block).toMatch(/runWorkflowExecution\(|productionWorkflow\(|selectWebhookWorkflow\(|findFormWorkflow\(|appTriggerTarget\(/);
     expect(block).not.toMatch(/store\.getWorkflow\(/);
   });
 

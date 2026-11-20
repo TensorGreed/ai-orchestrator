@@ -77,7 +77,10 @@ export function studioModeLabel(item: StudioModeItem): string {
   return item.section === "mcp" ? `MCP · ${item.label}` : item.label;
 }
 
-export type RunStatusState = "idle" | "running" | "ok" | "error";
+export type RunStatusState = "idle" | "running" | "waiting" | "ok" | "error";
+
+/** What a run waiting on a person reads as, wherever its status shows (HUD pill, Runs, run tape). */
+export const WAITING_FOR_APPROVAL_LABEL = "Waiting for approval";
 
 /** Shape the HUD run-status pill renders. App derives it from `busy` + the last execution result. */
 export interface RunStatus {
@@ -137,6 +140,10 @@ export function deriveRunStatus(busy: boolean, result: WorkflowExecutionResult |
         ? `${ok} ok`
         : `${ok} of ${total} ok${errors > 0 ? ` · ${errors} failed` : ""}${handledNote}`
       : result.status;
+  // A run paused on a Human Approval has not finished: it waits (amber), whatever its nodes did so far.
+  if (result.status === "waiting_approval") {
+    return { state: "waiting", label: total > 0 ? `${WAITING_FOR_APPROVAL_LABEL} · ${summary}` : WAITING_FOR_APPROVAL_LABEL };
+  }
   const label = duration ? `last run ${duration} · ${summary}` : `last run · ${summary}`;
   const failed = result.status === "error" || Boolean(result.error);
   return { state: failed ? "error" : "ok", label };

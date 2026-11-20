@@ -122,7 +122,7 @@ describe("signed webhooks hash the body as it arrived", () => {
       headers: { "content-type": "application/json", "x-hub-signature-256": signature, "x-github-delivery": "d-2" },
       payload: PRETTY_BODY.replace("two words", "three words")
     });
-    expect(tampered.statusCode).toBe(401);
+    expect(tampered.statusCode).toBe(404);
   });
 
   it("GitHub: the same X-GitHub-Delivery within the window starts no second run", async () => {
@@ -197,7 +197,7 @@ describe("signed webhooks hash the body as it arrived", () => {
       headers: { "content-type": "application/json", "x-slack-request-timestamp": ts, "x-slack-signature": sign(ts, body) },
       payload: body.replace("hi", "bye")
     });
-    expect(tampered.statusCode).toBe(401);
+    expect(tampered.statusCode).toBe(404);
   });
 
   it("Slack: a URL verification challenge over a pretty-printed body is answered", async () => {
@@ -272,7 +272,7 @@ describe("signed webhooks hash the body as it arrived", () => {
       headers: { "content-type": "application/json", "stripe-signature": `t=${t},v1=${v1}` },
       payload: JSON.stringify(JSON.parse(PRETTY_BODY))
     });
-    expect(compact.statusCode).toBe(401);
+    expect(compact.statusCode).toBe(404);
   });
 
   it("generic webhook HMAC mode: a signature over a pretty-printed body is accepted; a re-serialised body is refused", async () => {
@@ -327,5 +327,52 @@ describe("signed webhooks hash the body as it arrived", () => {
       payload: JSON.stringify(JSON.parse(body))
     });
     expect(compact.statusCode).toBe(403);
+  });
+});
+
+describe("an app trigger switched off", () => {
+  it("still answers its provider's setup handshake (Slack url_verification, GitHub ping), but starts no run and says it is off for events", async () => {
+    const context = await createTestContext();
+    const slackSecret = await context.secretService.createSecret({ name: "slack", provider: "slack", value: "slack-signing" });
+    const githubSecret = await context.secretService.createSecret({ name: "gh", provider: "github", value: "gh-secret" });
+    await saveWorkflow(context, triggerWorkflow("wf-slack-off", "slack_trigger", { signingSecretRef: { secretId: slackSecret.secretId }, active: false }));
+    await saveWorkflow(context, triggerWorkflow("wf-gh-off", "github_webhook_trigger", { secretRef: { secretId: githubSecret.secretId }, active: false }));
+
+    const slack = async (body: string) => {
+      const ts = String(Math.floor(Date.now() / 1000));
+      const signature = `v0=${crypto.createHmac("sha256", "slack-signing").update(`v0:${ts}:${body}`).digest("hex")}`;
+      return await context.app.inject({
+        method: "POST",
+        url: "/api/webhooks/slack/wf-slack-off",
+        headers: { "content-type": "application/json", "x-slack-request-timestamp": ts, "x-slack-signature": signature },
+        payload: body
+      });
+    };
+    const challenge = await slack(JSON.stringify({ type: "url_verification", challenge: "abc123" }));
+    expect(challenge.statusCode).toBe(200);
+    expect(challenge.body).toBe("abc123");
+    const event = await slack(JSON.stringify({ type: "event_callback", event_id: "Ev1", event: { type: "message" } }));
+    expect(event.statusCode).toBe(404);
+    expect(event.json()).toMatchObject({ code: "trigger_off" });
+
+    const github = async (eventName: string) => {
+      const body = JSON.stringify({ zen: "Keep it simple." });
+      return await context.app.inject({
+        method: "POST",
+        url: "/api/webhooks/github/wf-gh-off",
+        headers: {
+          "content-type": "application/json",
+          "x-github-event": eventName,
+          "x-hub-signature-256": `sha256=${crypto.createHmac("sha256", "gh-secret").update(body).digest("hex")}`
+        },
+        payload: body
+      });
+    };
+    const ping = await github("ping");
+    expect(ping.statusCode).toBe(200);
+    expect(ping.json()).toEqual({ ok: true, ping: true });
+    expect((await github("push")).json()).toMatchObject({ code: "trigger_off" });
+    expect(await runsOf(context, "wf-slack-off")).toBe(0);
+    expect(await runsOf(context, "wf-gh-off")).toBe(0);
   });
 });

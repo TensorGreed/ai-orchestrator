@@ -37,12 +37,27 @@ Set `SECRET_MASTER_KEY_BASE64` in `.env` with a base64-encoded 32-byte value.
 ## Webhook 404 with `"code": "trigger_off"`
 
 The webhook (or form, chat or MCP trigger) is switched off, as a starter template's is until you turn it on. Open the
-trigger node, click **Turn on** and save. The editor's **Run** and the `/webhook-test/` URL work while it is off.
+trigger node, click **Turn on** and save. The editor's **Run** and **Webhook run** work while it is off; the
+`/webhook-test/` URL answers the same `404` until you turn it on. A webhook with Auth Mode **None**, chat, forms and
+MCP triggers say so only to someone signed in who may edit the workflow; anyone else gets a plain `404`.
+
+## Webhook 404 with no detail
+
+Called without signing in, `/webhook/:path` answers a missing path and a wrong method with the same plain `404`, and
+lists nothing. Call it signed in (or with an API key) to see the methods the path takes and the endpoints you may run.
+App webhooks (`/api/webhooks/<app>/:workflowId`) answer a plain `404` to anything their provider did not sign: check
+that the trigger's secret matches the provider's.
 
 ## Webhook 404 on `/webhook-test/:path`
 
+The test URL runs the draft, so it answers only someone who may edit the workflow: a signed-in session in the same
+browser, or an API key (`Authorization: Bearer <key>`, or `X-API-Key: <key>` when the webhook's own bearer token uses
+`Authorization`). Anyone else gets a plain `404` with `"No webhook endpoint matches this path and method"`.
+
+- Call it signed in, or with an API key of someone with edit access to the workflow.
 - Ensure `webhook_input` node `path` matches exactly.
 - Ensure workflow containing that webhook path is saved.
+- An operator who may only run the workflow gets `403`: call the webhook's own URL (`/webhook/:path`) instead.
 
 ## MCP tool discovery returns unexpected tools
 

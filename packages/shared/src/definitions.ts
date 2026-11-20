@@ -48,6 +48,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
         idempotencyHeaderName: { type: "string" },
         // Unset or "auto": the reply of the last Webhook Response that ran, else the last node's output.
         responseMode: { type: "string", enum: ["auto", "onReceived", "lastNode", "responseNode"] },
+        // The status of a reply the webhook builds itself (unset: 202 for On Received, else 200). A Webhook Response
+        // node's own status wins; a failed run answers 400.
         responseCode: { type: "number" },
         responseHeaders: { type: "object" },
         responseBody: { type: "string" },
@@ -68,8 +70,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
       timestampHeaderName: "x-webhook-timestamp",
       replayToleranceSeconds: 300,
       idempotencyEnabled: false,
-      idempotencyHeaderName: "idempotency-key",
-      responseCode: 200
+      idempotencyHeaderName: "idempotency-key"
     }
   },
   {
@@ -2203,6 +2204,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
     configSchema: {
       type: "object",
       properties: {
+        // false: calls answer "not found" (a call the provider signed is told `trigger_off`); unset = on.
+        active: { type: "boolean" },
         path: { type: "string" },
         signingSecretRef: { type: "object" },
         replayToleranceSeconds: { type: "number" }
@@ -2575,6 +2578,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
     configSchema: {
       type: "object",
       properties: {
+        // false: calls answer "not found" (a call the provider signed is told `trigger_off`); unset = on.
+        active: { type: "boolean" },
         path: { type: "string" },
         secretRef: { type: "object" }
       }
@@ -3204,6 +3209,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
     configSchema: {
       type: "object",
       properties: {
+        // false: calls answer "not found" (a call the provider signed is told `trigger_off`); unset = on.
+        active: { type: "boolean" },
         path: { type: "string" },
         signingSecretRef: { type: "object" },
         replayToleranceSeconds: { type: "number" }
@@ -3310,10 +3317,12 @@ const baseNodeDefinitions: NodeDefinition[] = [
     label: "Telegram Trigger",
     category: "Input",
     effectFreeEntry: true,
-    description: "Webhook-based trigger validated by X-Telegram-Bot-Api-Secret-Token. Point setWebhook at /api/webhooks/telegram/:workflowId.",
+    description: "Webhook-based trigger validated by X-Telegram-Bot-Api-Secret-Token; refuses every call until its secret token is set. Point setWebhook at /api/webhooks/telegram/:workflowId with that secret_token.",
     configSchema: {
       type: "object",
       properties: {
+        // false: calls answer "not found" (a call the provider signed is told `trigger_off`); unset = on.
+        active: { type: "boolean" },
         path: { type: "string" },
         signingSecretRef: { type: "object" }
       }
@@ -3352,6 +3361,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
     configSchema: {
       type: "object",
       properties: {
+        // false: calls answer "not found" (a call the provider signed is told `trigger_off`); unset = on.
+        active: { type: "boolean" },
         path: { type: "string" },
         publicKey: { type: "string" }
       },
@@ -3476,14 +3487,27 @@ export function isEntryNodeType(type: string): boolean {
 }
 
 /**
- * The triggers anyone can reach from outside once a workflow is saved: webhooks, forms, chats, MCP triggers and
- * schedules. Each can be switched off with `config.active: false`; for a webhook, form, chat or MCP trigger unset means
+ * App triggers: a provider (Slack, GitHub, Stripe, Telegram, Discord) calls `/api/webhooks/<app>/:workflowId`. Off,
+ * a call its provider signed answers "not found" with `trigger_off`; anything not signed gets a plain "not found".
+ */
+export const APP_TRIGGER_NODE_TYPES: ReadonlySet<string> = new Set(["slack_trigger", "github_webhook_trigger", "stripe_webhook_trigger", "telegram_trigger", "discord_trigger"]);
+
+/**
+ * The triggers anyone can reach from outside once a workflow is saved: webhooks, forms, chats, MCP triggers,
+ * schedules and app triggers. Each can be switched off with `config.active: false`; for all but a schedule unset means
  * on, as nodes saved before it had no such setting (a schedule's `active` is required, and fires only when true):
  * production calls to an off webhook, form, chat or MCP trigger answer "not found", the MCP gateway
- * leaves an off trigger's tool out, and an off schedule never fires. Runs from the editor (Run, Webhook run, the
- * `/webhook-test/` URL) work either way. Starter templates ship with theirs off.
+ * leaves an off trigger's tool out, and an off schedule never fires; the `/webhook-test/` URL answers "not found" too.
+ * Runs from the editor (Run, Webhook run) work either way. Starter templates and Describe it drafts ship with theirs off.
  */
-export const LIVE_ENTRY_NODE_TYPES: ReadonlySet<string> = new Set(["webhook_input", "form_trigger", "chat_trigger", "mcp_server_trigger", "schedule_trigger"]);
+export const LIVE_ENTRY_NODE_TYPES: ReadonlySet<string> = new Set([
+  "webhook_input",
+  "form_trigger",
+  "chat_trigger",
+  "mcp_server_trigger",
+  "schedule_trigger",
+  ...APP_TRIGGER_NODE_TYPES
+]);
 
 /** Whether `node` is a live entry point that is switched off (see LIVE_ENTRY_NODE_TYPES). */
 export function isLiveEntryOff(node: { type: string; config?: unknown }): boolean {
@@ -3496,6 +3520,16 @@ export function isLiveEntryOff(node: { type: string; config?: unknown }): boolea
 export const LIVE_ENTRY_OFF_CODE = "trigger_off";
 export function liveEntryOffMessage(type: string): string {
   const what =
-    type === "form_trigger" ? "form" : type === "chat_trigger" ? "chat" : type === "mcp_server_trigger" ? "MCP tool" : type === "schedule_trigger" ? "schedule" : "webhook";
+    type === "form_trigger"
+      ? "form"
+      : type === "chat_trigger"
+        ? "chat"
+        : type === "mcp_server_trigger"
+          ? "MCP tool"
+          : type === "schedule_trigger"
+            ? "schedule"
+            : APP_TRIGGER_NODE_TYPES.has(type)
+              ? "trigger"
+              : "webhook";
   return `This ${what} is turned off. Turn it on in the workflow editor to accept live calls.`;
 }

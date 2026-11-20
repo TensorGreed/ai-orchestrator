@@ -114,7 +114,7 @@ describe("checkBuilderDraft", () => {
     expect(byId.get("join")).not.toHaveProperty("combineKey");
     // An empty required field is unfinished (the draft saves), not an example that looks like real config.
     expect(check.unfinished.map((issue) => issue.nodeId)).toEqual(expect.arrayContaining(["fetch", "shape"]));
-    expect(check.notes.join("\n")).toMatch(/schedule starts off \(nightly\)/);
+    expect(check.notes.join("\n")).toMatch(/The trigger starts off: Schedule Trigger\. Review the workflow, then open it and choose Turn on\./);
     // A described MCP tool starts on a bearer token; one the model made public is said in the preview.
     const tools = checkBuilderDraft(
       {
@@ -129,8 +129,35 @@ describe("checkBuilderDraft", () => {
     );
     expect(tools.workflow!.nodes[0]!.config).toMatchObject({ authMode: "bearer" });
     const toolNotes = tools.notes.join("\n");
-    expect(toolNotes).toMatch(/\(open_tool\): Public MCP tool/);
-    expect(toolNotes).not.toMatch(/\(safe_tool\)/);
+    expect(toolNotes).toMatch(/Expose as MCP Tool \(open_tool\): once turned on, Public MCP tool/);
+    expect(toolNotes).not.toMatch(/\(safe_tool\): once turned on/);
+    // Every live trigger starts off, as a starter's does: nothing takes calls before the person reviews it.
+    expect(tools.workflow!.nodes.map((node) => (node.config as Record<string, unknown>).active)).toEqual([false, false]);
+    const live = checkBuilderDraft(
+      {
+        name: "Live",
+        nodes: [
+          { id: "hook", type: "webhook_input", label: "Incoming order", config: { path: "orders", active: true } },
+          { id: "form", type: "form_trigger", config: { path: "intake" } },
+          { id: "chat", type: "chat_trigger", config: {} }
+        ],
+        edges: []
+      },
+      { workflowId: "wf" }
+    );
+    expect(live.workflow!.nodes.map((node) => (node.config as Record<string, unknown>).active)).toEqual([false, false, false]);
+    expect(live.notes.join("\n")).toMatch(/Triggers start off: Incoming order, Form Trigger, Chat Trigger\. Review the workflow, then open each one and choose Turn on\./);
+    // Background triggers (feeds, brokers, file watchers) start off too: nothing connects out before the review.
+    const background = checkBuilderDraft(
+      {
+        name: "Feeds",
+        nodes: ["file_trigger", "rss_trigger", "sse_trigger", "kafka_trigger", "rabbitmq_trigger", "mqtt_trigger"].map((type) => ({ id: type.replace("_trigger", ""), type, config: { active: true } })),
+        edges: []
+      },
+      { workflowId: "wf" }
+    );
+    expect(background.workflow!.nodes.map((node) => (node.config as Record<string, unknown>).active)).toEqual([false, false, false, false, false, false]);
+    expect(background.notes.join("\n")).toMatch(/Background triggers start off: .*Kafka Trigger.*\. Review the workflow, then switch Active on in each one's settings\./);
     // A time zone the model chose is kept.
     const chosen = checkBuilderDraft(
       { name: "x", nodes: [{ id: "tick", type: "schedule_trigger", config: { timezone: "Asia/Tokyo" } }], edges: [] },
@@ -252,6 +279,19 @@ describe("checkBuilderDraft", () => {
     expect(json).not.toContain("sensitiveOutput");
     expect(check.notes.join(" ")).toMatch(/credential values/);
     expect(check.notes.join(" ")).toMatch(/only an admin sets/);
+    // The preview names nodes and settings as the editor shows them, not by internal field names.
+    const notes = check.notes.join("\n");
+    expect(notes).toMatch(/Left out credential values the model wrote \(Webhook Input: Secret; HTTP Request: Secret, API Key\)/);
+    expect(notes).toMatch(/Left out settings only an admin sets \(Webhook Input: Input Trust; HTTP Request: Sensitive Output\)/);
+    expect(notes).not.toMatch(/fetch\.|hook\.|secretRef|apiKey|inputTrust/);
+  });
+
+  it("names unfinished settings as the editor labels them", () => {
+    const check = checkBuilderDraft(
+      { name: "u", nodes: [{ id: "start", type: "manual_trigger", config: {} }, { id: "fetch", type: "http_request", config: { method: "GET" } }], edges: [{ source: "start", target: "fetch" }] },
+      { workflowId: "wf" }
+    );
+    expect(check.unfinished.map((issue) => issue.message)).toContain("HTTP Request needs a URL.");
   });
 
   it("lets a draft with unfinished settings through and lists them", () => {
@@ -319,7 +359,7 @@ describe("checkBuilderDraft", () => {
     expect(config("sum").provider).toBeUndefined();
     expect(config("chat").baseUrl).toBe("http://localhost:1234/v1");
     expect(JSON.stringify(check.workflow)).not.toContain("elsewhere.example");
-    expect(check.notes.join(" ")).toMatch(/chat\.baseUrl/);
+    expect(check.notes.join(" ")).toMatch(/Left the model server address at its placeholder \(OpenAI[^:]*: Base URL\)/);
   });
 
   it("puts new nodes on the newer behaviours, as the editor does, and keeps a behaviour the model chose", () => {

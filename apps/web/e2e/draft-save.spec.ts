@@ -77,7 +77,7 @@ test.describe("editor drafts and run feedback", () => {
 
       const notice = page.getByTestId("draft-warnings");
       await expect(notice).toContainText("Unfinished draft");
-      await expect(notice).toContainText("HTTP Request node requires a non-empty urlTemplate.");
+      await expect(notice).toContainText("HTTP Request needs a URL.");
       // Nothing is published, so production would run this draft: its live triggers are paused.
       await expect(notice.getByTestId("live-triggers-paused")).toContainText("Live triggers");
 

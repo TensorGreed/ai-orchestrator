@@ -13,7 +13,12 @@ const BLANK_FIELDS: Readonly<Record<string, Readonly<Record<string, unknown>>>> 
   http_request: { urlTemplate: "" },
   set_node: { assignments: [{ key: "", valueTemplate: "", type: "auto" }] },
   filter_node: { conditions: [{ field: "", operator: "eq", value: "" }] },
-  loop_node: { inputKey: "" }
+  loop_node: { inputKey: "" },
+  // The tool's name, description and input are the person's to describe; the catalog's knowledge-base example stays a
+  // placeholder. An empty input schema takes no arguments until fields are added.
+  mcp_server_trigger: { toolName: "", toolDescription: "", inputSchema: { type: "object", properties: {} } },
+  human_approval: { approvalMessage: "" },
+  user_prompt: { text: "" }
 };
 
 /** Sample keys a new node leaves out: they only matter once another setting asks for them. */

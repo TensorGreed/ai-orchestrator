@@ -1091,7 +1091,8 @@ function TextAreaField({
   onChange,
   rows = 4,
   readOnly = false,
-  allowJsonFormat
+  allowJsonFormat,
+  placeholder
 }: {
   label: string;
   value: string;
@@ -1099,6 +1100,8 @@ function TextAreaField({
   rows?: number;
   readOnly?: boolean;
   allowJsonFormat?: boolean;
+  /** Grey example text shown while the field is empty. */
+  placeholder?: string;
 }) {
   const [formatError, setFormatError] = useState("");
   const showJsonFormat = !readOnly && (allowJsonFormat ?? shouldOfferJsonFormatting(label));
@@ -1140,6 +1143,7 @@ function TextAreaField({
         onBlur={autocomplete.close}
         rows={rows}
         readOnly={readOnly}
+        placeholder={placeholder}
       />
       {autocomplete.list}
       {formatError && <div className="cfg-field-error">{formatError}</div>}
@@ -4970,6 +4974,11 @@ export function NodeInspector({
             <strong>Test URL</strong>
           </div>
           <code>{`${method} ${testUrl}`}</code>
+          <div data-testid="webhook-test-url-note">
+            Runs the draft. Needs a signed-in session, or an API key, of someone who may edit this workflow
+            (in <code>Authorization: Bearer</code>, or <code>X-API-Key</code> when the webhook uses a bearer token).
+            {config.active === false ? " While the webhook is off it answers not found, as the production URL does." : ""}
+          </div>
           <div style={{ marginTop: "8px" }}>
             <strong>Production URL</strong>
           </div>
@@ -5063,7 +5072,7 @@ export function NodeInspector({
             [config.allowedIps, undefined, sampleConfig.allowedIps],
             [config.idempotencyEnabled, false, sampleConfig.idempotencyEnabled],
             [config.responseMode, "auto", sampleConfig.responseMode],
-            [config.responseCode, 200, sampleConfig.responseCode],
+            [config.responseCode, config.responseMode === "onReceived" ? 202 : 200],
             [config.responseBody, "", sampleConfig.responseBody]
           ])}
           defaultOpen={allowedIpsInvalid.length > 0 || (config.inputTrustFor !== undefined && triggerTrustState({ type: node.data.nodeType, config }) === "reset")}
@@ -5134,13 +5143,20 @@ export function NodeInspector({
             { value: "onReceived", label: "On Received (answer 202 at once, run in the background)" }
           ]}
         />
-        <NumberField
+        <OptionalNumberField
           label="Response Status Code"
-          value={toNumberValue(config.responseCode, 200)}
-          min={100}
+          value={typeof config.responseCode === "number" ? config.responseCode : undefined}
+          min={200}
           max={599}
           step={1}
-          onChange={(next) => setConfig((current) => ({ ...current, responseCode: next }))}
+          placeholder={toStringValue(config.responseMode) === "onReceived" ? "202" : "200"}
+          help="The status of a reply this webhook builds itself: On Received's acknowledgement, or the run's output when no Webhook Response node ran. A Webhook Response node's own status wins, and a failed run answers 400. Blank: 202 for On Received, else 200."
+          onChange={(next) =>
+            setConfig((current) => {
+              const { responseCode: _previous, ...rest } = current;
+              return next === undefined ? rest : { ...rest, responseCode: next };
+            })
+          }
         />
         <TextAreaField
           label="Response Body Override (optional)"
@@ -7301,6 +7317,7 @@ export function NodeInspector({
             value={toStringValue(config.text)}
             onChange={(next) => setConfig((current) => ({ ...current, text: next }))}
             rows={4}
+            placeholder={toStringValue(sampleConfig.text)}
           />
         );
       case "rag_retrieve":
@@ -7648,9 +7665,10 @@ export function NodeInspector({
           <>
             <TextAreaField
               label="Approval Message"
-              value={toStringValue(config.approvalMessage, "Approve this action?")}
+              value={toStringValue(config.approvalMessage)}
               onChange={(next) => setConfig((current) => ({ ...current, approvalMessage: next }))}
               rows={3}
+              placeholder={toStringValue(sampleConfig.approvalMessage, "Approve this action?")}
             />
             <NumberField
               label="Timeout (minutes)"
@@ -9992,6 +10010,7 @@ export function NodeInspector({
               value={toStringValue(config.toolDescription)}
               onChange={(next) => setConfig((current) => ({ ...current, toolDescription: next }))}
               rows={2}
+              placeholder={toStringValue(sampleConfig.toolDescription)}
             />
             <TextAreaField
               label="Input Schema (JSON)"

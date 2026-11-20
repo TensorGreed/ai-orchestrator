@@ -1181,7 +1181,7 @@ export const openApiSpec = {
       get: {
         tags: ["RBAC"],
         summary: "The workflows shared with you, in any project, with the access each one gives you",
-        responses: { "200": { description: "{ workflows: [{ id, name, projectId, updatedAt, accessLevel, effectiveAccess }] }" } }
+        responses: { "200": { description: "{ workflows: [{ id, name, projectId, updatedAt, accessLevel, effectiveAccess, shareOnly }] }" } }
       }
     },
     "/api/projects/{id}/shared-workflows": {
@@ -3577,7 +3577,8 @@ export const openApiSpec = {
             description:
               "Taken: `{ ok, accepted, executionId }` (inline: the run goes on in the background; queue dispatch: the queue took the job), `{ ok, duplicate }` for an event id already taken (no execution id), `{ ok, refused: \"budget\" }` for a used-up budget, or the url_verification challenge as text"
           },
-          "401": { description: "Missing or wrong Slack signature, or a timestamp outside the tolerance" },
+          "404": { description: "Plain `{ error: \"Not found\" }` for an unknown workflow id, a workflow without a Slack trigger, a trigger without its signing secret, or a missing or wrong signature (or a timestamp outside the tolerance). Once signed: `trigger_off` when the trigger is off" },
+          "409": { description: "Signed, but the workflow is deactivated or its version has unfinished settings" },
           "500": { description: "The run could not be started; Slack retries the event" },
           "503": { description: "The run queue is full, too many Slack runs are going on, or the same event is still being started; Slack retries the event" }
         }
@@ -3588,16 +3589,19 @@ export const openApiSpec = {
         tags: ["Triggers"],
         summary: "GitHub webhook endpoint (validates X-Hub-Signature-256)",
         parameters: [{ name: "workflowId", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Event processed" } }
+        responses: {
+          "200": { description: "Event processed" },
+          "404": { description: "Plain `{ error: \"Not found\" }` for anything GitHub did not sign with the trigger's secret (and for an unknown id or a trigger without a secret); once signed, `trigger_off` when the trigger is off" }
+        }
       }
     },
     "/webhook/{path}": {
-      get: { tags: ["Triggers"], summary: "Production webhook (any method)", parameters: [{ name: "path", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Workflow execution result" } } },
+      get: { tags: ["Triggers"], summary: "Production webhook (any method)", description: "A missing path or a method the path does not take answers a plain 404 that lists nothing, unless the caller is signed in (or sends an API key) and may run a workflow there.", parameters: [{ name: "path", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Workflow execution result" } } },
       post: { tags: ["Triggers"], summary: "Production webhook (any method)", parameters: [{ name: "path", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Workflow execution result" } } }
     },
     "/webhook-test/{path}": {
-      get: { tags: ["Triggers"], summary: "Test webhook (any method)", parameters: [{ name: "path", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Workflow execution result" } } },
-      post: { tags: ["Triggers"], summary: "Test webhook (any method)", parameters: [{ name: "path", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Workflow execution result" } } }
+      get: { tags: ["Triggers"], summary: "Test webhook (any method)", description: "Runs the draft. Needs a signed-in session or an API key (Authorization: Bearer, or X-API-Key) with edit access to the workflow; anyone else gets a plain 404. An operator who may only run the workflow gets 403. A webhook switched off answers 404 with code trigger_off.", parameters: [{ name: "path", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Workflow execution result" } } },
+      post: { tags: ["Triggers"], summary: "Test webhook (any method)", description: "Runs the draft. Needs a signed-in session or an API key (Authorization: Bearer, or X-API-Key) with edit access to the workflow; anyone else gets a plain 404. An operator who may only run the workflow gets 403. A webhook switched off answers 404 with code trigger_off.", parameters: [{ name: "path", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Workflow execution result" } } }
     },
 
     // ── MCP Server (exposed) ────────────────────────────────────────────────

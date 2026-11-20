@@ -30,6 +30,14 @@ describe("node credential specs", () => {
     }
   });
 
+  it("marks an app trigger's verifying secret required: its route refuses every call without it", () => {
+    for (const type of ["telegram_trigger", "stripe_webhook_trigger"]) {
+      const definition = nodeDefinitions.find((entry) => entry.type === type)!;
+      expect(definition.credentials?.[0], type).toMatchObject({ key: "signingSecretRef", required: true });
+      expect(definition.credentials?.[0]?.hint, type).toMatch(/^Required|Required:/);
+    }
+  });
+
   it("marks required credentials in the definition's required list", () => {
     const calendar = nodeDefinitions.find((entry) => entry.type === "google_calendar_create_event")!;
     expect(calendar.configSchema.required).toContain("secretRef");

@@ -33,6 +33,15 @@ describe("a node added in the editor starts with placeholders, not example value
     expect(newNodeConfig("merge_node", sample("merge_node"), { afterLoopBodyNode: true })).toEqual({ mode: "collect_loop_passes" });
   });
 
+  it("Expose as MCP Tool, Human Approval and User Prompt start without the catalog's example text", () => {
+    const tool = newNodeConfig("mcp_server_trigger", sample("mcp_server_trigger"), () => "abc123");
+    expect(tool).toMatchObject({ path: "helper-abc123", toolName: "", toolDescription: "", inputSchema: { type: "object", properties: {} }, authMode: "bearer" });
+    expect(newNodeConfig("human_approval", sample("human_approval"))).toEqual({ approvalMessage: "", timeoutMinutes: 60 });
+    expect(newNodeConfig("user_prompt", sample("user_prompt"))).toEqual({ text: "" });
+    // The catalog keeps them as examples (placeholders).
+    expect(sample("human_approval").approvalMessage).toBe("Approve before sending this response to the customer?");
+  });
+
   it("Schedule Trigger starts off, in the browser's time zone", () => {
     expect(newNodeConfig("schedule_trigger", sample("schedule_trigger"), { timeZone: "Europe/Lisbon" })).toEqual({
       cronExpression: "0 9 * * *",

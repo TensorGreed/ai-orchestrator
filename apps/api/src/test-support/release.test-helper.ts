@@ -16,6 +16,7 @@ import { SchedulerService } from "../services/scheduler-service.js";
 import { SecretService } from "../services/secret-service.js";
 import { WorkflowVersionService } from "../services/workflow-version-service.js";
 import { openTestStore } from "./test-store.js";
+import { webhookTestCookie } from "./webhook-test-caller.js";
 
 export interface ReleaseTestContext {
   app: FastifyInstance;
@@ -113,6 +114,6 @@ export async function productionHook(context: ReleaseTestContext, hookPath: stri
 }
 
 export async function testRouteHook(context: ReleaseTestContext, hookPath: string): Promise<{ status: number; output: unknown }> {
-  const response = await context.app.inject({ method: "POST", url: `/webhook-test/${hookPath}`, payload: {} });
+  const response = await context.app.inject({ method: "POST", url: `/webhook-test/${hookPath}`, headers: { cookie: await webhookTestCookie(context) }, payload: {} });
   return { status: response.statusCode, output: response.json<{ output?: unknown }>().output };
 }

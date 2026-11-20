@@ -298,7 +298,7 @@ import { registerGoldenSetFileRoutes } from "./golden-set-file-routes.js";
 import { registerUserInviteRoutes } from "./user-invite-routes.js";
 import { WORKFLOW_BUILDER_TRIGGER_TYPE, WORKFLOW_BUILDER_USAGE_LABEL, WORKFLOW_BUILDER_USAGE_WORKFLOW_ID, registerWorkflowBuilderRoutes } from "./workflow-builder-routes.js";
 import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
-import { LIVE_ENTRY_OFF_CODE, isLiveEntryOff, liveEntryOffMessage, publicEntryWarnings } from "@ai-orchestrator/shared";
+import { LIVE_ENTRY_OFF_CODE, isLiveEntryOff, liveEntryOffMessage, publicEntryWarnings, UNKNOWN_AUTH_MODE_CODE, unknownAuthMode, unknownAuthModeMessage } from "@ai-orchestrator/shared";
 import { envModelProviders } from "@ai-orchestrator/shared";
 import {
   CONTENT_FILTER_CODE,
@@ -1175,6 +1175,17 @@ function extractNodeOutputsFromResults(nodeResults: unknown): Record<string, unk
     outputs[nodeId] = result.output;
   }
   return outputs;
+}
+
+/**
+ * The Webhook Input's Response Status Code: the status of a reply the webhook builds itself (On Received's
+ * acknowledgement, a run's output when no Webhook Response node ran). Undefined when unset or not a code from 200 to
+ * 599: the reply keeps its default (202 for On Received, 200 otherwise). A Webhook Response node's own status wins, and
+ * a failed run answers 400.
+ */
+function webhookReplyStatus(config: Record<string, unknown>): number | undefined {
+  const value = typeof config.responseCode === "string" && config.responseCode.trim() ? Number(config.responseCode) : config.responseCode;
+  return typeof value === "number" && Number.isInteger(value) && value >= 200 && value <= 599 ? value : undefined;
 }
 
 function normalizeWebhookPath(value: unknown, fallback: string): string {
@@ -4988,6 +4999,21 @@ export async function createApp(
     }
     const target = await runAccess.project(user, workflow.projectId ?? existing?.projectId, "workflow:write");
     if (!target.ok) return target;
+    // A person share decides what its person has in the workflow's project: a workflow shared with people changes
+    // project only by an admin, or by someone who manages person shares in both projects (as a member).
+    const fromProject = existing?.projectId ?? DEFAULT_PROJECT_ID;
+    const toProject = workflow.projectId ?? existing?.projectId ?? DEFAULT_PROJECT_ID;
+    if (existing && fromProject !== toProject && user.role !== "admin" && (await store.listWorkflowUserShares(existing.id)).length > 0) {
+      const managesBoth =
+        (await rbacService.canAsMember(user, fromProject, "project:invite")) && (await rbacService.canAsMember(user, toProject, "project:invite"));
+      if (!managesBoth) {
+        return {
+          ok: false,
+          status: 403,
+          error: "This workflow is shared with people, so only an admin or a project admin of both projects moves it to another project."
+        };
+      }
+    }
     const placement = await workflowPlacementError(workflow, existing);
     if (placement) return { ok: false, status: 400, error: placement };
     // Phase 15.4 — a production path of a published or gated workflow cannot be taken over by another one.
@@ -6281,6 +6307,43 @@ export async function createApp(
     reply.code(refusal ? 409 : 404);
     return productionRefusalBody(refusal, "Workflow not found");
   };
+  /**
+   * An app trigger's route (Slack, GitHub, Stripe, Telegram, Discord): the workflow production would run (unfinished
+   * or deactivated included, so the caller can be checked first) and its trigger node; null when there is none. Until
+   * the provider's own signature or token is verified, every refusal is the same plain 404 (appTriggerNotFound), so the
+   * route never tells a caller which workflow ids exist or which triggers lack a secret.
+   */
+  const appTriggerTarget = async (workflowId: string, nodeType: string): Promise<{ workflow: Workflow; node: WorkflowNode; deactivated: boolean } | null> => {
+    const live = await productionTriggerWorkflow(workflowId);
+    const deactivated = live ? null : await releaseService.deactivatedProductionWorkflow(workflowId);
+    const workflow = live ?? deactivated;
+    const node = workflow?.nodes.find((entry) => entry.type === nodeType);
+    return workflow && node ? { workflow, node, deactivated: deactivated !== null } : null;
+  };
+  const appTriggerNotFound = (reply: FastifyReply): { error: string } => {
+    reply.code(404);
+    return { error: APP_TRIGGER_NOT_FOUND_MESSAGE };
+  };
+  /** After the provider's signature passed: why production does not take the call (deactivated, off, unfinished), or null. */
+  const appTriggerRefusal = async (
+    reply: FastifyReply,
+    target: { workflow: Workflow; node: WorkflowNode; deactivated: boolean }
+  ): Promise<{ error: string; code?: string } | null> => {
+    if (target.deactivated) {
+      reply.code(409);
+      return productionRefusalBody(DEACTIVATED_MESSAGE, APP_TRIGGER_NOT_FOUND_MESSAGE);
+    }
+    if (isLiveEntryOff(target.node)) {
+      reply.code(404);
+      return { error: liveEntryOffMessage(target.node.type), code: LIVE_ENTRY_OFF_CODE };
+    }
+    const paused = await releaseService.pausedRefusal(target.workflow);
+    if (paused) {
+      reply.code(409);
+      return { error: paused, code: "workflow_unfinished" };
+    }
+    return null;
+  };
   /** Phase 15.4 — the deactivated gated workflow whose published version has a node matching `matches`, for a "deactivated" answer. */
   const deactivatedMatch = async (matches: (workflow: Workflow) => boolean): Promise<Workflow | null> => {
     for (const summary of await store.listWorkflows()) {
@@ -6617,40 +6680,35 @@ export async function createApp(
     reply.code(code).send({ error: message });
   };
 
-  const requireRole = async (
-    request: {
-      cookies: Record<string, string | undefined>;
-      headers: Record<string, unknown>;
-      method?: string;
-      routeOptions?: { url?: string };
-    },
-    reply: FastifyReply,
-    allowedRoles: UserRole[]
-  ): Promise<SafeUser | null> => {
+  type CallerRequest = {
+    cookies: Record<string, string | undefined>;
+    headers: Record<string, unknown>;
+    method?: string;
+    routeOptions?: { url?: string };
+  };
+  type CallerCheck = { ok: true; user: SafeUser } | { ok: false; status: 401 | 403; body: Record<string, unknown>; clearCookie?: boolean };
+
+  /** requireRole's checks, answering instead of replying (a route that must not say why, such as /webhook-test/, uses it). */
+  const checkCaller = async (request: CallerRequest, allowedRoles: UserRole[]): Promise<CallerCheck> => {
     // An API key (Phase 5.1) or the session cookie; 13.2: resolved once per request through resolveRequestAuth.
     const credential = await resolveRequestCredential(request);
     const auth = credential.auth;
     if (!auth) {
       if (getSessionIdFromRequest(request)) {
-        clearSessionCookie(reply);
         // 13.2 — say why (idle, expired, evicted, admin, ...) so the studio can tell the user; nothing for an unknown ID.
         const reason = credential.auth === null ? credential.reason : undefined;
-        reply.code(401).send(!reason || reason === "invalid" ? { error: "Session expired or invalid" } : { error: "Session expired or invalid", reason });
-      } else {
-        deny(reply, 401, "Authentication required");
+        return { ok: false, status: 401, clearCookie: true, body: !reason || reason === "invalid" ? { error: "Session expired or invalid" } : { error: "Session expired or invalid", reason } };
       }
-      return null;
+      return { ok: false, status: 401, body: { error: "Authentication required" } };
     }
 
     // 13.2 — a key limited to projects calls only the routes that check projects (key-scopes.ts); the rest fail closed.
     if (auth.credential === "api_key" && !keyMayCallRoute(auth.keyScope, request.method, request.routeOptions?.url)) {
-      deny(reply, 403, "This API key is limited to projects and cannot call this route");
-      return null;
+      return { ok: false, status: 403, body: { error: "This API key is limited to projects and cannot call this route" } };
     }
     // 13.2 — a scoped key cannot change its owner's account security (MFA): that needs a session or an unscoped key.
     if (auth.credential === "api_key" && !keyMayManageAccount(auth.keyScope, request.method, request.routeOptions?.url)) {
-      deny(reply, 403, "A scoped API key cannot change its owner's account security; sign in, or use an unscoped key");
-      return null;
+      return { ok: false, status: 403, body: { error: "A scoped API key cannot change its owner's account security; sign in, or use an unscoped key" } };
     }
 
     // 13.2 — a personal key of an owner whose role requires MFA works only while the owner has MFA set up (the owner's
@@ -6659,11 +6717,14 @@ export async function createApp(
       const owner = await store.getUserById(auth.user.id);
       const ownerRole = owner ? safeUserRole(owner.role) : auth.user.role;
       if (mfaRequiredFor(mfaPolicy, ownerRole) && !(await mfaService.status(auth.user.id)).enabled) {
-        reply.code(403).send({
-          code: "mfa_enrollment_required",
-          error: "Your role requires multi-factor authentication: your API keys work again once you set up an authenticator app."
-        });
-        return null;
+        return {
+          ok: false,
+          status: 403,
+          body: {
+            code: "mfa_enrollment_required",
+            error: "Your role requires multi-factor authentication: your API keys work again once you set up an authenticator app."
+          }
+        };
       }
     }
 
@@ -6672,17 +6733,23 @@ export async function createApp(
     if (auth.credential === "session") {
       const gate = await sessionMfaGateFor(auth.user, auth.session);
       if (gate !== "none" && !mfaGateAllows(gate, requestMethodOf(request), requestRouteOf(request))) {
-        reply.code(403).send(MFA_GATE_ERRORS[gate]);
-        return null;
+        return { ok: false, status: 403, body: MFA_GATE_ERRORS[gate] as Record<string, unknown> };
       }
     }
 
     if (!hasRequiredRole(auth.user, allowedRoles)) {
-      deny(reply, 403, "Insufficient permissions");
-      return null;
+      return { ok: false, status: 403, body: { error: "Insufficient permissions" } };
     }
 
-    return auth.user;
+    return { ok: true, user: auth.user };
+  };
+
+  const requireRole = async (request: CallerRequest, reply: FastifyReply, allowedRoles: UserRole[]): Promise<SafeUser | null> => {
+    const checked = await checkCaller(request, allowedRoles);
+    if (checked.ok) return checked.user;
+    if (checked.clearCookie) clearSessionCookie(reply);
+    reply.code(checked.status).send(checked.body);
+    return null;
   };
 
   /**
@@ -10746,6 +10813,15 @@ export async function createApp(
     return { members: await mapAsync(members, async (member) => ({ ...member, email: (await store.getUserById(member.userId))?.email ?? null })) };
   });
 
+  /**
+   * Who adds, changes and removes a project's members: a membership that grants project:invite, or an admin (an
+   * admin's API key only inside its projects). Never the role `role` isolation lends a non-member.
+   */
+  const mayManageMembers = async (user: SafeUser, projectId: string): Promise<boolean> => {
+    if (user.projectScope && !user.projectScope.includes(projectId)) return false;
+    return user.role === "admin" || (await rbacService.canAsMember(user, projectId, "project:invite"));
+  };
+
   app.post<{ Params: { id: string }; Body: unknown }>("/api/projects/:id/members", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
@@ -10754,7 +10830,9 @@ export async function createApp(
       reply.code(404);
       return { error: "Project not found" };
     }
-    if (!await rbacService.can(user, project.id, "project:invite") && user.role !== "admin") {
+    // A membership that grants project:invite (or an admin): the role `role` isolation lends a non-member does not
+    // add people to a project, since a membership lifts what a person share limits someone to there.
+    if (!(await mayManageMembers(user, project.id))) {
       reply.code(403);
       return { error: "Insufficient permissions to manage members" };
     }
@@ -10770,10 +10848,26 @@ export async function createApp(
       return { error: parsed.data.email ? `No user with the email ${parsed.data.email}. Invite them first.` : "Target user does not exist" };
     }
     const memberUserId = targetUser.id;
+    // Nobody but an admin adds or changes their own membership: under role isolation a builder's role lends them
+    // project:invite in every project, and a membership of their own would lift the cap a person share puts on them.
+    if (memberUserId === user.id && user.role !== "admin") {
+      reply.code(403);
+      return { error: "You cannot add or change your own membership. Ask a project admin or an admin." };
+    }
     const role = parsed.data.role;
     if (!isProjectRole(role) && role !== "custom") {
       reply.code(400);
       return { error: "role must be project_admin, editor, viewer, or custom" };
+    }
+    // Nobody but an admin gives a role with a permission their own membership does not have, or changes the role of a
+    // member whose permissions their own membership lacks.
+    if (user.role !== "admin" && !(await rbacService.roleWithin(user, project.id, role as ProjectRole | "custom", parsed.data.customRoleId ?? null))) {
+      reply.code(403);
+      return { error: "You can only give a role whose permissions your own membership has." };
+    }
+    if (user.role !== "admin" && !(await rbacService.membershipWithin(user, project.id, memberUserId))) {
+      reply.code(403);
+      return { error: "You can only change a member whose permissions your own membership has." };
     }
     // 13.3 — a role that grants a deployment-wide permission (legal holds, data-subject requests) is an admin's to hand out.
     if (role === "custom" && parsed.data.customRoleId && user.role !== "admin" && (await rbacService.grantsDeploymentPermission(parsed.data.customRoleId))) {
@@ -10824,9 +10918,19 @@ export async function createApp(
         reply.code(404);
         return { error: "Project not found" };
       }
-      if (!await rbacService.can(user, project.id, "project:invite") && user.role !== "admin") {
+      if (!(await mayManageMembers(user, project.id))) {
         reply.code(403);
         return { error: "Insufficient permissions to remove members" };
+      }
+      // Nobody but an admin removes their own membership (it may be narrower than what their role would lend), or a
+      // membership with permissions their own lacks.
+      if (user.role !== "admin" && request.params.userId === user.id) {
+        reply.code(403);
+        return { error: "You cannot remove your own membership. Ask a project admin or an admin." };
+      }
+      if (user.role !== "admin" && !(await rbacService.membershipWithin(user, project.id, request.params.userId))) {
+        reply.code(403);
+        return { error: "You can only remove a member whose permissions your own membership has." };
       }
       if (!await requireStepUp(request, reply, "project_member.change")) return;
       // 13.3 — a membership that grants a deployment-wide permission (legal holds) is an admin's to take away.
@@ -10964,7 +11068,7 @@ export async function createApp(
     if (!access.ok) return denyRunAccess(reply, access);
     const workflow = access.workflow;
     // v78 — the people it is shared with are listed to whoever may manage its shares.
-    const manages = await rbacService.mayManageWorkflowShares(user, workflow);
+    const manages = await rbacService.mayManagePersonShares(user, workflow);
     return {
       shares: await rbacService.listWorkflowShares(workflow.id),
       ...(manages ? { userShares: await workflowUserShareViews(workflow.id) } : {})
@@ -11060,13 +11164,21 @@ export async function createApp(
       effectiveAccess: share.disabled || !share.role ? null : share.accessLevel === "execute" && roleMayRunWorkflows(share.role as UserRole) ? "execute" : "read"
     }));
 
-  const workflowShareManager = async (user: SafeUser, workflowId: string): Promise<{ ok: true; workflow: Workflow } | { ok: false; status: number; error: string }> => {
+  const workflowShareManager = async (
+    user: SafeUser,
+    workflowId: string,
+    people = false
+  ): Promise<{ ok: true; workflow: Workflow } | { ok: false; status: number; error: string }> => {
     // Unreadable reads as missing. A share is a membership for one workflow, so managing them takes what adding a
     // project member takes: project:invite on the owning project (and the same step-up for changes).
     const access = await runAccess.workflow(user, workflowId, "workflow:read");
     if (!access.ok) return access;
     if (!(await rbacService.mayManageWorkflowShares(user, access.workflow))) {
       return { ok: false, status: 403, error: "Only users who may invite members to the workflow's project can share it with people or other projects" };
+    }
+    // A person share decides what a non-member has in the project: only its members with project:invite (and admins).
+    if (people && !(await rbacService.mayManagePersonShares(user, access.workflow))) {
+      return { ok: false, status: 403, error: "Only members of the workflow's project who may invite members (and admins) can share it with people" };
     }
     return { ok: true, workflow: access.workflow };
   };
@@ -11077,17 +11189,19 @@ export async function createApp(
     if (!user) return;
     // One query with the workflow summaries; the same rules as rbacService.userShareAccess, without a read per row.
     const shared = await store.listWorkflowsSharedToUser(user.id);
-    const items = shared
-      .filter((share) => !user.projectScope || user.projectScope.includes(share.projectId))
-      .map((share) => ({
+    const visible = shared.filter((share) => !user.projectScope || user.projectScope.includes(share.projectId));
+    const items = (
+      await mapAsync(visible, async (share) => ({
         id: share.workflowId,
         name: share.name,
         projectId: share.projectId,
         updatedAt: share.updatedAt,
         accessLevel: share.accessLevel,
-        effectiveAccess: share.accessLevel === "execute" && roleMayRunWorkflows(user.role) ? ("execute" as const) : ("read" as const)
+        effectiveAccess: share.accessLevel === "execute" && roleMayRunWorkflows(user.role) ? ("execute" as const) : ("read" as const),
+        // The share is their only way in: read (or run), never change, delete, publish or share it (rbacService.shareIsOnlyWay).
+        shareOnly: await rbacService.shareIsOnlyWay(user, { id: share.workflowId, projectId: share.projectId })
       }))
-      .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+    ).sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
     return { workflows: items };
   });
 
@@ -11119,7 +11233,7 @@ export async function createApp(
   app.get<{ Params: { id: string } }>("/api/workflows/:id/user-shares", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const managed = await workflowShareManager(user, request.params.id);
+    const managed = await workflowShareManager(user, request.params.id, true);
     if (!managed.ok) return denyRunAccess(reply, managed);
     const workflow = managed.workflow;
     return { userShares: await workflowUserShareViews(workflow.id) };
@@ -11128,7 +11242,7 @@ export async function createApp(
   app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/user-shares", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const managed = await workflowShareManager(user, request.params.id);
+    const managed = await workflowShareManager(user, request.params.id, true);
     if (!managed.ok) return denyRunAccess(reply, managed);
     if (!await requireStepUp(request, reply, "project_member.change")) return;
     const workflow = managed.workflow;
@@ -11169,7 +11283,7 @@ export async function createApp(
   app.delete<{ Params: { id: string; userId: string } }>("/api/workflows/:id/user-shares/:userId", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const managed = await workflowShareManager(user, request.params.id);
+    const managed = await workflowShareManager(user, request.params.id, true);
     if (!managed.ok) return denyRunAccess(reply, managed);
     if (!await requireStepUp(request, reply, "project_member.change")) return;
     const workflow = managed.workflow;
@@ -12893,46 +13007,33 @@ export async function createApp(
     "/api/webhooks/slack/:workflowId",
     { config: { rawBody: true } },
     async (request, reply) => {
-      const workflow = await productionWorkflow(request.params.workflowId);
-      if (!workflow) return await productionMissing(reply, request.params.workflowId);
-      const slackNode = workflow.nodes.find((n) => n.type === "slack_trigger");
-      if (!slackNode) {
-        reply.code(400);
-        return { error: "Workflow has no slack_trigger node" };
-      }
+      const target = await appTriggerTarget(request.params.workflowId, "slack_trigger");
+      if (!target) return appTriggerNotFound(reply);
+      const { workflow, node: slackNode } = target;
       const rawBody = typeof request.rawBody === "string" ? request.rawBody : "";
 
       const secretRef = toSecretReference((slackNode.config as Record<string, unknown>).signingSecretRef);
       const signingSecret = await secretService.resolveSecret(secretRef);
-      if (!signingSecret) {
-        reply.code(500);
-        return { error: "Slack signing secret not configured" };
-      }
+      if (!signingSecret) return appTriggerNotFound(reply);
       const ts = getHeaderValue(request.headers, "x-slack-request-timestamp");
       const sig = getHeaderValue(request.headers, "x-slack-signature");
-      if (!ts || !sig) {
-        reply.code(401);
-        return { error: "Missing Slack signature headers" };
-      }
+      if (!ts || !sig) return appTriggerNotFound(reply);
       const tsMs = Number(ts) * 1000;
       const tolerance = Number((slackNode.config as Record<string, unknown>).replayToleranceSeconds ?? 300) * 1000;
-      if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > tolerance) {
-        reply.code(401);
-        return { error: "Slack timestamp outside tolerance" };
-      }
+      if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > tolerance) return appTriggerNotFound(reply);
       const basestring = `v0:${ts}:${rawBody}`;
       const expected = `v0=${crypto.createHmac("sha256", signingSecret).update(basestring).digest("hex")}`;
-      if (!safeEqualSecret(expected, sig)) {
-        reply.code(401);
-        return { error: "Slack signature mismatch" };
-      }
+      if (!safeEqualSecret(expected, sig)) return appTriggerNotFound(reply);
 
-      // URL verification challenge handshake.
+      // URL verification challenge handshake: answered for a signed request even while the trigger is off, so the
+      // Request URL can be set up before it is turned on (it starts no run).
       const body = request.body as Record<string, unknown> | undefined;
       if (body && body.type === "url_verification" && typeof body.challenge === "string") {
         reply.type("text/plain");
         return body.challenge;
       }
+      const refused = await appTriggerRefusal(reply, target);
+      if (refused) return refused;
 
       // A retry of an event already taken: Slack resends the same event_id (with X-Slack-Retry-Num) when the first answer
       // was late. Without an event_id, a retry is still one Slack says it sent before.
@@ -13011,29 +13112,26 @@ export async function createApp(
     "/api/webhooks/github/:workflowId",
     { config: { rawBody: true } },
     async (request, reply) => {
-      const workflow = await productionWorkflow(request.params.workflowId);
-      if (!workflow) return await productionMissing(reply, request.params.workflowId);
-      const ghNode = workflow.nodes.find((n) => n.type === "github_webhook_trigger");
-      if (!ghNode) {
-        reply.code(400);
-        return { error: "Workflow has no github_webhook_trigger node" };
-      }
+      const target = await appTriggerTarget(request.params.workflowId, "github_webhook_trigger");
+      if (!target) return appTriggerNotFound(reply);
+      const { workflow, node: ghNode } = target;
       const rawBody = typeof request.rawBody === "string" ? request.rawBody : "";
       const secretRef = toSecretReference((ghNode.config as Record<string, unknown>).secretRef);
       const secret = await secretService.resolveSecret(secretRef);
-      if (!secret) {
-        reply.code(500);
-        return { error: "GitHub webhook secret not configured" };
-      }
+      if (!secret) return appTriggerNotFound(reply);
       const sig = getHeaderValue(request.headers, "x-hub-signature-256");
-      if (!sig) {
-        reply.code(401);
-        return { error: "Missing X-Hub-Signature-256 header" };
-      }
+      if (!sig) return appTriggerNotFound(reply);
       const expected = `sha256=${crypto.createHmac("sha256", secret).update(rawBody).digest("hex")}`;
-      if (!safeEqualSecret(expected, sig)) {
-        reply.code(401);
-        return { error: "GitHub signature mismatch" };
+      if (!safeEqualSecret(expected, sig)) return appTriggerNotFound(reply);
+      const refused = await appTriggerRefusal(reply, target);
+      if (refused) {
+        // GitHub's ping (sent when the webhook is added) is answered even while production refuses the trigger, so the
+        // webhook can be set up before it is turned on; it starts no run.
+        if (getHeaderValue(request.headers, "x-github-event") === "ping") {
+          reply.code(200);
+          return { ok: true, ping: true };
+        }
+        return refused;
       }
       // A redelivery (the same X-GitHub-Delivery) of a delivery already taken starts no second run.
       const deliveryId = getHeaderValue(request.headers, "x-github-delivery");
@@ -13079,44 +13177,27 @@ export async function createApp(
     "/api/webhooks/stripe/:workflowId",
     { config: { rawBody: true } },
     async (request, reply) => {
-      const workflow = await productionWorkflow(request.params.workflowId);
-      if (!workflow) return await productionMissing(reply, request.params.workflowId);
-      const stripeNode = workflow.nodes.find((n) => n.type === "stripe_webhook_trigger");
-      if (!stripeNode) {
-        reply.code(400);
-        return { error: "Workflow has no stripe_webhook_trigger node" };
-      }
+      const target = await appTriggerTarget(request.params.workflowId, "stripe_webhook_trigger");
+      if (!target) return appTriggerNotFound(reply);
+      const { workflow, node: stripeNode } = target;
       const rawBody = getRawRequestBody(request);
       const secretRef = toSecretReference((stripeNode.config as Record<string, unknown>).signingSecretRef);
       const signingSecret = await secretService.resolveSecret(secretRef);
-      if (!signingSecret) {
-        reply.code(500);
-        return { error: "Stripe signing secret not configured" };
-      }
+      if (!signingSecret) return appTriggerNotFound(reply);
       const sigHeader = getHeaderValue(request.headers, "stripe-signature");
-      if (!sigHeader) {
-        reply.code(401);
-        return { error: "Missing Stripe-Signature header" };
-      }
+      if (!sigHeader) return appTriggerNotFound(reply);
       const parts = sigHeader.split(",").map((p) => p.trim());
       const ts = parts.find((p) => p.startsWith("t="))?.slice(2) ?? "";
       const v1Signatures = parts.filter((p) => p.startsWith("v1=")).map((p) => p.slice(3));
-      if (!ts || v1Signatures.length === 0) {
-        reply.code(401);
-        return { error: "Malformed Stripe-Signature header" };
-      }
+      if (!ts || v1Signatures.length === 0) return appTriggerNotFound(reply);
       const tsMs = Number(ts) * 1000;
       const tolerance = Number((stripeNode.config as Record<string, unknown>).replayToleranceSeconds ?? 300) * 1000;
-      if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > tolerance) {
-        reply.code(401);
-        return { error: "Stripe timestamp outside tolerance" };
-      }
+      if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > tolerance) return appTriggerNotFound(reply);
       const expected = crypto.createHmac("sha256", signingSecret).update(`${ts}.${rawBody}`).digest("hex");
       const matches = v1Signatures.some((sig) => safeEqualSecret(expected, sig));
-      if (!matches) {
-        reply.code(401);
-        return { error: "Stripe signature mismatch" };
-      }
+      if (!matches) return appTriggerNotFound(reply);
+      const refused = await appTriggerRefusal(reply, target);
+      if (refused) return refused;
 
       const body = request.body as Record<string, unknown> | undefined;
       const executionId = crypto.randomUUID();
@@ -13140,27 +13221,22 @@ export async function createApp(
     }
   );
 
-  // Phase 3.2 — Telegram webhook. Bot API sends X-Telegram-Bot-Api-Secret-Token if configured on setWebhook.
+  // Phase 3.2 — Telegram webhook. The Bot API sends X-Telegram-Bot-Api-Secret-Token when setWebhook was given one; the
+  // trigger needs that token set and refuses every call without it (as Slack, GitHub, Stripe and Discord do).
   app.post<{ Params: { workflowId: string }; Body: unknown }>(
     "/api/webhooks/telegram/:workflowId",
     { config: { rawBody: true } },
     async (request, reply) => {
-      const workflow = await productionWorkflow(request.params.workflowId);
-      if (!workflow) return await productionMissing(reply, request.params.workflowId);
-      const tgNode = workflow.nodes.find((n) => n.type === "telegram_trigger");
-      if (!tgNode) {
-        reply.code(400);
-        return { error: "Workflow has no telegram_trigger node" };
-      }
+      const target = await appTriggerTarget(request.params.workflowId, "telegram_trigger");
+      if (!target) return appTriggerNotFound(reply);
+      const { workflow, node: tgNode } = target;
       const secretRef = toSecretReference((tgNode.config as Record<string, unknown>).signingSecretRef);
       const configuredSecret = await secretService.resolveSecret(secretRef);
-      if (configuredSecret) {
-        const headerValue = getHeaderValue(request.headers, "x-telegram-bot-api-secret-token");
-        if (!headerValue || !safeEqualSecret(configuredSecret, headerValue)) {
-          reply.code(401);
-          return { error: "Telegram secret token mismatch" };
-        }
-      }
+      if (!configuredSecret) return appTriggerNotFound(reply);
+      const headerValue = getHeaderValue(request.headers, "x-telegram-bot-api-secret-token");
+      if (!headerValue || !safeEqualSecret(configuredSecret, headerValue)) return appTriggerNotFound(reply);
+      const refused = await appTriggerRefusal(reply, target);
+      if (refused) return refused;
 
       const body = request.body as Record<string, unknown> | undefined;
       const executionId = crypto.randomUUID();
@@ -13189,26 +13265,23 @@ export async function createApp(
     "/api/webhooks/discord/:workflowId",
     { config: { rawBody: true } },
     async (request, reply) => {
-      const workflow = await productionWorkflow(request.params.workflowId);
-      if (!workflow) return await productionMissing(reply, request.params.workflowId);
-      const dcNode = workflow.nodes.find((n) => n.type === "discord_trigger");
-      if (!dcNode) {
-        reply.code(400);
-        return { error: "Workflow has no discord_trigger node" };
-      }
+      // Discord requires 401 for a request whose signature does not check out (it probes the endpoint with bad ones), so
+      // this route answers every unverified call, an unknown workflow id included, with the same plain 401.
+      const unverified = () => {
+        reply.code(401);
+        return { error: DISCORD_UNVERIFIED_MESSAGE };
+      };
+      const target = await appTriggerTarget(request.params.workflowId, "discord_trigger");
+      if (!target) return unverified();
+      const { workflow, node: dcNode } = target;
       const rawBody = getRawRequestBody(request);
       const nodeConfig = dcNode.config as Record<string, unknown>;
       const publicKeyHex = typeof nodeConfig.publicKey === "string" ? nodeConfig.publicKey.trim() : "";
-      if (!publicKeyHex) {
-        reply.code(500);
-        return { error: "Discord publicKey not configured" };
-      }
+      if (!publicKeyHex) return unverified();
       const signature = getHeaderValue(request.headers, "x-signature-ed25519");
       const timestamp = getHeaderValue(request.headers, "x-signature-timestamp");
-      if (!signature || !timestamp) {
-        reply.code(401);
-        return { error: "Missing Discord signature headers" };
-      }
+      if (!signature || !timestamp) return unverified();
+      let verified = false;
       try {
         const publicKey = Buffer.from(publicKeyHex, "hex");
         const sig = Buffer.from(signature, "hex");
@@ -13221,21 +13294,19 @@ export async function createApp(
           format: "der",
           type: "spki"
         });
-        const verified = crypto.verify(null, message, keyObject, sig);
-        if (!verified) {
-          reply.code(401);
-          return { error: "Discord signature mismatch" };
-        }
-      } catch (err) {
-        reply.code(401);
-        return { error: `Discord signature verification failed: ${err instanceof Error ? err.message : String(err)}` };
+        verified = crypto.verify(null, message, keyObject, sig);
+      } catch {
+        verified = false;
       }
+      if (!verified) return unverified();
 
       const body = request.body as Record<string, unknown> | undefined;
-      // Discord interactions ping — must reply with type=1 immediately.
+      // Discord interactions ping — must reply with type=1 immediately (even while the trigger is off: it starts no run).
       if (body && body.type === 1) {
         return { type: 1 };
       }
+      const refused = await appTriggerRefusal(reply, target);
+      if (refused) return refused;
       const executionId = crypto.randomUUID();
       const result = await runDispatcher.run(
         {
@@ -13382,17 +13453,26 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     "/api/forms/:path",
     async (request, reply) => {
       const found = await findFormWorkflow(request.params.path);
+      // Why a form takes nothing (deactivated, switched off) is told only to a signed-in editor of its workflow; anyone
+      // else gets the page a missing form gets.
       if (!found) {
         const deactivated = await deactivatedMatch((workflow) => formNodeFor(workflow, request.params.path) !== null);
-        reply.code(deactivated ? 409 : 404);
+        const tell = deactivated !== null && (await signedInEditorOf(request, deactivated.id));
+        reply.code(tell ? 409 : 404);
         reply.type("text/html");
-        return deactivated ? `<h1>${escapeHtml(DEACTIVATED_MESSAGE)}</h1>` : "<h1>Form not found</h1>";
+        return tell ? `<h1>${escapeHtml(DEACTIVATED_MESSAGE)}</h1>` : "<h1>Form not found</h1>";
       }
       const cfg = asRecord(found.node.config);
       if (isLiveEntryOff(found.node)) {
         reply.code(404);
         reply.type("text/html");
-        return `<h1>${escapeHtml(liveEntryOffMessage("form_trigger"))}</h1>`;
+        return (await signedInEditorOf(request, found.workflow.id)) ? `<h1>${escapeHtml(liveEntryOffMessage("form_trigger"))}</h1>` : "<h1>Form not found</h1>";
+      }
+      const unknownFormMode = unknownAuthMode(found.node);
+      if (unknownFormMode !== null) {
+        reply.code(500);
+        reply.type("text/html");
+        return `<h1>${escapeHtml(unknownAuthModeMessage(unknownFormMode))}</h1>`;
       }
       if (cfg.authMode === "session") {
         const user = await requireRole(request, reply, ["viewer"]);
@@ -13416,13 +13496,20 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const found = await findFormWorkflow(request.params.path);
       if (!found) {
         const deactivated = await deactivatedMatch((workflow) => formNodeFor(workflow, request.params.path) !== null);
-        reply.code(deactivated ? 409 : 404);
-        return { error: deactivated ? DEACTIVATED_MESSAGE : "Form not found" };
+        const tell = deactivated !== null && (await signedInEditorOf(request, deactivated.id));
+        reply.code(tell ? 409 : 404);
+        return { error: tell ? DEACTIVATED_MESSAGE : "Form not found" };
       }
       const cfg = asRecord(found.node.config);
       if (isLiveEntryOff(found.node)) {
         reply.code(404);
+        if (!(await signedInEditorOf(request, found.workflow.id))) return { error: "Form not found" };
         return { error: liveEntryOffMessage("form_trigger"), code: LIVE_ENTRY_OFF_CODE };
+      }
+      const unknownFormMode = unknownAuthMode(found.node);
+      if (unknownFormMode !== null) {
+        reply.code(500);
+        return { error: unknownAuthModeMessage(unknownFormMode), code: UNKNOWN_AUTH_MODE_CODE };
       }
       // A signed-in submission is the submitter's own run, kept to their sessions where theirs are kept apart.
       let submitter: { triggeredByUserId?: string; sessionOwner?: string } = {};
@@ -13434,9 +13521,14 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         if (!access.ok) return denyRunAccess(reply, access);
         submitter = { triggeredByUserId: user.id, ...await sessionOwnerOptionFor(user, found.workflow) };
       }
-      // Production's version has unfinished settings: the form still shows, a submission starts no run.
+      // Production's version has unfinished settings: the form still shows, a submission starts no run. On an open form
+      // only a signed-in editor is told why (a signed-in form's submitter already passed its check).
       const paused = await releaseService.pausedRefusal(found.workflow);
       if (paused) {
+        if (cfg.authMode !== "session" && !(await signedInEditorOf(request, found.workflow.id))) {
+          reply.code(404);
+          return { error: "Form not found" };
+        }
         reply.code(409);
         return { error: paused, code: "workflow_unfinished" };
       }
@@ -13480,17 +13572,28 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     "/api/chat/:workflowId",
     async (request, reply) => {
       const workflow = await productionWorkflow(request.params.workflowId);
-      if (!workflow) return await productionMissing(reply, request.params.workflowId);
-      const chatNode = workflow.nodes.find((n) => n.type === "chat_trigger");
-      if (!chatNode) {
-        reply.code(400);
-        return { error: "Workflow has no chat_trigger node" };
-      }
-      if (isLiveEntryOff(chatNode)) {
+      const chatNode = workflow?.nodes.find((n) => n.type === "chat_trigger");
+      // Why a workflow takes no chat (missing, deactivated, unfinished, no Chat trigger, switched off) is told only to a
+      // signed-in editor of it; anyone else gets one plain 404, so the route never says which workflow ids exist.
+      if (!workflow || !chatNode || isLiveEntryOff(chatNode)) {
+        if (!(await signedInEditorOf(request, request.params.workflowId))) {
+          reply.code(404);
+          return { error: APP_TRIGGER_NOT_FOUND_MESSAGE };
+        }
+        if (!workflow) return await productionMissing(reply, request.params.workflowId);
+        if (!chatNode) {
+          reply.code(400);
+          return { error: "Workflow has no chat_trigger node" };
+        }
         reply.code(404);
         return { error: liveEntryOffMessage("chat_trigger"), code: LIVE_ENTRY_OFF_CODE };
       }
       const cfg = asRecord(chatNode.config);
+      const unknownChatMode = unknownAuthMode(chatNode);
+      if (unknownChatMode !== null) {
+        reply.code(500);
+        return { error: unknownAuthModeMessage(unknownChatMode), code: UNKNOWN_AUTH_MODE_CODE };
+      }
       const authMode = typeof cfg.authMode === "string" ? cfg.authMode : "public";
       // A signed-in chat by a viewer, an operator or a share-only reader keeps its session memory to that person.
       let chatSessionOwner: { sessionOwner?: string; triggeredByUserId?: string } = {};
@@ -13591,25 +13694,29 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     return null;
   };
   /** Phase 15.4 — the answer when no active workflow serves an MCP trigger path: deactivated (409) or not found (404). */
-  const mcpServerMissing = async (reply: FastifyReply, p: string): Promise<{ error: string }> => {
+  /** Only a signed-in editor of the workflow is told it is deactivated; anyone else gets the plain 404. */
+  const mcpServerMissing = async (request: FastifyRequest, reply: FastifyReply, p: string): Promise<{ error: string }> => {
     const deactivated = await deactivatedMatch((workflow) => mcpServerNodeFor(workflow, p) !== null);
-    reply.code(deactivated ? 409 : 404);
-    return { error: deactivated ? DEACTIVATED_MESSAGE : "MCP server not found" };
+    const tell = deactivated !== null && (await signedInEditorOf(request, deactivated.id));
+    reply.code(tell ? 409 : 404);
+    return { error: tell ? DEACTIVATED_MESSAGE : "MCP server not found" };
   };
 
-  /** An MCP trigger switched off: no manifest and no calls until it is turned on. */
-  const mcpServerOff = (reply: FastifyReply): { error: string; code: string } => {
+  /** An MCP trigger switched off: no manifest and no calls until it is turned on. Only its editors are told why. */
+  const mcpServerOff = async (request: FastifyRequest, reply: FastifyReply, workflowId: string): Promise<{ error: string; code?: string }> => {
     reply.code(404);
+    if (!(await signedInEditorOf(request, workflowId))) return { error: "MCP server not found" };
     return { error: liveEntryOffMessage("mcp_server_trigger"), code: LIVE_ENTRY_OFF_CODE };
   };
 
   app.get<{ Params: { path: string } }>("/api/mcp-server/:path/manifest", async (request, reply) => {
     const found = await findMcpServerWorkflow(request.params.path);
-    if (!found) return await mcpServerMissing(reply, request.params.path);
-    if (isLiveEntryOff(found.node)) return mcpServerOff(reply);
+    if (!found) return await mcpServerMissing(request, reply, request.params.path);
+    if (isLiveEntryOff(found.node)) return await mcpServerOff(request, reply, found.workflow.id);
     const cfg = asRecord(found.node.config);
     return {
-      name: cfg.toolName ?? "",
+      // A tool left unnamed is named by its node id, as the MCP gateway names it.
+      name: typeof cfg.toolName === "string" && cfg.toolName.trim() ? cfg.toolName.trim() : found.node.id,
       description: cfg.toolDescription ?? "",
       inputSchema: cfg.inputSchema ?? { type: "object" }
     };
@@ -13619,9 +13726,14 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     "/api/mcp-server/:path/invoke",
     async (request, reply) => {
       const found = await findMcpServerWorkflow(request.params.path);
-      if (!found) return await mcpServerMissing(reply, request.params.path);
-      if (isLiveEntryOff(found.node)) return mcpServerOff(reply);
+      if (!found) return await mcpServerMissing(request, reply, request.params.path);
+      if (isLiveEntryOff(found.node)) return await mcpServerOff(request, reply, found.workflow.id);
       const cfg = asRecord(found.node.config);
+      const unknownToolMode = unknownAuthMode(found.node);
+      if (unknownToolMode !== null) {
+        reply.code(500);
+        return { error: unknownAuthModeMessage(unknownToolMode), code: UNKNOWN_AUTH_MODE_CODE };
+      }
       if (cfg.authMode === "bearer") {
         // A new trigger asks for a token before its secret is picked: every call is refused, as an unauthorised one.
         if (typeof asRecord(cfg.secretRef).secretId !== "string" || !String(asRecord(cfg.secretRef).secretId).trim()) {
@@ -13640,9 +13752,14 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           return { error: "Invalid bearer token" };
         }
       }
-      // Production's version has unfinished settings: the tool is listed, a call starts no run.
+      // Production's version has unfinished settings: the tool is listed, a call starts no run. On an open tool only a
+      // signed-in editor is told why; a bearer caller already passed the token check.
       const paused = await releaseService.pausedRefusal(found.workflow);
       if (paused) {
+        if (cfg.authMode !== "bearer" && !(await signedInEditorOf(request, found.workflow.id))) {
+          reply.code(404);
+          return { error: "MCP server not found" };
+        }
         reply.code(409);
         return { error: paused, code: "workflow_unfinished" };
       }
@@ -14060,6 +14177,75 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }
   });
 
+  /** What an app trigger route answers to anything but a verified call to a live trigger (see appTriggerTarget). */
+const APP_TRIGGER_NOT_FOUND_MESSAGE = "Not found";
+/** The Discord route's answer to every call it could not verify (Discord expects 401 there). */
+const DISCORD_UNVERIFIED_MESSAGE = "Invalid request signature";
+const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and method";
+  const WEBHOOK_TEST_DRAFT_MESSAGE =
+    "The test URL runs the draft, which needs a builder role and edit access to the workflow. Call the webhook's own URL to run the released version.";
+  /**
+   * Who calls /webhook-test/: a signed-in session, or an API key in `Authorization: Bearer` or in `X-API-Key` (for a
+   * webhook whose own bearer token takes the Authorization header). Null for anyone else, for a key limited to
+   * projects, and for a session call another site started (`Sec-Fetch-Site: cross-site`), so a link elsewhere cannot run
+   * a draft as the person who clicks it.
+   */
+  /**
+   * Whether a call that carries the session cookie came from the studio, not from another site's page (a link or a
+   * form there sends the cookie too). The page's origin, when the browser names it (Origin, else Referer), must be
+   * this server's or a WEB_ORIGIN; otherwise Sec-Fetch-Site must say same-origin or none (typed in the address bar).
+   * A client that sends none of these headers (curl, a script) is not a browser page and is let through.
+   */
+  const sessionCallFromStudio = (request: FastifyRequest): boolean => {
+    const headers = request.headers as Record<string, unknown>;
+    const ownOrigin = `${request.protocol}://${String(request.headers.host ?? "")}`;
+    const originOf = (value: string): string | null => {
+      if (!value) return null;
+      if (value === "null") return "null";
+      try {
+        return new URL(value).origin;
+      } catch {
+        return "null";
+      }
+    };
+    const pageOrigin = originOf(getHeaderValue(headers, "origin")) ?? originOf(getHeaderValue(headers, "referer"));
+    if (pageOrigin !== null) {
+      if (allowedOrigins.has(pageOrigin)) return true;
+      // This server's own page: the same host (the scheme may differ behind a proxy that ends TLS).
+      try {
+        return pageOrigin !== "null" && new URL(pageOrigin).host === new URL(ownOrigin).host;
+      } catch {
+        return false;
+      }
+    }
+    const site = getHeaderValue(headers, "sec-fetch-site");
+    return site === "" || site === "same-origin" || site === "none";
+  };
+
+  const webhookTestCaller = async (request: FastifyRequest): Promise<SafeUser | null> => {
+    const headers = request.headers as Record<string, unknown>;
+    const headerKey = getHeaderValue(headers, "x-api-key");
+    const caller: CallerRequest = headerKey
+      ? { cookies: {}, headers: { authorization: `Bearer ${headerKey}` }, method: request.method, routeOptions: { url: request.routeOptions?.url } }
+      : (request as unknown as CallerRequest);
+    const checked = await checkCaller(caller, ["operator"]);
+    if (!checked.ok) return null;
+    const viaSession = sessionService.getRequestAuth(caller)?.credential === "session";
+    if (viaSession && !sessionCallFromStudio(request)) return null;
+    return checked.user;
+  };
+
+  /**
+   * Whether the call comes from a signed-in person (a studio session or an API key) who may edit the workflow: only
+   * they are told why a production entry point takes no call (missing, deactivated, switched off).
+   */
+  const signedInEditorOf = async (request: FastifyRequest, workflowId: string): Promise<boolean> => {
+    const caller = await webhookTestCaller(request);
+    if (!caller) return false;
+    const editedWorkflow = await store.getWorkflow(workflowId);
+    return editedWorkflow ? await runAccess.mayEdit(caller, editedWorkflow) : false;
+  };
+
   const registerConfiguredWebhookRoute = (routePath: "/webhook/:path" | "/webhook-test/:path") => {
     const isTestRoute = routePath.startsWith("/webhook-test");
     // Phase 15.4 — /webhook/ is production traffic (the published version when there is one); /webhook-test/ runs the draft.
@@ -14076,7 +14262,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
         reply.header("Access-Control-Allow-Methods", "DELETE, GET, OPTIONS, PATCH, POST, PUT");
         reply.header(
           "Access-Control-Allow-Headers",
-          "content-type,authorization,x-webhook-signature,x-webhook-timestamp,idempotency-key"
+          `content-type,authorization,x-webhook-signature,x-webhook-timestamp,idempotency-key${isTestRoute ? ",x-api-key" : ""}`
         );
 
         if (request.method === "OPTIONS") {
@@ -14084,18 +14270,40 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           return null;
         }
 
-        const match = await selectWebhookByPath(store, request.params.path, request.method, () => true, loadForRoute);
+        // The test URL runs the draft: only for a signed-in person or an API key that may run the workflow (and edit it,
+        // below). Anyone else gets the answer a missing path gets, which lists nothing.
+        const testCaller = isTestRoute ? await webhookTestCaller(request) : null;
+        if (isTestRoute && !testCaller) {
+          reply.code(404);
+          return { error: NO_WEBHOOK_MATCH_MESSAGE };
+        }
+        const callerMayRun = async (workflow: Workflow) =>
+          !testCaller || (await runAccess.workflow(testCaller, workflow.id, "workflow:execute")).ok;
+
+        const match = await selectWebhookByPath(store, request.params.path, request.method, callerMayRun, loadForRoute);
         if (!match) {
-          // Phase 15.4 — a deactivated gated workflow on this path: say so rather than "not found".
+          // Phase 15.4 — a deactivated gated workflow on this path: say so rather than "not found", to its signed-in
+          // editors only (anyone else gets the answer a missing path gets).
           if (!isTestRoute) {
             const wanted = normalizeWebhookPath(request.params.path, "").toLowerCase();
             const deactivated = await deactivatedMatch((workflow) => listWebhookEndpoints(workflow).some((endpoint) => endpoint.path.toLowerCase() === wanted));
-            if (deactivated) {
+            if (deactivated && (await signedInEditorOf(request, deactivated.id))) {
               reply.code(409);
               return { error: DEACTIVATED_MESSAGE, path: request.params.path };
             }
           }
-          const pathMatches = await listWebhookEndpointMatchesByPath(store, request.params.path, loadForRoute, !isTestRoute);
+          // Production: only a signed-in person (or an API key) who may run a workflow on this path is told more than
+          // the plain 404 (the methods it takes, the endpoints of that method); anyone else learns nothing, not even
+          // that the path exists with another method.
+          const detailCaller = isTestRoute ? testCaller : await webhookTestCaller(request);
+          if (!detailCaller) {
+            reply.code(404);
+            return { error: NO_WEBHOOK_MATCH_MESSAGE };
+          }
+          const pathMatches = await filterAsync(
+            await listWebhookEndpointMatchesByPath(store, request.params.path, loadForRoute, !isTestRoute),
+            async (entry) => (await runAccess.workflow(detailCaller, entry.workflowId, "workflow:execute")).ok
+          );
           if (pathMatches.length > 0) {
             const allowedMethods = [...new Set(pathMatches.map((entry) => entry.method))];
             reply.code(405);
@@ -14108,11 +14316,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
               matches: pathMatches
             };
           }
-          const allEndpoints = await listAllWebhookEndpoints(store, loadForRoute, !isTestRoute);
-          const methodMatches = allEndpoints.filter((entry) => entry.method === request.method).slice(0, 20);
           reply.code(404);
+          if (isTestRoute) return { error: NO_WEBHOOK_MATCH_MESSAGE };
+          const allEndpoints = await filterAsync(
+            await listAllWebhookEndpoints(store, loadForRoute, true),
+            async (entry) => entry.method === request.method && (await runAccess.workflow(detailCaller, entry.workflowId, "workflow:execute")).ok
+          );
+          const methodMatches = allEndpoints.slice(0, 20);
           return {
-            error: "No webhook endpoint matches this path and method",
+            error: NO_WEBHOOK_MATCH_MESSAGE,
             path: request.params.path,
             method: request.method,
             hint: "Ensure workflow is saved and webhook node path/method match this request.",
@@ -14120,11 +14332,44 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           };
         }
 
-        // A webhook switched off (a starter's, until its owner turns it on) takes no production calls; /webhook-test/ and
-        // the editor's runs still work.
-        if (!isTestRoute && match.endpoint.config.active === false) {
+        // A webhook switched off (a starter's, until its owner turns it on) takes no calls on its URL or its test URL;
+        // the editor's Run and Webhook run still work.
+        // On production, a webhook with a token or signature says it is off only to a caller that passes that check;
+        // anyone else gets the plain 404. Without one (Auth Mode none) only a signed-in editor is told.
+        if (match.endpoint.config.active === false) {
+          const offSecurity = normalizeWebhookSecurityConfig(match.endpoint.config);
+          if (!isTestRoute && offSecurity.authMode !== "none") {
+            const offAuth = await verifyWebhookRequestAuth({
+              security: offSecurity,
+              headers: request.headers as Record<string, unknown>,
+              rawBody: getRawRequestBody(request as unknown as { rawBody?: unknown; body: unknown }),
+              endpointKey: `off:${match.workflow.id}:${match.endpoint.nodeId}`,
+              store,
+              secretService
+            });
+            if (!offAuth.ok) {
+              reply.code(404);
+              return { error: NO_WEBHOOK_MATCH_MESSAGE };
+            }
+          } else if (!isTestRoute && !(await signedInEditorOf(request, match.workflow.id))) {
+            // No token or signature to check: only a signed-in editor is told it is off.
+            reply.code(404);
+            return { error: NO_WEBHOOK_MATCH_MESSAGE };
+          }
           reply.code(404);
           return { error: liveEntryOffMessage("webhook_input"), code: LIVE_ENTRY_OFF_CODE, path: request.params.path };
+        }
+        // An Auth Mode the webhook does not know is refused, never read as "none".
+        const unknownMode = unknownAuthMode({ id: match.endpoint.nodeId ?? "webhook", type: "webhook_input", config: match.endpoint.config });
+        if (unknownMode !== null) {
+          reply.code(500);
+          return { error: unknownAuthModeMessage(unknownMode), code: UNKNOWN_AUTH_MODE_CODE };
+        }
+
+        // The test URL runs the draft, which only someone who may edit the workflow runs (as on /execute).
+        if (testCaller && !(await runAccess.mayEdit(testCaller, match.workflow))) {
+          reply.code(403);
+          return { error: WEBHOOK_TEST_DRAFT_MESSAGE };
         }
 
         // Phase 13.2 — the trigger's own address list (optional), checked before its auth.
@@ -14157,9 +14402,15 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           return { error: authResult.message };
         }
 
-        // Production's version has unfinished settings: its live triggers are paused, and no run is created.
+        // Production's version has unfinished settings: its live triggers are paused, and no run is created. A caller that
+        // passed the webhook's token or signature is told why; on an open webhook (Auth Mode None) only a signed-in
+        // editor of the workflow is, and anyone else gets the plain 404.
         const paused = isTestRoute ? null : await releaseService.pausedRefusal(match.workflow);
         if (paused) {
+          if (security.authMode === "none" && !(await signedInEditorOf(request, match.workflow.id))) {
+            reply.code(404);
+            return { error: NO_WEBHOOK_MATCH_MESSAGE };
+          }
           reply.code(409);
           return { error: paused, code: "workflow_unfinished", path: request.params.path };
         }
@@ -14385,6 +14636,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
             });
           };
           const acknowledgement = { executionId, status: "accepted" as const };
+          const ackStatus = webhookReplyStatus(match.endpoint.config) ?? 202;
           let ackBody: unknown = acknowledgement;
           let started: Awaited<ReturnType<typeof runDispatcher.start>>;
           try {
@@ -14432,6 +14684,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
                   executionId,
                   triggerType,
                   triggeredBy: "webhook",
+                  ...(testCaller ? { triggeredByUserId: testCaller.id } : {}),
                   channel: isTestRoute ? "draft" : "production",
                   ...(webhookInputLabels ? { inputLabels: webhookInputLabels, recordInputLabels: true } : {})
                 },
@@ -14466,13 +14719,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
                 endpointKey,
                 idempotencyKey,
                 status: "success",
-                result: { __webhookHttpResponse: { statusCode: 202, headers: {}, body: ackBody } }
+                result: { __webhookHttpResponse: { statusCode: ackStatus, headers: {}, body: ackBody } }
               })
               .catch((error: unknown) => {
                 app.log.warn({ executionId, err: secretService.redact(error instanceof Error ? error.message : String(error)) }, "Could not save a webhook idempotency result");
               });
           }
-          reply.code(202);
+          reply.code(ackStatus);
           return ackBody;
         }
 
@@ -14496,6 +14749,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
               executionId,
               triggerType,
               triggeredBy: "webhook",
+              // A test URL run is the signed-in caller's (or the API key owner's): Runs shows who started it.
+              ...(testCaller ? { triggeredByUserId: testCaller.id } : {}),
               channel: isTestRoute ? "draft" : "production",
               ...(webhookInputLabels ? { inputLabels: webhookInputLabels, recordInputLabels: true } : {}),
               // Phase 12 coverage — the caller receives the output (the chat widget posts here too).
@@ -14543,6 +14798,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           ? webhookOverride.body
           : defaultResponsePayload;
 
+        // The Webhook Input's Response Status Code applies to a successful reply it builds itself.
+        const configuredStatus = !webhookOverride && result.status !== "error" ? webhookReplyStatus(match.endpoint.config) : undefined;
         if (webhookOverride) {
           reply.code(webhookOverride.statusCode);
           for (const [headerName, headerValue] of Object.entries(webhookOverride.headers)) {
@@ -14550,6 +14807,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           }
         } else if (result.status === "error") {
           reply.code(400);
+        } else if (configuredStatus !== undefined) {
+          reply.code(configuredStatus);
         }
 
         if (security.idempotencyEnabled && idempotencyKey) {
@@ -14565,7 +14824,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
                     body: webhookOverride.body
                   }
                 }
-              : responsePayload
+              : configuredStatus !== undefined && configuredStatus !== 200
+                ? { __webhookHttpResponse: { statusCode: configuredStatus, headers: {}, body: responsePayload } }
+                : responsePayload
           });
         }
 
@@ -14909,6 +15170,22 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     runtime: runtimeStateView(server.id, user)
   });
 
+  /**
+   * Whether a builder may see a registry MCP server: one with no project is deployment-wide; one assigned to a project
+   * needs `workflow:read` there (a membership, or the role `role` isolation lends; not a person share alone).
+   */
+  const mayReadMcpServer = async (user: SafeUser, server: { projectId: string | null }): Promise<boolean> =>
+    user.role === "admin" || server.projectId === null || (await rbacService.can(user, server.projectId, "workflow:read"));
+  /** The server, or null (answered 404) when it does not exist or the caller may not see it. */
+  const readableMcpServer = async (user: SafeUser, id: string, reply: FastifyReply) => {
+    const server = await store.getMcpServer(id);
+    if (!server || !(await mayReadMcpServer(user, server))) {
+      reply.code(404);
+      return null;
+    }
+    return server;
+  };
+
   app.get("/api/mcp/servers", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
@@ -14923,12 +15200,13 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       defaultProbeIntervalMs: mcpProbeService.defaultIntervalMs,
       sandboxPolicy: sandboxPolicyView()
     });
+    const visibleServers = await filterAsync(await store.listMcpServers({ projectId: query?.projectId }), (server) => mayReadMcpServer(user, server));
     if (pageRequest) {
-      const page = pageOfById(await store.listMcpServers({ projectId: query?.projectId }), pageRequest, (server) => server.name);
+      const page = pageOfById(visibleServers, pageRequest, (server) => server.name);
       return { ...page, items: await mapAsync(page.items, (server) => mcpServerSummary(server, user)), ...extras() };
     }
     return {
-      servers: await mapAsync(await store.listMcpServers({ projectId: query?.projectId }), (server) => mcpServerSummary(server, user)),
+      servers: await mapAsync(visibleServers, (server) => mcpServerSummary(server, user)),
       ...extras()
     };
   });
@@ -14936,29 +15214,24 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.get<{ Params: { id: string } }>("/api/mcp/servers/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const server = await store.getMcpServer(request.params.id);
-    if (!server) {
-      reply.code(404);
-      return { error: "MCP server not found" };
-    }
+    const server = await readableMcpServer(user, request.params.id, reply);
+    if (!server) return { error: "MCP server not found" };
     return {
       server: await mcpServerSummary(server, user),
       sandboxPolicy: sandboxPolicyView(),
       probes: await store.listMcpServerProbes(server.id, 50),
       // Snapshot list without the tool bodies; fetch one snapshot for those.
       snapshots: (await store.listMcpToolSnapshots(server.id, 20)).map(({ tools: _tools, ...snapshot }) => snapshot),
-      usages: await listMcpServerUsages(store, server.id)
+      // Only the workflows the caller may read.
+      usages: await filterAsync(await listMcpServerUsages(store, server.id), async (usage) => (await runAccess.workflow(user, usage.workflowId, "workflow:read")).ok)
     };
   });
 
   app.get<{ Params: { id: string } }>("/api/mcp/servers/:id/tools", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const server = await store.getMcpServer(request.params.id);
-    if (!server) {
-      reply.code(404);
-      return { error: "MCP server not found" };
-    }
+    const server = await readableMcpServer(user, request.params.id, reply);
+    if (!server) return { error: "MCP server not found" };
     const snapshot = server.currentSnapshotId ? await store.getMcpToolSnapshot(server.currentSnapshotId) : null;
     const query = request.query as { projectId?: unknown } | undefined;
     const projectId =
@@ -14988,6 +15261,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
+      if (!(await readableMcpServer(user, request.params.id, reply))) return { error: "Snapshot not found" };
       const snapshot = await store.getMcpToolSnapshot(request.params.snapshotId);
       if (!snapshot || snapshot.serverId !== request.params.id) {
         reply.code(404);
@@ -15014,11 +15288,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     if (!user) return;
     const range = resolveTelemetryWindow(request, reply);
     if (!range) return telemetryWindowError;
-    const server = await store.getMcpServer(request.params.id);
-    if (!server) {
-      reply.code(404);
-      return { error: "MCP server not found" };
-    }
+    const server = await readableMcpServer(user, request.params.id, reply);
+    if (!server) return { error: "MCP server not found" };
     const rollup = rollupMcpToolCalls(await store.listMcpToolCalls({ registryServerId: server.id, since: range.since }));
     return { serverId: server.id, window: range.window, since: range.since, ...rollup };
   });
@@ -15335,11 +15606,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.get<{ Params: { id: string } }>("/api/mcp/servers/:id/runtime", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const server = await store.getMcpServer(request.params.id);
-    if (!server) {
-      reply.code(404);
-      return { error: "MCP server not found" };
-    }
+    const server = await readableMcpServer(user, request.params.id, reply);
+    if (!server) return { error: "MCP server not found" };
     return { runtime: runtimeStateView(server.id, user), limits: server.limits, sandboxStatus: server.sandboxStatus };
   });
 
@@ -15453,9 +15721,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   // Phase 10.5 — OAuth 2.1 connections for remote MCP servers. Status is
   // readable by builders; connecting, refreshing and disconnecting are
   // admin-only. No route ever returns a token.
-  const findOAuthServer = async (serverId: string, reply: FastifyReply) => {
+  const findOAuthServer = async (serverId: string, reply: FastifyReply, user?: SafeUser) => {
     const server = await store.getMcpServer(serverId);
-    if (!server) {
+    if (!server || (user && !(await mayReadMcpServer(user, server)))) {
       reply.code(404);
       return null;
     }
@@ -15465,7 +15733,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
   app.get<{ Params: { id: string } }>("/api/mcp/servers/:id/oauth", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const server = await findOAuthServer(request.params.id, reply);
+    const server = await findOAuthServer(request.params.id, reply, user);
     if (!server) return { error: "MCP server not found" };
     return { status: await mcpOAuthService.status(server.id), usesOAuth: McpOAuthService.usesOAuth(server) };
   });
@@ -16149,6 +16417,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     withScopedMcpContext,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     canExecuteInProject: async (user, projectId) => await rbacService.can(user, projectId, "workflow:execute"),
+    mayReadServer: async (user, server) => await mayReadMcpServer(user, server),
     auditUser: async (request, user, event) => await audit(request, user, event),
     probeInBackground,
     sandboxSaveProblem,
@@ -16170,6 +16439,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     withScopedMcpContext,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     canExecuteInProject: async (user, projectId) => await rbacService.can(user, projectId, "workflow:execute"),
+    mayReadServer: async (user, server) => await mayReadMcpServer(user, server),
     auditUser: async (request, user, event) => await audit(request, user, event)
   });
 
@@ -16182,7 +16452,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     usesOAuth: (server) => McpOAuthService.usesOAuth(server),
     latency: async (serverId) => await mcpProbeService.latency(serverId),
     runtime: (serverId, user) => runtimeStateView(serverId, user),
-    requireRole: (request, reply, roles) => requireRole(request, reply, roles)
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    mayReadServer: async (user, server) => await mayReadMcpServer(user, server)
   });
 
   // Phase 11.1 — signed run manifests, audit bundles and the signing key.

@@ -63,8 +63,19 @@ describe("effect-free entry nodes", () => {
 });
 
 describe("live entry points that can be switched off", () => {
-  it("covers webhooks, forms, chats, MCP triggers and schedules, each with an `active` switch; unset is on", () => {
-    expect([...LIVE_ENTRY_NODE_TYPES].sort()).toEqual(["chat_trigger", "form_trigger", "mcp_server_trigger", "schedule_trigger", "webhook_input"]);
+  it("covers webhooks, forms, chats, MCP triggers, schedules and app triggers, each with an `active` switch; unset is on", () => {
+    expect([...LIVE_ENTRY_NODE_TYPES].sort()).toEqual([
+      "chat_trigger",
+      "discord_trigger",
+      "form_trigger",
+      "github_webhook_trigger",
+      "mcp_server_trigger",
+      "schedule_trigger",
+      "slack_trigger",
+      "stripe_webhook_trigger",
+      "telegram_trigger",
+      "webhook_input"
+    ]);
     for (const type of LIVE_ENTRY_NODE_TYPES) {
       const definition = nodeDefinitions.find((node) => node.type === type)!;
       expect((definition.configSchema as { properties: Record<string, unknown> }).properties.active, type).toEqual({ type: "boolean" });
@@ -76,5 +87,6 @@ describe("live entry points that can be switched off", () => {
     expect(isLiveEntryOff({ type: "manual_trigger", config: { active: false } })).toBe(false);
     expect(liveEntryOffMessage("webhook_input")).toBe("This webhook is turned off. Turn it on in the workflow editor to accept live calls.");
     expect(liveEntryOffMessage("form_trigger")).toMatch(/^This form is turned off/);
+    expect(liveEntryOffMessage("slack_trigger")).toMatch(/^This trigger is turned off/);
   });
 });

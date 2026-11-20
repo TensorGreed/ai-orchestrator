@@ -249,6 +249,24 @@ export function loopPassResults(results: readonly NodeExecutionResult[], nodeId:
   return results.filter((entry) => entry.nodeId === nodeId && isRecord(entry.input) && typeof entry.input._loop_index === "number");
 }
 
+/** How much a status says about a node, for picking the one result its card shows (higher wins; later wins a tie). */
+const CARD_STATUS_RANK: Readonly<Record<string, number>> = { error: 5, handled: 4, running: 3, success: 2, skipped: 0 };
+
+/**
+ * The one result each node's canvas card shows. A Loop body node has a result per pass, and the run walk records it once
+ * more (skipped) when the Loop itself failed: the card shows the worst of them (a failed pass over a later success or
+ * that skipped record), else the last one.
+ */
+export function nodeCardResults<T extends Pick<NodeExecutionResult, "nodeId" | "status" | "handled">>(results: readonly T[]): Map<string, T> {
+  const shown = new Map<string, T>();
+  const rank = (result: T) => CARD_STATUS_RANK[displayNodeStatus(result)] ?? 1;
+  for (const result of results) {
+    const before = shown.get(result.nodeId);
+    if (before === undefined || rank(result) >= rank(before)) shown.set(result.nodeId, result);
+  }
+  return shown;
+}
+
 export interface CanvasRunPreview {
   /** "success · 1 item · 28 ms" style summary. */
   meta?: string;

@@ -312,8 +312,13 @@ test.describe("golden journeys", () => {
 
     const prod = await page.request.post(`${API_URL}/webhook/${hookPath}`, { data: {} });
     expect(await prod.json()).toMatchObject({ output: { result: "first" } });
-    const draft = await page.request.post(`${API_URL}/webhook-test/${hookPath}`, { data: {} });
+    // The test URL runs the draft for a signed-in person who may edit it (the page's session, through the app's origin);
+    // without a session it answers the plain 404.
+    const draft = await page.request.post(`/webhook-test/${hookPath}`, { data: {} });
     expect(await draft.json()).toMatchObject({ output: { result: "second" } });
+    const anonymous = await page.request.post(`${API_URL}/webhook-test/${hookPath}`, { data: {}, headers: { cookie: "" } });
+    expect(anonymous.status()).toBe(404);
+    expect(await anonymous.json()).toEqual({ error: "No webhook endpoint matches this path and method" });
   });
 
   test("unpublishes: production runs v1, then the draft once v1 is taken down", async ({ page }) => {

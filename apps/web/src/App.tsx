@@ -17,6 +17,7 @@ import {
   DEFAULT_PROJECT_ID,
   WORKFLOW_SCHEMA_VERSION,
   editorRunPrompts,
+  isLiveEntryOff,
   nodeDefinitions,
   pickDefaultModelProvider,
   readsFilterRejected,
@@ -130,7 +131,7 @@ import {
 } from "./lib/run-trace";
 import { ORBIT, attachedNodeIds, computeAttachmentSlots, orbitPositions } from "./lib/stages";
 import { chooseSourceHandle, findFreePosition, insertPositionAfter, planInsertConnection } from "./lib/canvas-insert";
-import { canvasRunPreview, displayNodeStatus, hasTestData, loopPassResults } from "./lib/run-data";
+import { canvasRunPreview, displayNodeStatus, hasTestData, loopPassResults, nodeCardResults } from "./lib/run-data";
 import { isDirectLoopBodyNode, newNodeConfig } from "./lib/new-node-config";
 import { copyWorkflowName, nextNewWorkflowName, workflowPickerLabels } from "./lib/workflow-names";
 import {
@@ -818,8 +819,8 @@ function getNodeStatusMap(result: WorkflowExecutionResult | null) {
     return map;
   }
 
-  for (const nodeResult of result.nodeResults) {
-    map.set(nodeResult.nodeId, displayNodeStatus(nodeResult));
+  for (const [nodeId, nodeResult] of nodeCardResults(result.nodeResults)) {
+    map.set(nodeId, displayNodeStatus(nodeResult));
   }
   return map;
 }
@@ -1442,7 +1443,7 @@ function StudioApp() {
     for (const nodeResult of executionResult.nodeResults) {
       if (!passesByNodeId.has(nodeResult.nodeId)) passesByNodeId.set(nodeResult.nodeId, loopPassResults(executionResult.nodeResults, nodeResult.nodeId));
     }
-    for (const nodeResult of executionResult.nodeResults) {
+    for (const nodeResult of nodeCardResults(executionResult.nodeResults).values()) {
       const liveText = nodeResult.status === "running" ? (nodeResult as LiveNodeResult).liveText : undefined;
       const run = canvasRunPreview(nodeResult, labelFor, {
         hasOwnTestData: nodesWithTestData.has(nodeResult.nodeId),
@@ -1595,6 +1596,7 @@ function StudioApp() {
     };
   }, [currentWorkflow.id, currentWorkflowExists]);
   const canManageWorkflows = authUser?.role === "admin" || authUser?.role === "builder";
+  const shareOnlyWorkflowIds = useMemo(() => new Set(sharedWithMe.filter((item) => item.shareOnly).map((item) => item.id)), [sharedWithMe]);
   const canManageSecrets = authUser?.role === "admin" || authUser?.role === "builder";
   // What you may do with the open workflow: viewers and operators open it read-only; a builder may only view a
   // workflow shared with them (or in a project where their role is view-only). Asked for each saved workflow, also
@@ -5832,6 +5834,8 @@ function StudioApp() {
                       void loadWorkflowById(workflow.id);
                       setActiveMode(mode);
                     };
+                    // A workflow the share is your only way to is the share's: read or run, nothing more.
+                    const mayManageThis = canManageWorkflows && !shareOnlyWorkflowIds.has(workflow.id);
                     const menuActions = [
                       { id: "chat", label: "Chat", onSelect: () => openIn("chat") },
                       {
@@ -5842,7 +5846,7 @@ function StudioApp() {
                           void handleExecuteSavedWorkflow(workflow.id);
                         }
                       },
-                      ...(canManageWorkflows
+                      ...(mayManageThis
                         ? [
                             {
                               id: "tags",
@@ -5858,7 +5862,7 @@ function StudioApp() {
                             }
                           ]
                         : []),
-                      ...(canManageWorkflows && projects.length > 1
+                      ...(mayManageThis && projects.length > 1
                         ? [
                             {
                               id: "project",
@@ -5879,7 +5883,7 @@ function StudioApp() {
                             }
                           ]
                         : []),
-                      ...(canManageWorkflows
+                      ...(mayManageThis
                         ? [
                             {
                               id: "duplicate",
@@ -6781,6 +6785,7 @@ function StudioApp() {
       {webhookPayloadDialogOpen && (
         <WebhookTestPayloadDialog
           payload={currentWorkflow.settings?.testWebhookPayload}
+          webhookOff={nodes.some((node) => node.data.nodeType === "webhook_input" && isLiveEntryOff({ type: node.data.nodeType, config: node.data.config }))}
           busy={busy}
           onRun={(payload) => {
             setWebhookPayloadDialogOpen(false);

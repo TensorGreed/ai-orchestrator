@@ -37,13 +37,15 @@ export function parseTestPayload(text: string): { payload: Record<string, unknow
 
 interface WebhookTestPayloadDialogProps {
   payload: Record<string, unknown> | undefined;
+  /** The workflow's webhook is switched off: its URL and test URL refuse calls, this run does not. */
+  webhookOff?: boolean;
   busy?: boolean;
   /** Runs with the payload, which the caller keeps in the workflow's settings. */
   onRun: (payload: Record<string, unknown>) => void;
   onClose: () => void;
 }
 
-export function WebhookTestPayloadDialog({ payload, busy, onRun, onClose }: WebhookTestPayloadDialogProps) {
+export function WebhookTestPayloadDialog({ payload, webhookOff, busy, onRun, onClose }: WebhookTestPayloadDialogProps) {
   const fieldId = useId();
   const helpId = useId();
   const [text, setText] = useState(() => testPayloadText(payload));
@@ -96,6 +98,12 @@ export function WebhookTestPayloadDialog({ payload, busy, onRun, onClose }: Webh
           </div>
         </header>
         <div className="pg-modal-body">
+          {webhookOff ? (
+            <p className="cfg-tip" role="note" data-testid="webhook-run-off-note">
+              A webhook in this workflow is off: its URL and test URL answer &quot;not found&quot; until you turn it on.
+              Webhook run from the editor still works.
+            </p>
+          ) : null}
           <div className="cfg-field">
             <label className="cfg-label" htmlFor={fieldId}>
               Test payload (JSON)

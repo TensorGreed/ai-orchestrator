@@ -168,7 +168,7 @@ describe("starter templates", () => {
     // The validation's repro: a curl to the starter's URL got the trailing Run result node's output instead.
     const payload = { first_name: "Grace", last_name: "Hopper", email: "G@x.com", orders: 12 };
     for (const route of ["webhook", "webhook-test"]) {
-      const answered = await context.app.inject({ method: "POST", url: `/${route}/${path}`, payload });
+      const answered = await context.app.inject({ method: "POST", url: `/${route}/${path}`, ...(route === "webhook-test" ? { headers: { cookie: context.cookie } } : {}), payload });
       expect(answered.statusCode, route).toBe(200);
       expect(answered.json(), route).toEqual({ customer: "Grace Hopper", email: "g@x.com", vip: true });
     }
@@ -359,13 +359,17 @@ describe("starters start switched off", () => {
     expect(approval.workflow.description).toMatch(/Self-approval is on: whoever starts a run may approve it themselves/);
   });
 
-  it("the webhook starter's production URL answers not found until it is turned on; the editor and the test URL run it", async () => {
+  it("the webhook starter's URL and test URL answer not found until it is turned on; the editor runs it", async () => {
     const { workflow } = await useStarter("Webhook: reshape and reply");
     const hook = workflow.nodes.find((node) => node.type === "webhook_input")!;
     expect(hook.config).toMatchObject({ active: false });
     const webhookPath = String((hook.config as Record<string, unknown>).path);
     const body = { first_name: "Ada", last_name: "Lovelace", email: "ADA@example.com", plan: "enterprise" };
-    const off = await anonymous("POST", `/webhook/${webhookPath}`, body);
+    // Its editor is told it is off; anyone else gets the plain 404 (it has no token to check).
+    const anonymousOff = await anonymous("POST", `/webhook/${webhookPath}`, body);
+    expect(anonymousOff.statusCode).toBe(404);
+    expect(anonymousOff.json()).toEqual({ error: "No webhook endpoint matches this path and method" });
+    const off = await context.app.inject({ method: "POST", url: `/webhook/${webhookPath}`, headers: { cookie: context.cookie }, payload: body });
     expect(off.statusCode).toBe(404);
     expect(off.json()).toMatchObject({ code: "trigger_off", error: "This webhook is turned off. Turn it on in the workflow editor to accept live calls." });
     // Another method or path does not advertise it either.
@@ -374,26 +378,37 @@ describe("starters start switched off", () => {
     expect(JSON.stringify(wrongMethod.json().availableEndpoints ?? [])).not.toContain(`"${webhookPath}"`);
     const elsewhere = await anonymous("POST", `/webhook/no-such-${webhookPath}`, body);
     expect(JSON.stringify(elsewhere.json().availableEndpoints ?? [])).not.toContain(`"${webhookPath}"`);
-    // The editor's runs: Run, Webhook run and the test URL.
+    // The editor's runs (Run, Webhook run) work while it is off; the test URL answers as production does, and an
+    // anonymous caller gets the plain 404.
     expect((await run(workflow)).status).toBe("success");
     expect((await webhookRun(workflow)).status).toBe("success");
-    const test = await anonymous("POST", `/webhook-test/${webhookPath}`, body);
-    expect(test.statusCode, test.body).toBe(200);
+    const test = await context.app.inject({ method: "POST", url: `/webhook-test/${webhookPath}`, headers: { cookie: context.cookie }, payload: body });
+    expect(test.statusCode, test.body).toBe(404);
+    expect(test.json()).toMatchObject({ code: "trigger_off" });
+    expect((await anonymous("POST", `/webhook-test/${webhookPath}`, body)).json()).toEqual({ error: "No webhook endpoint matches this path and method" });
 
     await turnOn(workflow, hook.id);
     const on = await anonymous("POST", `/webhook/${webhookPath}`, body);
     expect(on.statusCode, on.body).toBe(200);
     expect(on.body).toContain("Ada Lovelace");
+    const testOn = await context.app.inject({ method: "POST", url: `/webhook-test/${webhookPath}`, headers: { cookie: context.cookie }, payload: body });
+    expect(testOn.statusCode, testOn.body).toBe(200);
   });
 
   it("the form starter's page and submissions answer not found until it is turned on", async () => {
     const { workflow } = await useStarter("Form intake: route requests");
     const form = workflow.nodes.find((node) => node.type === "form_trigger")!;
     const formPath = String((form.config as Record<string, unknown>).path);
-    const page = await anonymous("GET", `/api/forms/${formPath}`);
+    // Anyone but a signed-in editor gets the answer a missing form gets; the editor is told it is off.
+    const anonymousPage = await anonymous("GET", `/api/forms/${formPath}`);
+    expect(anonymousPage.statusCode).toBe(404);
+    expect(anonymousPage.body).toContain("Form not found");
+    const anonymousSubmit = await anonymous("POST", `/api/forms/${formPath}`, { name: "Grace", email: "grace@example.com", topic: "Support", message: "Help" });
+    expect(anonymousSubmit.json()).toEqual({ error: "Form not found" });
+    const page = await call("GET", `/api/forms/${formPath}`);
     expect(page.statusCode).toBe(404);
     expect(page.body).toContain("This form is turned off");
-    const submit = await anonymous("POST", `/api/forms/${formPath}`, { name: "Grace", email: "grace@example.com", topic: "Support", message: "Help" });
+    const submit = await call("POST", `/api/forms/${formPath}`, { name: "Grace", email: "grace@example.com", topic: "Support", message: "Help" });
     expect(submit.statusCode).toBe(404);
     expect(submit.json()).toMatchObject({ code: "trigger_off" });
     expect((await webhookRun(workflow)).status).toBe("success");
@@ -416,14 +431,16 @@ describe("starters start switched off", () => {
         edges: [{ id: "e1", source: "start", target: "reply" }]
       }) as unknown as Workflow;
     await context.store.upsertWorkflow(workflow("wf-chat-off", { type: "chat_trigger", config: { path: "chat-off", authMode: "public", active: false } }));
-    const chat = await anonymous("POST", "/api/chat/wf-chat-off", { message: "hi" });
+    expect((await anonymous("POST", "/api/chat/wf-chat-off", { message: "hi" })).json()).toEqual({ error: "Not found" });
+    const chat = await context.app.inject({ method: "POST", url: "/api/chat/wf-chat-off", headers: { cookie: context.cookie }, payload: { message: "hi" } });
     expect(chat.statusCode).toBe(404);
     expect(chat.json()).toMatchObject({ code: "trigger_off", error: "This chat is turned off. Turn it on in the workflow editor to accept live calls." });
 
     const mcpOff = workflow("wf-mcp-off", { type: "mcp_server_trigger", config: { path: "mcp-off", toolName: "off_tool", authMode: "public", active: false } });
     await context.store.upsertWorkflow(mcpOff);
     expect((await anonymous("GET", "/api/mcp-server/mcp-off/manifest")).statusCode).toBe(404);
-    const invoke = await anonymous("POST", "/api/mcp-server/mcp-off/invoke", { arguments: {} });
+    expect((await anonymous("POST", "/api/mcp-server/mcp-off/invoke", { arguments: {} })).json()).toEqual({ error: "MCP server not found" });
+    const invoke = await call("POST", "/api/mcp-server/mcp-off/invoke", { arguments: {} });
     expect(invoke.statusCode).toBe(404);
     expect(invoke.json()).toMatchObject({ code: "trigger_off" });
 

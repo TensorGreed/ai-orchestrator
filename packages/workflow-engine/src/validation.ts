@@ -225,7 +225,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
     if (node.type === "prompt_template" && typeof config.template !== "string") {
       issues.push({
         code: "missing_template",
-        message: "Prompt Template node requires a string template config.",
+        message: "Prompt Template needs a template.",
         nodeId: node.id
       });
     }
@@ -234,7 +234,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (typeof config.code !== "string" || !config.code.trim()) {
         issues.push({
           code: "missing_code_node_script",
-          message: "Code Node requires a non-empty code string.",
+          message: "Code Node needs code to run.",
           nodeId: node.id
         });
       }
@@ -263,7 +263,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (typeof config.urlTemplate !== "string" || !config.urlTemplate.trim()) {
         issues.push({
           code: "missing_http_request_url_template",
-          message: "HTTP Request node requires a non-empty urlTemplate.",
+          message: "HTTP Request needs a URL.",
           nodeId: node.id
         });
       }
@@ -410,7 +410,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (!provider || typeof provider.providerId !== "string" || typeof provider.model !== "string") {
         issues.push({
           code: "missing_llm_provider",
-          message: "LLM Call node requires provider.providerId and provider.model.",
+          message: "LLM Call needs a model provider and a model.",
           nodeId: node.id
         });
       }
@@ -427,7 +427,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (!model) {
         issues.push({
           code: "missing_chat_model_model",
-          message: `${node.name || node.type} requires model.`,
+          message: `${node.name || node.type} needs a model.`,
           nodeId: node.id
         });
       }
@@ -437,7 +437,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
         if (!baseUrl) {
           issues.push({
             code: "missing_chat_gateway_base_url",
-            message: `${node.name || node.type} requires baseUrl.`,
+            message: `${node.name || node.type} needs a base URL.`,
             nodeId: node.id
           });
         }
@@ -464,7 +464,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (!endpoint) {
         issues.push({
           code: "missing_azure_openai_endpoint",
-          message: "Azure OpenAI Chat Model node requires endpoint.",
+          message: "Azure OpenAI Chat Model needs an endpoint.",
           nodeId: node.id
         });
       }
@@ -472,7 +472,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (!deployment) {
         issues.push({
           code: "missing_azure_openai_deployment",
-          message: "Azure OpenAI Chat Model node requires deployment.",
+          message: "Azure OpenAI Chat Model needs a deployment.",
           nodeId: node.id
         });
       }
@@ -480,7 +480,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (!secretId) {
         issues.push({
           code: "missing_azure_openai_secret",
-          message: "Azure OpenAI Chat Model node requires secretRef.secretId.",
+          message: "Azure OpenAI Chat Model needs its API key credential.",
           nodeId: node.id
         });
       }
@@ -492,7 +492,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (!model) {
         issues.push({
           code: "missing_gemini_model",
-          message: "Google Gemini Chat Model node requires model.",
+          message: "Google Gemini Chat Model needs a model.",
           nodeId: node.id
         });
       }
@@ -506,7 +506,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (!hasAttachedChatModel) {
         issues.push({
           code: "missing_agent_chat_model",
-          message: "Agent Orchestrator node requires an attached Chat Model node on chat_model.",
+          message: "Agent Orchestrator needs a Chat Model node attached to its Chat Model port.",
           nodeId: node.id
         });
       }
@@ -612,14 +612,14 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
         if (!hasServer || typeof config.resourceUri !== "string" || config.resourceUri.trim().length === 0) {
           issues.push({
             code: "missing_mcp_resource_config",
-            message: "MCP Tool node in read-resource mode requires a registered server (registryServerId) or serverId, and a resourceUri.",
+            message: "MCP Tool in Read resource mode needs a server and a resource URI.",
             nodeId: node.id
           });
         }
       } else if (!hasServer || typeof config.toolName !== "string") {
         issues.push({
           code: "missing_mcp_tool_config",
-          message: "MCP Tool node requires a registered server (registryServerId) or serverId, and a toolName.",
+          message: "MCP Tool needs a server and a tool.",
           nodeId: node.id
         });
       }
@@ -640,7 +640,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
     if (node.type === "connector_source" && typeof config.connectorId !== "string") {
       issues.push({
         code: "missing_connector_id",
-        message: "Connector Source node requires connectorId.",
+        message: "Connector Source needs a connector.",
         nodeId: node.id
       });
     }
@@ -661,7 +661,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (!operation) {
         issues.push({
           code: "missing_azure_storage_operation",
-          message: "Azure Storage node requires operation.",
+          message: "Azure Storage needs an operation.",
           nodeId: node.id
         });
       }
@@ -672,7 +672,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (!operation) {
         issues.push({
           code: "missing_azure_cosmos_operation",
-          message: "Azure Cosmos DB node requires operation.",
+          message: "Azure Cosmos DB needs an operation.",
           nodeId: node.id
         });
       }
@@ -683,7 +683,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (!operation) {
         issues.push({
           code: "missing_azure_monitor_operation",
-          message: "Microsoft Azure Monitor node requires operation.",
+          message: "Microsoft Azure Monitor needs an operation.",
           nodeId: node.id
         });
       }
@@ -694,7 +694,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (!operation) {
         issues.push({
           code: "missing_azure_ai_search_operation",
-          message: "Azure AI Search Vector Store node requires operation.",
+          message: "Azure AI Search Vector Store needs an operation.",
           nodeId: node.id
         });
       }
@@ -705,7 +705,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (!operation) {
         issues.push({
           code: "missing_qdrant_operation",
-          message: "Qdrant Vector Store node requires operation.",
+          message: "Qdrant Vector Store needs an operation.",
           nodeId: node.id
         });
       }
@@ -717,7 +717,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (!endpoint || !deployment) {
         issues.push({
           code: "missing_azure_embedding_config",
-          message: "Embeddings Azure OpenAI node requires endpoint and deployment.",
+          message: "Embeddings Azure OpenAI needs an endpoint and a deployment.",
           nodeId: node.id
         });
       }
@@ -725,7 +725,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (typeof secretRef.secretId !== "string" || !secretRef.secretId.trim()) {
         issues.push({
           code: "missing_azure_embedding_secret",
-          message: "Embeddings Azure OpenAI node requires secretRef.secretId.",
+          message: "Embeddings Azure OpenAI needs its API key credential.",
           nodeId: node.id
         });
       }
@@ -753,7 +753,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (mode === "json_schema" && typeof config.jsonSchema !== "string") {
         issues.push({
           code: "missing_output_parser_schema",
-          message: "Output Parser node in json_schema mode requires a jsonSchema string.",
+          message: "Output Parser in JSON Schema mode needs a JSON schema.",
           nodeId: node.id
         });
       }
@@ -772,7 +772,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (typeof config.approvalMessage !== "string" || !config.approvalMessage.trim()) {
         issues.push({
           code: "missing_human_approval_message",
-          message: "Human Approval node requires a non-empty approvalMessage.",
+          message: "Human Approval needs an Approval Message.",
           nodeId: node.id
         });
       }
@@ -913,7 +913,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (typeof config.inputKey !== "string" || !config.inputKey.trim()) {
         issues.push({
           code: "missing_loop_input_key",
-          message: "Loop / ForEach node requires a non-empty inputKey.",
+          message: "Loop / ForEach needs an Input Key: the list to loop over.",
           nodeId: node.id
         });
       }
@@ -921,7 +921,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (typeof config.itemVariable !== "string" || !config.itemVariable.trim()) {
         issues.push({
           code: "missing_loop_item_variable",
-          message: "Loop / ForEach node requires a non-empty itemVariable.",
+          message: "Loop / ForEach needs an Item Variable.",
           nodeId: node.id
         });
       }
@@ -950,7 +950,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (config.mode === "combine_by_key" && (typeof config.combineKey !== "string" || !config.combineKey.trim())) {
         issues.push({
           code: "missing_merge_combine_key",
-          message: "Merge node in combine_by_key mode requires combineKey.",
+          message: "Merge in Combine by Key mode needs a Combine Key.",
           nodeId: node.id
         });
       }
@@ -984,7 +984,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (typeof config.workflowId !== "string" || !config.workflowId.trim()) {
         issues.push({
           code: "missing_workflow_tool_id",
-          message: "Workflow Tool node requires the workflow it runs (workflowId).",
+          message: "Workflow Tool needs the workflow it runs.",
           nodeId: node.id
         });
       } else if (config.workflowId.trim() === workflow.id) {
@@ -1009,7 +1009,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (typeof config.workflowId !== "string" || !config.workflowId.trim()) {
         issues.push({
           code: "missing_execute_workflow_id",
-          message: "Execute Workflow node requires workflowId.",
+          message: "Execute Workflow needs the workflow to run.",
           nodeId: node.id
         });
       }
@@ -1077,7 +1077,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
           if (typeof entry.key !== "string" || !entry.key.trim()) {
             issues.push({
               code: "invalid_set_node_assignment_key",
-              message: `Set / Transform assignment #${assignmentIndex + 1} requires a non-empty key.`,
+              message: `Set / Transform row ${assignmentIndex + 1} needs a field name.`,
               nodeId: node.id
             });
             break;
@@ -1085,7 +1085,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
           if (typeof entry.valueTemplate !== "string") {
             issues.push({
               code: "invalid_set_node_assignment_template",
-              message: `Set / Transform assignment #${assignmentIndex + 1} requires a valueTemplate string.`,
+              message: `Set / Transform row ${assignmentIndex + 1} needs a value.`,
               nodeId: node.id
             });
             break;
@@ -1093,7 +1093,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
           if (entry.type !== undefined && entry.type !== null && entry.type !== "" && !isSetValueType(entry.type)) {
             issues.push({
               code: "invalid_set_node_assignment_type",
-              message: `Set / Transform assignment #${assignmentIndex + 1} has an unknown type; use auto, string, number, boolean or json.`,
+              message: `Set / Transform row ${assignmentIndex + 1} has an unknown type; use auto, string, number, boolean or json.`,
               nodeId: node.id
             });
             break;
@@ -1218,7 +1218,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (typeof config.condition !== "string" || !config.condition.trim()) {
         issues.push({
           code: "missing_if_condition",
-          message: "IF node requires a condition expression.",
+          message: "IF needs a condition.",
           nodeId: node.id
         });
       }
@@ -1228,7 +1228,7 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
       if (typeof config.switchValue !== "string" || !config.switchValue.trim()) {
         issues.push({
           code: "missing_switch_value",
-          message: "Switch node requires a switchValue expression.",
+          message: "Switch needs the value to switch on.",
           nodeId: node.id
         });
       }
@@ -1568,7 +1568,9 @@ const DRAFT_SAVEABLE_ISSUE_CODES = new Set([
   "missing_azure_monitor_operation",
   "missing_azure_cosmos_operation",
   "missing_azure_ai_search_operation",
-  "missing_input_validator_rules"
+  "missing_input_validator_rules",
+  // A new Human Approval starts with an empty message (the example is a placeholder): a draft saves without one.
+  "missing_human_approval_message"
 ]);
 
 /**

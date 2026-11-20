@@ -155,6 +155,31 @@ export class RbacService {
     });
   }
 
+  /** Whether every permission of a project role (or custom role) is one the user's own membership of the project has. */
+  async roleWithin(user: SafeUser, projectId: string, role: ProjectRole | "custom", customRoleId: string | null): Promise<boolean> {
+    const membership = await this.getMembership(user.id, projectId);
+    if (!membership) return false;
+    let granted: readonly string[];
+    if (role === "custom") {
+      const custom = customRoleId ? await this.store.getCustomRole(customRoleId) : null;
+      if (!custom) return false;
+      granted = custom.permissions;
+    } else {
+      granted = PROJECT_ROLE_PERMISSIONS[role];
+    }
+    // Permissions the deployment no longer knows grant nothing, as when a membership is built (hydrateMembership).
+    const known = new Set<string>(ALL_PERMISSIONS);
+    return granted.filter((permission) => known.has(permission)).every((permission) => membership.permissions.includes(permission as Permission));
+  }
+
+  /** Whether another user's current membership of the project (none counts as within) has only permissions the user's own has. */
+  async membershipWithin(user: SafeUser, projectId: string, memberUserId: string): Promise<boolean> {
+    const own = await this.getMembership(user.id, projectId);
+    if (!own) return false;
+    const theirs = await this.getMembership(memberUserId, projectId);
+    return !theirs || theirs.permissions.every((permission) => own.permissions.includes(permission));
+  }
+
   async removeMember(userId: string, projectId: string): Promise<boolean> {
     return await this.store.removeProjectRole(userId, projectId);
   }
@@ -286,8 +311,7 @@ export class RbacService {
 
   /**
    * `permission` in the project from a membership (or as a global admin), never from the global role that `role`
-   * isolation lends a non-member. What decides whether a person share is all someone has: a person share narrows what
-   * they see of the workflow's runs to their own in every isolation mode, unless a membership gives them more.
+   * isolation lends a non-member. Who manages a project's members and person shares goes by this.
    */
   async canAsMember(user: SafeUser, projectId: string, permission: Permission): Promise<boolean> {
     if (user.projectScope && !user.projectScope.includes(projectId)) return false;
@@ -369,18 +393,37 @@ export class RbacService {
   }
 
   /**
+   * Who may share a workflow with a person, list its person shares and remove them: mayManageWorkflowShares, through a
+   * membership that grants project:invite (or as an admin), never the role `role` isolation lends a non-member: only the
+   * project's own people decide who outside it gets one of its workflows.
+   */
+  async mayManagePersonShares(user: SafeUser, workflow: { id?: string; projectId?: string | null }): Promise<boolean> {
+    if (!await this.mayManageWorkflowShares(user, workflow)) return false;
+    return await this.canAsMember(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite");
+  }
+
+  /**
    * Who may share a workflow with people or with other projects, list its person shares and remove them: whoever may
    * invite members to its owning project (`project:invite`). Admins have it; an API key limited to other projects
    * does not, whatever its role.
    */
-  async mayManageWorkflowShares(user: SafeUser, workflow: { projectId?: string | null }): Promise<boolean> {
+  async mayManageWorkflowShares(user: SafeUser, workflow: { id?: string; projectId?: string | null }): Promise<boolean> {
     return this.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite");
   }
 
   /**
-   * True when the person has `permission` on this workflow only through a share with them: no membership in its project
-   * that grants it and none through a share to a project they are a member of. The global role `role` isolation lends
-   * a non-member does not count: a person share means the same in every isolation mode. For `workflow:execute` the
+   * Whether a share with the person is their only way to the workflow: no membership or share to a project of theirs
+   * gives it (onlyThroughUserShare), they are not an admin, and no role reaches its project under the isolation mode.
+   * Only then are they held to the share's level (read, or run); a person share never takes away what someone has.
+   */
+  async shareIsOnlyWay(user: SafeUser, workflow: { id: string; projectId?: string | null }): Promise<boolean> {
+    return await this.onlyThroughUserShare(user, workflow, "workflow:read");
+  }
+
+  /**
+   * True when the person has `permission` on this workflow only through a share with them: not an admin, nothing in its
+   * project that grants it (a membership, or the role `role` isolation lends a non-member) and none through a share to
+   * a project they are a member of. A person share never takes away what someone has. For `workflow:execute` the
    * person's share must be an execute share (and only execute shares to projects count); such runs keep session memory
    * to the person (run-scope.ts). For `workflow:read` any share counts; such a person sees only their own runs of it
    * (run-access.ts).
@@ -393,7 +436,9 @@ export class RbacService {
     const execute = permission === "workflow:execute";
     const own = await this.userShareAccess(user, workflow);
     if (!own || (execute && own !== "execute")) return false;
-    if (await this.canAsMember(user, workflow.projectId ?? DEFAULT_PROJECT_ID, permission)) return false;
+    // A share never takes away what someone has: a membership, an admin, or (under `role` isolation) the role lent to a
+    // non-member that reaches the project all count.
+    if (await this.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, permission)) return false;
     for (const share of await this.store.listWorkflowShares(workflow.id)) {
       if (execute && share.accessLevel !== "execute") continue;
       if (await this.canAsMember(user, share.projectId, permission)) return false;

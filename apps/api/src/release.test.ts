@@ -27,6 +27,7 @@ import { SecretService } from "./services/secret-service.js";
 import { goldenSetSnapshots } from "./services/release-snapshot.js";
 import { productionRoutingKeys, withUniqueTriggerPaths } from "./services/release-service.js";
 import { WorkflowVersionService } from "./services/workflow-version-service.js";
+import { webhookTestCookie } from "./test-support/webhook-test-caller.js";
 
 const SAMPLES_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../samples");
 
@@ -205,7 +206,7 @@ const prodHook = async (context: TestContext, hookPath: string) => {
   return { status: response.statusCode, output: response.json<{ output?: unknown }>().output };
 };
 const testHook = async (context: TestContext, hookPath: string) => {
-  const response = await context.app.inject({ method: "POST", url: `/webhook-test/${hookPath}`, payload: {} });
+  const response = await context.app.inject({ method: "POST", url: `/webhook-test/${hookPath}`, headers: { cookie: await webhookTestCookie(context) }, payload: {} });
   return { status: response.statusCode, output: response.json<{ output?: unknown }>().output };
 };
 
@@ -1460,7 +1461,11 @@ describe("deactivation (L9, N3)", () => {
     expect(await prodHook(context, "hook-wf-kill")).toMatchObject({ status: 200, output: { result: "live" } });
     expect((await call(context, "POST", "/api/workflows/wf-kill/deactivate", builder.cookie, {})).statusCode).toBe(200);
 
-    const hook = await context.app.inject({ method: "POST", url: "/webhook/hook-wf-kill", payload: {} });
+    // Anyone but a signed-in editor gets the plain 404 a missing path gets; the editor is told why.
+    const anonymousHook = await context.app.inject({ method: "POST", url: "/webhook/hook-wf-kill", payload: {} });
+    expect(anonymousHook.statusCode).toBe(404);
+    expect(anonymousHook.body).not.toMatch(/deactivated/);
+    const hook = await context.app.inject({ method: "POST", url: "/webhook/hook-wf-kill", headers: { cookie: builder.cookie }, payload: {} });
     expect(hook.statusCode).toBe(409);
     expect(hook.json<{ error: string }>().error).toBe("This workflow is deactivated, so production runs are refused. Activate it to serve production again.");
     expect(hook.body).not.toMatch(/release gate/i);

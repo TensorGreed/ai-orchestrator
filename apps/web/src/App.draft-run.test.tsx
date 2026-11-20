@@ -203,7 +203,7 @@ describe("editor drafts and run feedback", () => {
   it("shows a saved draft's unfinished settings as warnings", async () => {
     validateStoredWorkflowMock.mockResolvedValue({
       valid: false,
-      issues: [{ code: "missing_http_request_url_template", message: "HTTP Request node requires a non-empty urlTemplate.", nodeId: "set" }]
+      issues: [{ code: "missing_http_request_url_template", message: "HTTP Request needs a URL.", nodeId: "set" }]
     });
     openEditorOn("wf-hook");
     render(<App />);

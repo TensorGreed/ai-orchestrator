@@ -397,6 +397,24 @@ describe("deriveRunStatus", () => {
     expect(status.label).toBe("last run 1.0 s · 2 ok");
   });
 
+  it("shows a run waiting for approval as waiting (amber), not as a finished run", () => {
+    const at = "2026-01-01T00:00:00.000Z";
+    const status = deriveRunStatus(false, {
+      workflowId: "wf-1",
+      status: "waiting_approval",
+      startedAt: at,
+      completedAt: "2026-01-01T00:00:00.012Z",
+      nodeResults: [
+        { nodeId: "trigger", status: "success", startedAt: at },
+        { nodeId: "http", status: "success", startedAt: at },
+        { nodeId: "filter", status: "success", startedAt: at },
+        { nodeId: "approve", status: "running", startedAt: at },
+        { nodeId: "merge", status: "skipped", startedAt: at }
+      ]
+    });
+    expect(status).toEqual({ state: "waiting", label: "Waiting for approval · 3 of 4 ok" });
+  });
+
   it("flags failed runs", () => {
     const status = deriveRunStatus(false, {
       workflowId: "wf-1",

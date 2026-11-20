@@ -61,6 +61,8 @@ export interface McpOnboardingDeps {
   requireStepUp?: (request: FastifyRequest, reply: FastifyReply, action: "secret.create") => Promise<boolean>;
   /** Whether the user may run workflows in the project; the playground runs tools under the same permission. */
   canExecuteInProject: (user: SafeUser, projectId: string) => Promise<boolean>;
+  /** Whether the caller may see the server at all (its project's workflows, or a server without a project). */
+  mayReadServer: (user: SafeUser, server: McpServerRecord) => Promise<boolean>;
   auditUser: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void | Promise<void>;
   /** Probe a server in the background, like a normal registration. */
   probeInBackground: (serverId: string) => void;
@@ -157,7 +159,9 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
       return { error: error instanceof McpConfigImportError ? error.message : "The file could not be read as an MCP client config." };
     }
 
-    const existing = await store.listMcpServers();
+    // Duplicates are matched only among servers the caller may see, so a plan never names another project's server.
+    const existing: McpServerRecord[] = [];
+    for (const server of await store.listMcpServers()) if (await deps.mayReadServer(user, server)) existing.push(server);
     const plan = planMcpConfigImport(config, {
       existing,
       entries: parsed.data.entries,
@@ -349,7 +353,7 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
       return { error: "Invalid playground call", details: parsed.error.issues };
     }
     const server = await store.getMcpServer(request.params.id);
-    if (!server) {
+    if (!server || !(await deps.mayReadServer(user, server))) {
       reply.code(404);
       return { error: "MCP server not found" };
     }

@@ -410,7 +410,8 @@ describe("Phase 3.2 — Stripe webhook signature validation", () => {
       },
       payload: body
     });
-    expect(bad.statusCode).toBe(401);
+    expect(bad.statusCode).toBe(404);
+    expect(bad.json()).toEqual({ error: "Not found" });
 
     const outsideWindow = Math.floor(Date.now() / 1000) - 10_000;
     const staleSig = crypto
@@ -426,7 +427,7 @@ describe("Phase 3.2 — Stripe webhook signature validation", () => {
       },
       payload: body
     });
-    expect(stale.statusCode).toBe(401);
+    expect(stale.statusCode).toBe(404);
   });
 });
 
@@ -489,7 +490,73 @@ describe("Phase 3.2 — Telegram webhook secret-token validation", () => {
       },
       payload: { update_id: 1 }
     });
-    expect(bad.statusCode).toBe(401);
+    expect(bad.statusCode).toBe(404);
+    expect(bad.json()).toEqual({ error: "Not found" });
+  });
+
+  it("refuses every call while no secret token is set, as Slack, GitHub, Stripe and Discord do", async () => {
+    const ctx = await createTestContext();
+    const cookie = await loginAdmin(ctx);
+    const saved = await ctx.app.inject({
+      method: "POST",
+      url: "/api/workflows",
+      headers: { cookie },
+      payload: {
+        id: "wf-tg-open",
+        name: "Telegram without a token",
+        schemaVersion: "1.0.0",
+        workflowVersion: 1,
+        nodes: [
+          { id: "trigger", type: "telegram_trigger", name: "TG", position: { x: 0, y: 0 }, config: { path: "telegram-open" } },
+          { id: "out", type: "output", name: "out", position: { x: 200, y: 0 }, config: { outputKey: "result" } }
+        ],
+        edges: [{ id: "e1", source: "trigger", target: "out" }]
+      }
+    });
+    expect(saved.statusCode, saved.body).toBe(200);
+    for (const headers of [{ "content-type": "application/json" }, { "content-type": "application/json", "x-telegram-bot-api-secret-token": "anything" }]) {
+      const response = await ctx.app.inject({ method: "POST", url: "/api/webhooks/telegram/wf-tg-open", headers, payload: { update_id: 1, message: { text: "hi" } } });
+      // The same plain 404 as a workflow id that does not exist: nothing says the trigger has no secret.
+      expect(response.statusCode).toBe(404);
+      expect(response.json()).toEqual({ error: "Not found" });
+    }
+    expect((await ctx.store.listExecutionHistory({ page: 1, pageSize: 10 })).total).toBe(0);
+  });
+
+  it("an unknown workflow id, a workflow without the trigger and a bad token all get the same plain 404; switched off, only a call with the right token is told so", async () => {
+    const ctx = await createTestContext();
+    const cookie = await loginAdmin(ctx);
+    const tgSecret = await ctx.secretService.createSecret({ name: "tg", provider: "telegram", value: "off-token-5678" });
+    const save = async (id: string, nodes: unknown[]) =>
+      expect(
+        (await ctx.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie }, payload: { id, name: id, schemaVersion: "1.0.0", workflowVersion: 1, nodes, edges: [] } })).statusCode
+      ).toBe(200);
+    await save("wf-tg-off", [
+      { id: "trigger", type: "telegram_trigger", name: "TG", position: { x: 0, y: 0 }, config: { signingSecretRef: { secretId: tgSecret.secretId }, active: false } }
+    ]);
+    await save("wf-plain", [{ id: "start", type: "manual_trigger", name: "Start", position: { x: 0, y: 0 }, config: {} }]);
+    const call = (id: string, token?: string) =>
+      ctx.app.inject({
+        method: "POST",
+        url: `/api/webhooks/telegram/${id}`,
+        headers: { "content-type": "application/json", ...(token ? { "x-telegram-bot-api-secret-token": token } : {}) },
+        payload: { update_id: 1 }
+      });
+    for (const [id, token] of [["no-such-workflow", "off-token-5678"], ["wf-plain", "off-token-5678"], ["wf-tg-off", "wrong"], ["wf-tg-off", undefined]] as const) {
+      const response = await call(id, token);
+      expect(response.statusCode, `${id} ${token}`).toBe(404);
+      expect(response.json(), `${id} ${token}`).toEqual({ error: "Not found" });
+    }
+    const off = await call("wf-tg-off", "off-token-5678");
+    expect(off.statusCode).toBe(404);
+    expect(off.json()).toMatchObject({ code: "trigger_off", error: expect.stringMatching(/trigger is turned off/) });
+    // The other app routes answer an unknown id the same way.
+    for (const app of ["slack", "github", "stripe"]) {
+      const response = await ctx.app.inject({ method: "POST", url: `/api/webhooks/${app}/no-such-workflow`, payload: {} });
+      expect(response.statusCode, app).toBe(404);
+      expect(response.json(), app).toEqual({ error: "Not found" });
+    }
+    expect((await ctx.store.listExecutionHistory({ page: 1, pageSize: 10 })).total).toBe(0);
   });
 });
 
@@ -563,7 +630,11 @@ describe("Phase 3.2 — Discord Ed25519 signature validation", () => {
       },
       payload: JSON.stringify({ type: 1, extra: "tampered" })
     });
+    // Discord expects 401 for a signature that does not check out; an unknown workflow id answers the same.
     expect(tampered.statusCode).toBe(401);
+    const unknown = await ctx.app.inject({ method: "POST", url: "/api/webhooks/discord/no-such-workflow", payload: {} });
+    expect(unknown.statusCode).toBe(401);
+    expect(unknown.json()).toEqual(tampered.json());
   });
 });
 

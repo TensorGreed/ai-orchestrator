@@ -32,14 +32,20 @@ export const NODE_CREDENTIAL_SPECS: Readonly<Record<string, readonly NodeCredent
   stripe_create_customer: [secretRef("stripe", "Stripe API Key Secret", "Stripe restricted or secret API key.")],
   stripe_create_charge: [secretRef("stripe", "Stripe API Key Secret", "Stripe restricted or secret API key.")],
   stripe_webhook_trigger: [
-    secretRef("stripe", "Webhook Signing Secret", "Stripe webhook signing secret (whsec_...) used to verify incoming events.", false, "signingSecretRef")
+    secretRef("stripe", "Webhook Signing Secret", "Stripe webhook signing secret (whsec_...) used to verify incoming events. Required: the trigger refuses every event until it is set.", true, "signingSecretRef")
   ],
   aws_s3_put_object: [secretRef("aws", "AWS Credentials Secret", "AWS credentials as JSON {accessKeyId, secretAccessKey, sessionToken?} or 'accessKeyId:secretAccessKey'.")],
   aws_s3_get_object: [secretRef("aws", "AWS Credentials Secret", "AWS credentials as JSON {accessKeyId, secretAccessKey, sessionToken?} or 'accessKeyId:secretAccessKey'.")],
   aws_s3_list_objects: [secretRef("aws", "AWS Credentials Secret", "AWS credentials as JSON {accessKeyId, secretAccessKey, sessionToken?} or 'accessKeyId:secretAccessKey'.")],
   telegram_send_message: [secretRef("telegram", "Bot Token Secret", "Telegram bot token from BotFather.")],
   telegram_trigger: [
-    secretRef("telegram", "Webhook Secret Token", "Value sent in X-Telegram-Bot-Api-Secret-Token; incoming requests are verified against it.", false, "signingSecretRef")
+    secretRef(
+      "telegram",
+      "Webhook Secret Token",
+      "Required: the trigger refuses every call until it is set. The secret_token you gave setWebhook; Telegram sends it in X-Telegram-Bot-Api-Secret-Token.",
+      true,
+      "signingSecretRef"
+    )
   ],
   discord_send_message: [
     secretRef("discord", "Webhook URL Secret", "Secret whose value is the Discord webhook URL. Only needed when Webhook URL is blank.", false)

@@ -173,7 +173,7 @@ describe("saving a draft", () => {
     expect(body.valid).toBe(false);
     expect(body.issues.map((issue) => issue.code)).toContain("missing_http_request_url_template");
     const run = await context.app.inject({ method: "POST", url: "/api/workflows/wf-hook-draft/execute", headers: { cookie }, payload: {} });
-    expect(JSON.stringify(run.json())).toContain("requires a non-empty urlTemplate");
+    expect(JSON.stringify(run.json())).toContain("HTTP Request needs a URL");
   });
 
   it("does not publish an unfinished draft, and publishes it once finished", async () => {
@@ -312,13 +312,17 @@ describe("live triggers of an unfinished draft", () => {
     const cookie = await login(context);
     expect((await context.app.inject({ method: "POST", url: "/api/workflows", headers: { cookie }, payload: unfinished() })).statusCode).toBe(200);
 
+    // An open webhook (Auth Mode None) tells only a signed-in editor that it is paused; anyone else gets the plain 404.
+    const anonymous = await context.app.inject({ method: "POST", url: "/webhook/draft-orders", payload: { customer: "Ana" } });
+    expect(anonymous.statusCode).toBe(404);
+    expect(anonymous.json()).toEqual({ error: "No webhook endpoint matches this path and method" });
     for (let fire = 0; fire < 3; fire += 1) {
-      const response = await context.app.inject({ method: "POST", url: "/webhook/draft-orders", payload: { customer: "Ana" } });
+      const response = await context.app.inject({ method: "POST", url: "/webhook/draft-orders", headers: { cookie }, payload: { customer: "Ana" } });
       expect(response.statusCode).toBe(409);
       const body = response.json() as { error: string; code: string };
       expect(body.code).toBe("workflow_unfinished");
       expect(body.error).toContain("Live triggers of this workflow are paused");
-      // An anonymous caller is not told which settings; the audit entry and the editor say.
+      // The answer does not name which settings; the audit entry and the editor say.
       expect(body.error).not.toContain("urlTemplate");
     }
     expect(await runs(context, "wf-hook-draft")).toHaveLength(0);
@@ -333,13 +337,14 @@ describe("live triggers of an unfinished draft", () => {
 
     // A new unfinished version is noted once more.
     expect((await context.app.inject({ method: "PUT", url: "/api/workflows/wf-hook-draft", headers: { cookie }, payload: unfinished({ name: "Hook draft 2" }) })).statusCode).toBe(200);
-    expect((await context.app.inject({ method: "POST", url: "/webhook/draft-orders", payload: {} })).statusCode).toBe(409);
-    expect((await context.app.inject({ method: "POST", url: "/webhook/draft-orders", payload: {} })).statusCode).toBe(409);
+    expect((await context.app.inject({ method: "POST", url: "/webhook/draft-orders", headers: { cookie }, payload: {} })).statusCode).toBe(409);
+    expect((await context.app.inject({ method: "POST", url: "/webhook/draft-orders", headers: { cookie }, payload: {} })).statusCode).toBe(409);
     expect(await pausedNotes(context, "wf-hook-draft")).toHaveLength(2);
 
     // The editor's test route still runs the draft (and reports what is missing).
-    const tested = await context.app.inject({ method: "POST", url: "/webhook-test/draft-orders", payload: { customer: "Ana" } });
+    const tested = await context.app.inject({ method: "POST", url: "/webhook-test/draft-orders", headers: { cookie }, payload: { customer: "Ana" } });
     expect(tested.statusCode).not.toBe(409);
+    expect(tested.statusCode).not.toBe(404);
 
     // Finished: production serves it again.
     expect((await context.app.inject({ method: "PUT", url: "/api/workflows/wf-hook-draft", headers: { cookie }, payload: hookFlow() })).statusCode).toBe(200);
@@ -390,7 +395,11 @@ describe("live triggers of an unfinished draft", () => {
     expect(await pausedNotes(context, "wf-hook-draft")).toHaveLength(0);
     const authorized = await context.app.inject({ method: "POST", url: "/webhook/draft-orders", headers: { authorization: "Bearer s3cret-token" }, payload: {} });
     expect(authorized.statusCode, authorized.body).toBe(409);
-    expect((await context.app.inject({ method: "PUT", url: "/webhook/draft-orders", payload: {} })).statusCode).toBe(405);
+    // A method nobody serves: anonymous callers get the plain 404; a signed-in editor is told the methods it takes.
+    const anonymousPut = await context.app.inject({ method: "PUT", url: "/webhook/draft-orders", payload: {} });
+    expect(anonymousPut.statusCode).toBe(404);
+    expect(anonymousPut.json()).toEqual({ error: "No webhook endpoint matches this path and method" });
+    expect((await context.app.inject({ method: "PUT", url: "/webhook/draft-orders", headers: { cookie }, payload: {} })).statusCode).toBe(405);
     expect(await runs(context, "wf-hook-draft")).toHaveLength(0);
   });
 
@@ -413,11 +422,14 @@ describe("live triggers of an unfinished draft", () => {
       expect(saved.statusCode, saved.body).toBe(200);
     }
     expect((await context.app.inject({ method: "GET", url: "/api/forms/draft-form" })).statusCode).toBe(200);
-    const submitted = await context.app.inject({ method: "POST", url: "/api/forms/draft-form", payload: { name: "Ana" } });
+    // Open triggers say they are paused only to a signed-in editor; anyone else gets the plain not-found.
+    expect((await context.app.inject({ method: "POST", url: "/api/forms/draft-form", payload: { name: "Ana" } })).json()).toEqual({ error: "Form not found" });
+    const submitted = await context.app.inject({ method: "POST", url: "/api/forms/draft-form", headers: { cookie }, payload: { name: "Ana" } });
     expect(submitted.statusCode).toBe(409);
     expect((submitted.json() as { code: string }).code).toBe("workflow_unfinished");
     expect((await context.app.inject({ method: "GET", url: "/api/mcp-server/draft-tool/manifest" })).statusCode).toBe(200);
-    const called = await context.app.inject({ method: "POST", url: "/api/mcp-server/draft-tool/invoke", payload: { arguments: {} } });
+    expect((await context.app.inject({ method: "POST", url: "/api/mcp-server/draft-tool/invoke", payload: { arguments: {} } })).json()).toEqual({ error: "MCP server not found" });
+    const called = await context.app.inject({ method: "POST", url: "/api/mcp-server/draft-tool/invoke", headers: { cookie }, payload: { arguments: {} } });
     expect(called.statusCode).toBe(409);
     expect((called.json() as { code: string }).code).toBe("workflow_unfinished");
     expect(await runs(context, "wf-form-draft")).toHaveLength(0);

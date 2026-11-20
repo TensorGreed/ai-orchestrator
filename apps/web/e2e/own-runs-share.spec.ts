@@ -4,8 +4,9 @@ import { expect, test, type Browser, type Page } from "@playwright/test";
 /**
  * A workflow shared with a person, who is not a member of its project: they see only their own runs of it. The admin
  * runs it first; the operator it is shared with runs it from the editor, the run picker reads "Your runs" and lists only
- * their run, and the admin's run answers 404 to them. It holds in both isolation modes (with role isolation the global
- * role an operator gets in a project they are not a member of does not count against the share). No model is
+ * their run, and the admin's run answers 404 to them. That holds when the share is their only way to the workflow
+ * (strict isolation); with role isolation the operator's role reaches every project, so the share takes nothing away
+ * and they see every run. No model is
  * called. Everything it makes is removed at the end. Also: a deep link opens any workflow the person can read (and
  * only those), a person with no project of their own lands on the workflows shared with them, and the publish dialog
  * shows them a gate's verdict without the reasons and figures taken from other people's runs.
@@ -100,7 +101,11 @@ test.describe("own runs only", () => {
       const as = await pageAs(browser, operator.email, operator.password);
       try {
         const access = (await (await as.page.request.get(`/api/workflows/${id}/access`)).json()) as { ownRunsOnly?: boolean };
-        expect(access.ownRunsOnly).toBe(true);
+        if (!access.ownRunsOnly) {
+          // Role isolation: the operator's role reaches the project, so the share takes nothing away.
+          expect((await as.page.request.get(`/api/executions/${adminRunId}`)).status()).toBe(200);
+          return;
+        }
 
         // Before running: none of the admin's runs.
         expect((await as.page.request.get(`/api/executions/${adminRunId}`)).status()).toBe(404);
@@ -472,9 +477,9 @@ test.describe("own runs only: releases", () => {
 
       const as = await pageAs(browser, operator.email, operator.password);
       try {
-        // Both isolation modes: the share is all they have of the workflow.
+        // The share is their only way to the workflow only under strict isolation (role isolation lends their role).
         const access = (await (await as.page.request.get(`/api/workflows/${id}/access`)).json()) as { ownRunsOnly?: boolean };
-        expect(access.ownRunsOnly).toBe(true);
+        test.skip(!access.ownRunsOnly, "Needs a server with PROJECT_ISOLATION=strict");
 
         await as.page.goto(`/?projectId=${encodeURIComponent(homeId)}&workflowId=${encodeURIComponent(id)}&mode=editor`);
         await expect(as.page.getByLabel("Workflow name")).toHaveValue("E2E Gate shared", { timeout: 60_000 });

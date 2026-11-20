@@ -9,13 +9,14 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
-import type { Workflow } from "@ai-orchestrator/shared";
+import { getNodeDefinition, type Workflow } from "@ai-orchestrator/shared";
 import { createApp } from "./app.js";
 import { parseConfig, type AppConfig } from "./config.js";
 import type { Store } from "./db/store.js";
 import { AuthService } from "./services/auth-service.js";
 import { SecretService } from "./services/secret-service.js";
 import { openTestStore } from "./test-support/test-store.js";
+import { webhookTestCookie } from "./test-support/webhook-test-caller.js";
 
 interface TestContext {
   app: FastifyInstance;
@@ -104,7 +105,8 @@ describe("Webhook Response Mode On Received", () => {
     const context = await createTestContext();
     await context.store.upsertWorkflow(onReceivedWorkflow());
     for (const route of ["/webhook/orders-in", "/webhook-test/orders-in"]) {
-      const response = await context.app.inject({ method: "POST", url: route, payload: { customer: "Grace Hopper" } });
+      const headers = route.startsWith("/webhook-test") ? { cookie: await webhookTestCookie(context) } : {};
+      const response = await context.app.inject({ method: "POST", url: route, headers, payload: { customer: "Grace Hopper" } });
       expect(response.statusCode, response.body).toBe(202);
       const body = response.json<{ executionId: string; status: string }>();
       expect(body).toEqual({ executionId: expect.any(String), status: "accepted" });
@@ -211,5 +213,69 @@ describe("Webhook Response Mode On Received", () => {
     });
     const response = await context.app.inject({ method: "POST", url: "/webhook/orders-in", payload: { customer: "Grace" } });
     expect(response.statusCode, response.body).toBe(402);
+  });
+});
+
+describe("the Webhook Input's Response Status Code", () => {
+  /** Webhook → Output, or Webhook → Webhook Response (418) → Output; the status code set on the Webhook Input. */
+  function replyWorkflow(hook: Record<string, unknown>, withResponseNode = false, failing = false): Workflow {
+    return {
+      id: "wf-code",
+      name: "Code",
+      schemaVersion: "1.0.0",
+      workflowVersion: 1,
+      projectId: "default",
+      nodes: [
+        { id: "hook", type: "webhook_input", name: "Hook", position, config: { path: "coded", method: "POST", authMode: "none", ...hook } },
+        ...(withResponseNode ? [{ id: "reply", type: "webhook_response", name: "Reply", position, config: { statusCode: 418, bodyTemplate: "{\"tea\":true}" } }] : []),
+        failing
+          ? { id: "out", type: "code_node", name: "Boom", position, config: { language: "javascript", code: "throw new Error('boom')" } }
+          : { id: "out", type: "output", name: "Out", position, config: { responseTemplate: "done" } }
+      ],
+      edges: withResponseNode
+        ? [
+            { id: "e1", source: "hook", target: "reply" },
+            { id: "e2", source: "reply", target: "out" }
+          ]
+        : [{ id: "e1", source: "hook", target: "out" }]
+    } as Workflow;
+  }
+  const send = (context: TestContext) => context.app.inject({ method: "POST", url: "/webhook/coded", payload: { a: 1 } });
+
+  it("is the status of a reply the webhook builds itself, in every Response Mode; unset keeps 200 (202 for On Received)", async () => {
+    const context = await createTestContext();
+    for (const mode of [undefined, "auto", "lastNode", "responseNode"]) {
+      await context.store.upsertWorkflow(replyWorkflow({ ...(mode ? { responseMode: mode } : {}), responseCode: 201 }));
+      const response = await send(context);
+      expect(response.statusCode, `${mode} ${response.body}`).toBe(201);
+      await context.store.upsertWorkflow(replyWorkflow(mode ? { responseMode: mode } : {}));
+      expect((await send(context)).statusCode, String(mode)).toBe(200);
+    }
+    await context.store.upsertWorkflow(replyWorkflow({ responseMode: "onReceived", responseCode: 200 }));
+    const received = await send(context);
+    expect(received.statusCode).toBe(200);
+    expect(received.json()).toMatchObject({ status: "accepted" });
+    await context.store.upsertWorkflow(replyWorkflow({ responseMode: "onReceived" }));
+    expect((await send(context)).statusCode).toBe(202);
+  });
+
+  it("gives way to a Webhook Response node's own status, and a failed run still answers 400", async () => {
+    const context = await createTestContext();
+    await context.store.upsertWorkflow(replyWorkflow({ responseCode: 201 }, true));
+    expect((await send(context)).statusCode).toBe(418);
+    await context.store.upsertWorkflow(replyWorkflow({ responseCode: 201 }, false, true));
+    expect((await send(context)).statusCode).toBe(400);
+  });
+
+  it("is kept for a retry under the same idempotency key", async () => {
+    const context = await createTestContext();
+    await context.store.upsertWorkflow(replyWorkflow({ responseCode: 201, idempotencyEnabled: true, idempotencyHeaderName: "idempotency-key" }));
+    const sendKeyed = () => context.app.inject({ method: "POST", url: "/webhook/coded", headers: { "idempotency-key": "k-9" }, payload: { a: 1 } });
+    expect((await sendKeyed()).statusCode).toBe(201);
+    expect((await sendKeyed()).statusCode).toBe(201);
+  });
+
+  it("new Webhook Input nodes leave it unset", () => {
+    expect(getNodeDefinition("webhook_input")?.sampleConfig).not.toHaveProperty("responseCode");
   });
 });
