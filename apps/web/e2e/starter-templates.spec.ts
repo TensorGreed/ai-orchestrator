@@ -199,7 +199,7 @@ test("the webhook starter's URL and test URL answer not found until its trigger 
   expect(await testOff.json()).toMatchObject({ code: "trigger_off" });
   await page.getByRole("button", { name: "Webhook run", exact: true }).click();
   const runDialog = page.getByRole("dialog", { name: "Webhook run" });
-  await expect(runDialog.getByTestId("webhook-run-off-note")).toContainText("This webhook is off");
+  await expect(runDialog.getByTestId("webhook-run-off-note")).toContainText("A webhook in this workflow is off");
   await runDialog.getByRole("button", { name: "Cancel" }).click();
 
   const inspector = await inspect("Incoming request");

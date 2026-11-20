@@ -10785,6 +10785,12 @@ export async function createApp(
       return { error: parsed.data.email ? `No user with the email ${parsed.data.email}. Invite them first.` : "Target user does not exist" };
     }
     const memberUserId = targetUser.id;
+    // Nobody but an admin adds or changes their own membership: under role isolation a builder's role lends them
+    // project:invite in every project, and a membership of their own would lift the cap a person share puts on them.
+    if (memberUserId === user.id && user.role !== "admin") {
+      reply.code(403);
+      return { error: "You cannot add or change your own membership. Ask a project admin or an admin." };
+    }
     const role = parsed.data.role;
     if (!isProjectRole(role) && role !== "custom") {
       reply.code(400);
@@ -14111,6 +14117,30 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
    * projects, and for a session call another site started (`Sec-Fetch-Site: cross-site`), so a link elsewhere cannot run
    * a draft as the person who clicks it.
    */
+  /**
+   * Whether a call that carries the session cookie came from the studio, not from another site's page (a link or a
+   * form there sends the cookie too). The page's origin, when the browser names it (Origin, else Referer), must be
+   * this server's or a WEB_ORIGIN; otherwise Sec-Fetch-Site must say same-origin or none (typed in the address bar).
+   * A client that sends none of these headers (curl, a script) is not a browser page and is let through.
+   */
+  const sessionCallFromStudio = (request: FastifyRequest): boolean => {
+    const headers = request.headers as Record<string, unknown>;
+    const ownOrigin = `${request.protocol}://${String(request.headers.host ?? "")}`;
+    const originOf = (value: string): string | null => {
+      if (!value) return null;
+      if (value === "null") return "null";
+      try {
+        return new URL(value).origin;
+      } catch {
+        return "null";
+      }
+    };
+    const pageOrigin = originOf(getHeaderValue(headers, "origin")) ?? originOf(getHeaderValue(headers, "referer"));
+    if (pageOrigin !== null) return pageOrigin === originOf(ownOrigin) || allowedOrigins.has(pageOrigin);
+    const site = getHeaderValue(headers, "sec-fetch-site");
+    return site === "" || site === "same-origin" || site === "none";
+  };
+
   const webhookTestCaller = async (request: FastifyRequest): Promise<SafeUser | null> => {
     const headers = request.headers as Record<string, unknown>;
     const headerKey = getHeaderValue(headers, "x-api-key");
@@ -14120,7 +14150,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     const checked = await checkCaller(caller, ["operator"]);
     if (!checked.ok) return null;
     const viaSession = sessionService.getRequestAuth(caller)?.credential === "session";
-    if (viaSession && getHeaderValue(headers, "sec-fetch-site") === "cross-site") return null;
+    if (viaSession && !sessionCallFromStudio(request)) return null;
     return checked.user;
   };
 
@@ -14523,6 +14553,7 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
                   executionId,
                   triggerType,
                   triggeredBy: "webhook",
+                  ...(testCaller ? { triggeredByUserId: testCaller.id } : {}),
                   channel: isTestRoute ? "draft" : "production",
                   ...(webhookInputLabels ? { inputLabels: webhookInputLabels, recordInputLabels: true } : {})
                 },
@@ -14587,6 +14618,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
               executionId,
               triggerType,
               triggeredBy: "webhook",
+              // A test URL run is the signed-in caller's (or the API key owner's): Runs shows who started it.
+              ...(testCaller ? { triggeredByUserId: testCaller.id } : {}),
               channel: isTestRoute ? "draft" : "production",
               ...(webhookInputLabels ? { inputLabels: webhookInputLabels, recordInputLabels: true } : {}),
               // Phase 12 coverage — the caller receives the output (the chat widget posts here too).

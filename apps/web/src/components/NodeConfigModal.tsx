@@ -4975,7 +4975,7 @@ export function NodeInspector({
           </div>
           <code>{`${method} ${testUrl}`}</code>
           <div data-testid="webhook-test-url-note">
-            Runs the draft. Only for you while you are signed in, or with an API key of someone who may edit this workflow
+            Runs the draft. Needs a signed-in session, or an API key, of someone who may edit this workflow
             (in <code>Authorization: Bearer</code>, or <code>X-API-Key</code> when the webhook uses a bearer token).
             {config.active === false ? " While the webhook is off it answers not found, as the production URL does." : ""}
           </div>

@@ -122,9 +122,11 @@ Workflows that are not shared with them keep the view their role gives.
 
 The share also caps what they may do with it, under both settings: a builder whose access to a workflow comes only
 from a person share gets the share's level, as anyone else would. **Can view** reads it; **Can view and run** also runs
-the released version. They cannot save, publish, delete, duplicate or re-share it (the API answers `403`, and the
+the released version (under `role` isolation an operator with a **Can view** share no longer runs it). They cannot
+save, publish, delete, duplicate or re-share it (the API answers `403`, and the
 editor and Home hide those controls), and they see none of what is built from other people's runs: golden sets,
-evals, release-gate reasons and replay captures. Add them to the project to give them more.
+evals, release-gate reasons and replay captures. Add them to the project to give them more. Nobody but an admin adds
+or changes their own project membership, so the cap cannot be lifted that way.
 
 Details: [Own runs only](./auth-rbac.md#own-runs-only).
 

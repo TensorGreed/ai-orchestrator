@@ -183,7 +183,7 @@ in `MFA_REQUIRED_ROLES`, see [MFA required per role](#mfa-required-per-role)).
   is emailed; otherwise the dialog shows it once to copy and pass on.
 - **Project members by email.** Settings, Project Members adds a member by email (admins pick from the deployment's
   users). `POST /api/projects/:id/members` takes `{ "email": "..." }` in place of `userId`, and the member list carries
-  each member's `email`.
+  each member's `email`. Nobody but an admin adds or changes their own membership (`403`).
 - **What the editor shows.** Viewers and operators open workflows read-only: Save, Add node and Clear are disabled, and
   their tooltip says why; viewers cannot run. Operators run the released version where they have `workflow:execute`
   (Run and Webhook run). A builder sees the same for a workflow they may only view (one shared with them, or in a

@@ -49,12 +49,14 @@ Telegram sends it in `X-Telegram-Bot-Api-Secret-Token` when you register the web
 
 The test URL runs the saved draft, so it is only for people who may edit the workflow:
 
-- A signed-in session (from the same site; a call another site starts is refused), or an API key in
+- A signed-in session from the studio's own page (a link or form on another site is refused: the page's `Origin` or
+  `Referer` must be this server or a `WEB_ORIGIN`), or an API key in
   `Authorization: Bearer <key>` or `X-API-Key: <key>`. Use `X-API-Key` when the webhook's own bearer token takes the
   `Authorization` header. A key limited to projects is refused here.
 - The caller needs edit access to the workflow. Someone who may only run it gets `403`, and should call `/webhook/:path`.
 - Anyone else, and a path that does not exist, gets the same plain `404` that lists no endpoints.
 - The webhook's own auth (bearer token or HMAC signature) still applies on top.
+- The run is recorded as started by the caller.
 
 ## Switched off (`active: false`)
 

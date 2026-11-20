@@ -100,8 +100,8 @@ export function WebhookTestPayloadDialog({ payload, webhookOff, busy, onRun, onC
         <div className="pg-modal-body">
           {webhookOff ? (
             <p className="cfg-tip" role="note" data-testid="webhook-run-off-note">
-              This webhook is off: its URL and test URL answer &quot;not found&quot; until you turn it on. Webhook run from the
-              editor still works.
+              A webhook in this workflow is off: its URL and test URL answer &quot;not found&quot; until you turn it on.
+              Webhook run from the editor still works.
             </p>
           ) : null}
           <div className="cfg-field">

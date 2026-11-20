@@ -230,6 +230,11 @@ describe.each(["strict", "role"] as const)("a person who has a workflow only thr
     const reshare = await call(context, "POST", "/api/workflows/wf-team/user-shares", gus.cookie, { email: "ada@example.com", accessLevel: "read" });
     expect(reshare.statusCode, reshare.body).toBe(403);
     expect((await context.store.getWorkflow("wf-team"))?.name).toBe("Echo wf-team");
+    // He cannot lift the cap by making himself a member (role isolation lends a builder project:invite everywhere).
+    const selfAdd = await call(context, "POST", "/api/projects/team/members", gus.cookie, { userId: gus.id, role: "project_admin" });
+    expect(selfAdd.statusCode, selfAdd.body).toBe(403);
+    expect(await context.store.getProjectRole(gus.id, "team")).toBeFalsy();
+    expect((await access(gus)).canEdit).toBe(false);
 
     // The project admin and an admin are unchanged.
     const ownerSave = await call(context, "PUT", "/api/workflows/wf-team", owner.cookie, { ...saved, name: "Renamed by Owen" });

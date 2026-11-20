@@ -125,6 +125,12 @@ export function settingLabel(path: string): string {
   return words.length > 0 ? words.join(" ") : last;
 }
 
+/**
+ * Triggers that run in the background once saved (a file watcher, feeds, brokers): they connect out on their own, so a
+ * described one starts with Active off, as live triggers start off.
+ */
+const BACKGROUND_TRIGGER_TYPES: ReadonlySet<string> = new Set(["file_trigger", "rss_trigger", "sse_trigger", "kafka_trigger", "rabbitmq_trigger", "mqtt_trigger"]);
+
 /** Where a dedicated chat model node sends its calls: the builder leaves these at the node's placeholder. */
 const MODEL_ADDRESS_KEYS: Readonly<Record<string, readonly string[]>> = {
   openai_compatible_chat_model: ["baseUrl"],
@@ -386,6 +392,7 @@ export function checkBuilderDraft(raw: unknown, options: BuilderDraftOptions): B
   const removedAdminKeys: string[] = [];
   /** Live triggers (webhook, form, chat, MCP tool, schedule): each starts off, as a starter's does. */
   const liveTriggerIds: string[] = [];
+  const backgroundTriggerIds: string[] = [];
   const removedAddresses: string[] = [];
   let modelChanged = false;
   rawNodes!.forEach((entry, index) => {
@@ -431,6 +438,9 @@ export function checkBuilderDraft(raw: unknown, options: BuilderDraftOptions): B
       // workflow and turns it on.
       config.active = false;
       liveTriggerIds.push(id);
+    } else if (BACKGROUND_TRIGGER_TYPES.has(definition.type)) {
+      config.active = false;
+      backgroundTriggerIds.push(id);
     }
     if (definition.type === "schedule_trigger" && !(typeof given.timezone === "string" && given.timezone.trim()) && options.timeZone) {
       config.timezone = options.timeZone;
@@ -562,6 +572,10 @@ export function checkBuilderDraft(raw: unknown, options: BuilderDraftOptions): B
   if (liveTriggerIds.length > 0) {
     const names = liveTriggerIds.map((id) => (byId.get(id) ? nameOf(byId.get(id)!) : id));
     notes.push(`${names.length === 1 ? "The trigger starts" : "Triggers start"} off: ${names.join(", ")}. Review the workflow, then open ${names.length === 1 ? "it" : "each one"} and choose Turn on.`);
+  }
+  if (backgroundTriggerIds.length > 0) {
+    const names = backgroundTriggerIds.map((id) => (byId.get(id) ? nameOf(byId.get(id)!) : id));
+    notes.push(`Background triggers start off: ${names.join(", ")}. Review the workflow, then switch Active on in each one's settings.`);
   }
   // A trigger the draft would leave open to anyone once turned on is said in the preview, before it is inserted (the
   // save says it again).

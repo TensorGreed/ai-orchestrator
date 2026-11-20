@@ -190,7 +190,35 @@ describe.each(["role", "strict"] as const)("the test webhook URL needs someone w
     });
     expect(response.statusCode).toBe(404);
     expect(response.json()).toEqual(PLAIN_404);
+    // Another site's page named by Origin or Referer, or a same-site page without a studio origin: refused too.
+    for (const headers of [
+      { origin: "https://evil.example" },
+      { referer: "https://evil.example/page" },
+      { "sec-fetch-site": "same-site" },
+      { origin: "null" }
+    ]) {
+      const refused = await context.app.inject({ method: "POST", url: "/webhook-test/orders-wf-a", headers: { cookie: owner.cookie, ...headers }, payload: {} });
+      expect(refused.statusCode, JSON.stringify(headers)).toBe(404);
+    }
     expect((await context.store.listExecutionHistory({ page: 1, pageSize: 10 })).total).toBe(0);
+    // The studio's own page (a WEB_ORIGIN, or this server) and a typed-in address are let through.
+    for (const headers of [
+      { origin: context.config.WEB_ORIGIN.split(",")[0]!.trim(), "sec-fetch-site": "same-site" },
+      { referer: "http://localhost:80/editor", "sec-fetch-site": "same-origin" },
+      { "sec-fetch-site": "none" }
+    ]) {
+      const allowed = await context.app.inject({ method: "POST", url: "/webhook-test/orders-wf-a", headers: { cookie: owner.cookie, ...headers }, payload: {} });
+      expect(allowed.statusCode, `${JSON.stringify(headers)} ${allowed.body}`).toBe(200);
+    }
+  });
+
+  it("a test URL run is recorded as started by its caller", async () => {
+    const { context, owner } = await seed();
+    const response = await context.app.inject({ method: "POST", url: "/webhook-test/orders-wf-a", headers: { cookie: owner.cookie }, payload: { customer: "Ana" } });
+    expect(response.statusCode, response.body).toBe(200);
+    const runs = await context.store.listExecutionHistory({ page: 1, pageSize: 10 });
+    expect(runs.items).toHaveLength(1);
+    expect(await context.store.getExecutionStarter(runs.items[0]!.id)).toBe(owner.id);
   });
 
   it("a webhook switched off answers as production does; its own auth still applies", async () => {

@@ -147,6 +147,17 @@ describe("checkBuilderDraft", () => {
     );
     expect(live.workflow!.nodes.map((node) => (node.config as Record<string, unknown>).active)).toEqual([false, false, false]);
     expect(live.notes.join("\n")).toMatch(/Triggers start off: Incoming order, Form Trigger, Chat Trigger\. Review the workflow, then open each one and choose Turn on\./);
+    // Background triggers (feeds, brokers, file watchers) start off too: nothing connects out before the review.
+    const background = checkBuilderDraft(
+      {
+        name: "Feeds",
+        nodes: ["file_trigger", "rss_trigger", "sse_trigger", "kafka_trigger", "rabbitmq_trigger", "mqtt_trigger"].map((type) => ({ id: type.replace("_trigger", ""), type, config: { active: true } })),
+        edges: []
+      },
+      { workflowId: "wf" }
+    );
+    expect(background.workflow!.nodes.map((node) => (node.config as Record<string, unknown>).active)).toEqual([false, false, false, false, false, false]);
+    expect(background.notes.join("\n")).toMatch(/Background triggers start off: .*Kafka Trigger.*\. Review the workflow, then switch Active on in each one's settings\./);
     // A time zone the model chose is kept.
     const chosen = checkBuilderDraft(
       { name: "x", nodes: [{ id: "tick", type: "schedule_trigger", config: { timezone: "Asia/Tokyo" } }], edges: [] },
