@@ -30,6 +30,8 @@ export interface ConnectedAccountRoutesDeps {
   store: Store;
   service: ConnectedAccountService;
   webOrigin: string;
+  /** Every WEB_ORIGIN entry: a sign-in started from one of them reports back to it. */
+  webOrigins?: readonly string[];
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   requireStepUp: (request: FastifyRequest, reply: FastifyReply, action: StepUpAction) => Promise<boolean>;
   can: (user: SafeUser, projectId: string, permission: Permission) => Promise<boolean>;
@@ -171,6 +173,12 @@ export function registerConnectedAccountRoutes(deps: ConnectedAccountRoutesDeps)
     }
   });
 
+  /** The page's origin when it is one of WEB_ORIGIN (never anything else: the callback page posts its message there). */
+  const openerOriginOf = (request: FastifyRequest): string | undefined => {
+    const origin = typeof request.headers.origin === "string" ? request.headers.origin.trim() : "";
+    return origin && (deps.webOrigins ?? []).includes(origin) ? origin : undefined;
+  };
+
   app.post<{ Params: { providerId: string }; Body: unknown }>("/api/connect/:providerId/start", async (request, reply) => {
     const user = await deps.requireRole(request, reply, ["builder"]);
     if (!user) return;
@@ -209,7 +217,8 @@ export function registerConnectedAccountRoutes(deps: ConnectedAccountRoutesDeps)
         sessionId,
         userId: user.id,
         userEmail: user.email,
-        ...(parsed.data.reconnectSecretId ? { reconnectSecretId: parsed.data.reconnectSecretId } : {})
+        ...(parsed.data.reconnectSecretId ? { reconnectSecretId: parsed.data.reconnectSecretId } : {}),
+        ...(openerOriginOf(request) ? { openerOrigin: openerOriginOf(request)! } : {})
       });
       await deps.auditUser(request, user, {
         category: "secret",
@@ -258,11 +267,12 @@ export function registerConnectedAccountRoutes(deps: ConnectedAccountRoutesDeps)
         projectId: outcome.projectId ?? DEFAULT_PROJECT_ID,
         metadata: {
           providerId: outcome.providerId,
-          ...(outcome.ok ? { accountLabel: outcome.accountLabel ?? null } : { error: (outcome.error ?? "").slice(0, 300) })
+          ...(outcome.ok ? { accountLabel: outcome.accountLabel ?? null } : { error: (outcome.error ?? "").slice(0, 300) }),
+          ...(outcome.ok && outcome.reconnected ? { previousAccountLabel: outcome.previousAccountLabel ?? null, accountChanged: outcome.accountChanged === true } : {})
         }
       });
     }
-    const page = renderConnectCallbackPage(outcome, deps.webOrigin);
+    const page = renderConnectCallbackPage(outcome, outcome.openerOrigin ?? deps.webOrigin);
     reply
       .code(outcome.ok ? 200 : 400)
       .header("content-type", "text/html; charset=utf-8")

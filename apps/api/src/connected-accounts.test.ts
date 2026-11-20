@@ -65,7 +65,7 @@ async function createTestContext(env: Record<string, string> = {}): Promise<Test
 }
 
 afterEach(async () => {
-  mock.control({ accessTtl: 3600, refuseRefresh: false, client: { id: "l2m-test-client", secret: "l2m-test-secret" } });
+  mock.control({ accessTtl: 3600, refuseRefresh: false, rateLimitRefresh: false, noRefreshToken: false, googleEmail: "person@mock.example", client: { id: "l2m-test-client", secret: "l2m-test-secret" } });
   while (contexts.length > 0) {
     const context = contexts.pop()!;
     await context.app.close();
@@ -335,6 +335,98 @@ describe("connected accounts", () => {
     expect((await call(context, "DELETE", `/api/secrets/${second.id}`, builder.cookie)).statusCode).toBe(200);
     expect(await context.store.getOAuthAccount(second.id)).toBeNull();
     expect(mock.stats.revocations).toBe(revocations + 2);
+  });
+
+  it("keeps an account connected through a 401 it cannot renew, a rate-limited refresh, and a 401 right after a renewal", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    const accountOf = async (providerId: string) => {
+      const list = (await call(context, "GET", "/api/secrets", builder.cookie)).json() as Array<{ id: string; provider: string; connection?: { providerId: string; status: string; refreshable: boolean } }>;
+      return list.find((secret) => secret.provider === "oauth_account" && secret.connection?.providerId === providerId)!;
+    };
+
+    // No refresh token (GitHub OAuth apps, Notion): a 401 from some server stands, and the account stays connected.
+    await setUpApp(context, admin, "github");
+    mock.control({ noRefreshToken: true });
+    await connect(context, builder.cookie, "github");
+    const github = await accountOf("github");
+    expect(github.connection).toMatchObject({ status: "connected", refreshable: false });
+    mock.control({ expireAccess: true, noRefreshToken: false });
+    const refused = await executeAs(context, builder.cookie, runWorkflow(github.id));
+    expect(refused.json().status).toBe("error");
+    expect((await accountOf("github")).connection!.status).toBe("connected");
+
+    // A refresh the provider rate-limits (429) is tried again later, not a reconnect.
+    await setUpApp(context, admin, "slack");
+    await connect(context, builder.cookie, "slack");
+    const slack = await accountOf("slack");
+    mock.control({ expireAccess: true, rateLimitRefresh: true });
+    const limited = await executeAs(context, builder.cookie, runWorkflow(slack.id));
+    expect(limited.json().status).toBe("error");
+    expect((await accountOf("slack")).connection!.status).toBe("connected");
+    mock.control({ rateLimitRefresh: false });
+    const before = mock.stats.refreshes;
+    const recovered = await executeAs(context, builder.cookie, runWorkflow(slack.id));
+    expect(recovered.json().status, recovered.body).toBe("success");
+    expect(mock.stats.refreshes).toBe(before + 1);
+
+    // A 401 to a token renewed moments ago is not renewed again (a server that refuses every token cannot churn it).
+    mock.control({ expireAccess: true });
+    const churn = await executeAs(context, builder.cookie, runWorkflow(slack.id));
+    expect(churn.json().status).toBe("error");
+    expect(mock.stats.refreshes).toBe(before + 1);
+    expect((await accountOf("slack")).connection!.status).toBe("connected");
+  });
+
+  it("does not carry a refresh token over to a different account on Reconnect, and records the change", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    await setUpApp(context, admin, "google");
+    await connect(context, builder.cookie, "google");
+    const account = ((await call(context, "GET", "/api/secrets", builder.cookie)).json() as Array<{ id: string; provider: string }>).find((secret) => secret.provider === "oauth_account")!;
+    // Someone else signs in on Reconnect and the provider sends no refresh token this time.
+    mock.control({ googleEmail: "someone.else@mock.example", noRefreshToken: true });
+    const again = await connect(context, builder.cookie, "google", { reconnectSecretId: account.id });
+    expect(again.callback.statusCode, again.callback.body).toBe(200);
+    const view = (await call(context, "GET", `/api/connect/accounts/${account.id}`, builder.cookie)).json() as { connection: { accountLabel: string; refreshable: boolean } };
+    expect(view.connection).toMatchObject({ accountLabel: "someone.else@mock.example", refreshable: false });
+    const audit = (await call(context, "GET", "/api/audit?eventType=oauth_account.reconnected", admin.cookie)).json() as { items: Array<{ eventType: string; metadata?: Record<string, unknown> }> };
+    const reconnected = audit.items.find((event) => event.eventType === "oauth_account.reconnected");
+    expect(reconnected?.metadata).toMatchObject({ accountChanged: true, previousAccountLabel: "person@mock.example", accountLabel: "someone.else@mock.example" });
+  });
+
+  it("reports back to the web origin the sign-in was started from, when it is one of WEB_ORIGIN", async () => {
+    const context = await createTestContext({ WEB_ORIGIN: "https://first.example.test,https://second.example.test" });
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    await setUpApp(context, admin);
+    const pageFor = async (origin: string) => {
+      const started = await context.app.inject({ method: "POST", url: "/api/connect/slack/start", headers: { cookie: builder.cookie, origin }, payload: {} });
+      expect(started.statusCode, started.body).toBe(200);
+      const consent = await fetch((started.json() as { authorizationUrl: string }).authorizationUrl, { redirect: "manual" });
+      const location = new URL(consent.headers.get("location")!);
+      return (await context.app.inject({ method: "GET", url: `${location.pathname}${location.search}`, headers: { cookie: builder.cookie } })).body;
+    };
+    expect(await pageFor("https://second.example.test")).toContain('"https://second.example.test")');
+    // Any other origin: the message goes only to the first WEB_ORIGIN.
+    const other = await pageFor("https://evil.example");
+    expect(other).toContain('"https://first.example.test")');
+    expect(other).not.toContain("evil.example");
+  });
+
+  it("deletes a connected-account secret whose details row is missing", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    await setUpApp(context, admin);
+    await connect(context, builder.cookie);
+    const account = ((await call(context, "GET", "/api/secrets", builder.cookie)).json() as Array<{ id: string; provider: string }>).find((secret) => secret.provider === "oauth_account")!;
+    await context.store.deleteOAuthAccount(account.id);
+    const removed = await call(context, "DELETE", `/api/secrets/${account.id}`, builder.cookie);
+    expect(removed.statusCode, removed.body).toBe(200);
+    expect(await context.store.getSecret(account.id)).toBeNull();
   });
 
   it("refuses a test provider URL that is not loopback, and an APP_PUBLIC_URL with a query", () => {

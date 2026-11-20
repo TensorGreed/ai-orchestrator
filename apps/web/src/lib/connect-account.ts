@@ -19,7 +19,14 @@ export interface ConnectResult {
   providerId: string;
   secretId?: string;
   error?: string;
+  /**
+   * The window closed without a message. The sign-in may still have finished (a provider page can cut the window off
+   * from this one), so callers reload the list instead of reporting a failure.
+   */
+  closed?: boolean;
 }
+
+let popupCounter = 0;
 
 /** The callback page's message, only from this app's own origin; anything else is ignored. */
 export function readConnectMessage(event: { origin: string; data: unknown }, expectedOrigin: string): ConnectResult | null {
@@ -71,7 +78,9 @@ export function connectedAccountSummary(view: ConnectedAccountView, now = Date.n
 
 /**
  * Opens the provider's sign-in in a popup and waits for the callback page's message (or for the popup to close).
- * The popup is opened before the first await so browsers treat it as a response to the click.
+ * The popup is opened before the first await so browsers treat it as a response to the click, and gets its own name
+ * so two sign-ins never share a window. A blocked popup is reported; this page is never navigated away (an open
+ * canvas would lose its unsaved edits).
  */
 export async function connectAccountInPopup(input: {
   providerId: ConnectedAccountProviderId | string;
@@ -79,7 +88,11 @@ export async function connectAccountInPopup(input: {
   scopeSets?: string[];
   reconnectSecretId?: string;
 }): Promise<ConnectResult> {
-  const popup = window.open("about:blank", "l2m-connect", "popup,width=560,height=720");
+  popupCounter += 1;
+  const popup = window.open("about:blank", `l2m-connect-${Date.now()}-${popupCounter}`, "popup,width=560,height=720");
+  if (!popup) {
+    return { ok: false, providerId: input.providerId, error: "Your browser blocked the sign-in window. Allow pop-ups for this site and press Connect again." };
+  }
   let authorizationUrl: string;
   try {
     const started = await startConnect(input.providerId, {
@@ -89,13 +102,8 @@ export async function connectAccountInPopup(input: {
     });
     authorizationUrl = started.authorizationUrl;
   } catch (error) {
-    popup?.close();
+    popup.close();
     throw error;
-  }
-  if (!popup) {
-    // Popups blocked: sign in in this tab instead; the callback page links back.
-    window.location.assign(authorizationUrl);
-    return { ok: false, providerId: input.providerId, error: "Popup blocked; continuing in this tab." };
   }
   popup.location.href = authorizationUrl;
   return await new Promise<ConnectResult>((resolve) => {
@@ -113,7 +121,9 @@ export async function connectAccountInPopup(input: {
     };
     window.addEventListener("message", onMessage);
     const timer = window.setInterval(() => {
-      if (popup.closed) finish({ ok: false, providerId: input.providerId, error: "The sign-in window was closed." });
+      if (popup.closed) {
+        finish({ ok: false, closed: true, providerId: input.providerId, error: "The sign-in window closed before it reported back. If you finished signing in, the account is in the list." });
+      }
     }, 500);
   });
 }

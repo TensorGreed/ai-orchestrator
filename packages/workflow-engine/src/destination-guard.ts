@@ -28,6 +28,7 @@ import {
   getNodeDefinition,
   mcpServerDestinationRef,
   networkDestinationRef,
+  readHttpSecretAuth,
   type DataLabels,
   type DestinationRef,
   type WorkflowNode
@@ -388,8 +389,13 @@ export function describeEgressRequest(
     const parts = urlContent(renderedUrl);
     const ref = networkDestinationRef("http", undefined, parts.host);
     const readable = readableBody(body, headers);
+    // OAuth2 client credentials: the client secret goes to the token URL first, so that host is a destination too,
+    // judged with the request's by the strictest of the two.
+    const auth = readHttpSecretAuth(config.secretAuth);
+    const tokenHost = auth && typeof auth !== "string" && auth.type === "oauth2_client_credentials" ? urlContent(auth.tokenUrl).host : undefined;
+    const refs = tokenHost !== undefined ? [ref, networkDestinationRef("http", undefined, tokenHost)] : [ref];
     return finish({
-      refs: [ref],
+      refs,
       channel: "egress",
       content: { method: safeMethod, url: parts.url, query: parts.query, headers, body: readable },
       what: `${label} (HTTP request to ${ref.host || "an unknown host"})`,

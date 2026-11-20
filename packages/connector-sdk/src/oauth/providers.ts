@@ -12,9 +12,12 @@
 import { CONNECTED_ACCOUNT_PROVIDER_LABELS, type ConnectedAccountProviderId, type ConnectedAccountScopeSet } from "@ai-orchestrator/shared";
 
 export class OAuthProviderError extends Error {
-  constructor(message: string) {
+  /** The provider's own error code (`invalid_grant`, Slack's `token_revoked`, …), when it sent one. */
+  readonly code: string | undefined;
+  constructor(message: string, code?: string) {
     super(message);
     this.name = "OAuthProviderError";
+    this.code = code;
   }
 }
 
@@ -98,7 +101,7 @@ function splitScopes(value: unknown, separator: RegExp = /[\s,]+/): string[] {
 /** The standard OAuth 2.0 token response, refusing an `error` even under a 200 (GitHub answers errors that way). */
 function parseStandardTokens(json: Record<string, unknown>): OAuthProviderTokens {
   const error = str(json.error);
-  if (error) throw new OAuthProviderError(`The provider refused: ${str(json.error_description) || error}`.slice(0, 300));
+  if (error) throw new OAuthProviderError(`The provider refused: ${str(json.error_description) || error}`.slice(0, 300), error);
   const accessToken = str(json.access_token);
   if (!accessToken) throw new OAuthProviderError("The provider returned no access token.");
   const expiresIn = Number(json.expires_in);
@@ -142,7 +145,7 @@ const BUILT_IN: OAuthProviderDefinition[] = [
       "Copy the Client ID and Client Secret from Basic Information into L2M."
     ],
     parseTokenResponse(json) {
-      if (json.ok === false) throw new OAuthProviderError(`Slack refused: ${str(json.error) || "unknown error"}`.slice(0, 300));
+      if (json.ok === false) throw new OAuthProviderError(`Slack refused: ${str(json.error) || "unknown error"}`.slice(0, 300), str(json.error) || undefined);
       const tokens = parseStandardTokens(json);
       const team = str(record(json.team).name);
       return { ...tokens, ...(team ? { accountLabel: team } : {}) };

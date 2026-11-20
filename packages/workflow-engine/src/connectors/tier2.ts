@@ -175,7 +175,24 @@ export async function executeTeamsSendMessage(
   let webhookUrl = configured.trim() ? renderTemplate(configured, ctx.templateData).trim() : "";
   if (!configured.trim()) {
     const fromSecret = await resolveSecretOptional(ctx, config);
-    if (fromSecret?.trim()) webhookUrl = renderTemplate(fromSecret.trim(), ctx.templateData);
+    if (fromSecret?.trim()) {
+      // The secret must be the webhook URL. Anything else (a connected Microsoft account's access token) is never
+      // fetched or shown.
+      let parsed: URL | null = null;
+      try {
+        parsed = new URL(fromSecret.trim());
+      } catch {
+        parsed = null;
+      }
+      if (!parsed || (parsed.protocol !== "https:" && parsed.protocol !== "http:")) {
+        throw new WorkflowError(
+          `${NODE}: the secret is not a webhook URL. To post with a Microsoft account, set Team ID and Channel ID.`,
+          ErrorCategory.NODE_CONFIG,
+          false
+        );
+      }
+      webhookUrl = renderTemplate(fromSecret.trim(), ctx.templateData);
+    }
   }
   if (!webhookUrl) {
     throw new WorkflowError(

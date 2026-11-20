@@ -1,6 +1,6 @@
 ---
-title: "Connect accounts: sign in to Slack, Google, GitHub, Microsoft and Notion"
-description: "Connect a Slack, Google, GitHub, Microsoft or Notion account to L2M with your own OAuth app, use it from nodes, and how tokens are renewed, reconnected and revoked. Also the HTTP Request node's Auth choices."
+title: "Connect accounts: sign in with your own OAuth app"
+description: "Connect Slack, Google, GitHub, Microsoft or Notion with your own OAuth app, use the account from nodes, and set the HTTP Request node's Auth."
 ---
 
 # Connect accounts
@@ -40,7 +40,10 @@ Every app needs this exact redirect URL:
 
 `APP_PUBLIC_URL` is the address people open L2M at (for example `https://l2m.example.com`). When it is empty, the
 first `WEB_ORIGIN` is used. The Secrets page shows the URL to copy. It has to be a plain base URL: no user name,
-query or fragment.
+query or fragment. Requests to `/api` at that address must reach the API, as they do when the web app and the API
+are served together (the Docker setup does this). The sign-in window reports back to the page that opened it when
+that page is one of the `WEB_ORIGIN` entries. If the window closes before it reports back, the Secrets page reloads
+the list, so an account that did connect still shows.
 
 ## Setting up each service
 
@@ -87,13 +90,18 @@ again that you may still create secrets in the project.
 ## Tokens, renewal and reconnecting
 
 - A run gets only the current access token; the refresh token never leaves the API.
-- L2M renews the access token shortly before it expires, and once more when a service answers a request with 401.
-  Renewals of one account do not overlap, also across API instances.
+- L2M renews the access token when a run uses it shortly before it expires, and once more when a service answers a
+  request with 401. Renewals of one account do not overlap, also across API instances. A token renewed less than a
+  minute ago is not renewed again after a 401: the service refused it for another reason.
+- An account without a refresh token (a GitHub OAuth app, Notion) is not renewed: a 401 is reported as it is, and the
+  account stays connected until its token expires.
 - **Refresh** on the Secrets page renews it now.
 - When the service refuses to renew (the person revoked access, the app's secret changed, the refresh token expired),
   the account shows **Needs reconnect**, runs that use it fail with a message saying so, and the audit log records
   `oauth_account.refresh_failed`. **Reconnect** signs in again and keeps the same secret, so workflows do not change.
-  A network failure does not mark the account; the next use tries again.
+  A network failure, a rate limit or a server error does not mark the account; the next use tries again.
+- If someone else signs in on **Reconnect**, the secret holds that account's tokens from then on (none of the earlier
+  account's), the account name changes on the Secrets page, and the audit entry records both names.
 - A Slack app without token rotation issues tokens that do not expire; there is nothing to renew.
 
 ## Disconnecting
@@ -131,7 +139,8 @@ The HTTP Request node has one **Auth** choice:
 For **OAuth2 client credentials**, enter the token URL, the client id and an optional scope. L2M keeps the token
 until shortly before it expires and asks again after a 401. The client credentials go in the request body; under
 **More**, *Send client credentials* switches to a basic auth header for services that want that. The token request
-follows the same [outbound URL checks](./outbound-url-checks.md) as the node.
+follows the same [outbound URL checks](./outbound-url-checks.md) as the node, never follows a redirect, and gives
+up after 15 seconds. Destination rules judge the token URL's host together with the request's.
 
 In the workflow JSON this is `secretRef` plus `secretAuth`:
 

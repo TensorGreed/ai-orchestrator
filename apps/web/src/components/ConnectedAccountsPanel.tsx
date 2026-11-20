@@ -83,6 +83,8 @@ export function ConnectedAccountsPanel({ projectId, secrets, onChanged }: Props)
         ...(reconnectSecretId ? { reconnectSecretId } : {})
       });
       await onChanged();
+      // The window closed without a word: the sign-in may have finished anyway, and the reloaded list shows it.
+      if (result.closed) return result.error ?? `The ${provider.label} sign-in window closed.`;
       if (!result.ok) throw new Error(result.error ?? `${provider.label} was not connected.`);
       return reconnectSecretId ? `${provider.label} reconnected.` : `${provider.label} connected. Pick it in a node's credential field.`;
     });

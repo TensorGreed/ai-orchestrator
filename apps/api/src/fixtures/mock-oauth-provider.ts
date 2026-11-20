@@ -32,6 +32,21 @@ interface Account {
   accessToken: string;
   refreshToken: string;
   revoked: boolean;
+  email?: string;
+}
+
+export interface MockOAuthControl {
+  accessTtl?: number;
+  expireAccess?: boolean;
+  /** Refresh answers 400 invalid_grant (the grant is gone). */
+  refuseRefresh?: boolean;
+  /** Refresh answers 429 (rate limited: a transient failure). */
+  rateLimitRefresh?: boolean;
+  /** New sign-ins get no refresh token (as GitHub OAuth apps and Notion). */
+  noRefreshToken?: boolean;
+  /** Google: the email the next sign-ins report (default person@mock.example). */
+  googleEmail?: string;
+  client?: { id: string; secret: string };
 }
 
 export interface MockOAuthProvider {
@@ -40,7 +55,7 @@ export interface MockOAuthProvider {
   /** Counters for assertions. */
   stats: { codes: number; tokenExchanges: number; refreshes: number; revocations: number; whoami: number };
   /** Test controls (also over HTTP: POST /__control). */
-  control: (input: { accessTtl?: number; expireAccess?: boolean; refuseRefresh?: boolean; client?: { id: string; secret: string } }) => void;
+  control: (input: MockOAuthControl) => void;
   /** The authorization requests seen (query parameters), latest last. */
   authorizations: Array<Record<string, string>>;
 }
@@ -71,6 +86,9 @@ export async function startMockOAuthProvider(options: { port?: number; host?: st
   let counter = 0;
   let accessTtl = 3600;
   let refuseRefresh = false;
+  let rateLimitRefresh = false;
+  let noRefreshToken = false;
+  let googleEmail = "person@mock.example";
   let client = { id: "l2m-test-client", secret: "l2m-test-secret" };
   const stats = { codes: 0, tokenExchanges: 0, refreshes: 0, revocations: 0, whoami: 0 };
   const authorizations: Array<Record<string, string>> = [];
@@ -78,6 +96,9 @@ export async function startMockOAuthProvider(options: { port?: number; host?: st
   const control: MockOAuthProvider["control"] = (input) => {
     if (typeof input.accessTtl === "number") accessTtl = input.accessTtl;
     if (typeof input.refuseRefresh === "boolean") refuseRefresh = input.refuseRefresh;
+    if (typeof input.rateLimitRefresh === "boolean") rateLimitRefresh = input.rateLimitRefresh;
+    if (typeof input.noRefreshToken === "boolean") noRefreshToken = input.noRefreshToken;
+    if (typeof input.googleEmail === "string") googleEmail = input.googleEmail;
     if (input.client) client = input.client;
     if (input.expireAccess) for (const account of accounts) account.accessToken = `expired-${account.accessToken}`;
   };
@@ -86,13 +107,13 @@ export async function startMockOAuthProvider(options: { port?: number; host?: st
     const base: Record<string, unknown> = {
       access_token: account.accessToken,
       token_type: "Bearer",
-      refresh_token: account.refreshToken,
+      ...(account.refreshToken ? { refresh_token: account.refreshToken } : {}),
       expires_in: accessTtl,
       ...(scope ? { scope } : {})
     };
     if (provider === "slack") return { ok: true, ...base, token_type: "bot", ...LABELS.slack };
     if (provider === "notion") return { ...base, ...LABELS.notion };
-    if (provider === "google") return { ...base, id_token: jwt({ email: "person@mock.example" }) };
+    if (provider === "google") return { ...base, id_token: jwt({ email: account.email ?? "person@mock.example" }) };
     if (provider === "microsoft") return { ...base, id_token: jwt({ preferred_username: "person@contoso.example" }) };
     return base; // github: label from /user
   };
@@ -105,7 +126,7 @@ export async function startMockOAuthProvider(options: { port?: number; host?: st
       const body = request.method === "GET" ? "" : await readBody(request);
 
       if (url.pathname === "/__control") {
-        if (request.method === "POST") control(body ? (JSON.parse(body) as Parameters<typeof control>[0]) : {});
+        if (request.method === "POST") control(body ? (JSON.parse(body) as MockOAuthControl) : {});
         send(response, 200, { ...stats, accounts: accounts.length });
         return;
       }
@@ -167,13 +188,17 @@ export async function startMockOAuthProvider(options: { port?: number; host?: st
           }
           stats.tokenExchanges += 1;
           counter += 1;
-          const account: Account = { provider, generation: 1, accessToken: `at-${provider}-${counter}`, refreshToken: `rt-${provider}-${counter}`, revoked: false };
+          const account: Account = { provider, generation: 1, accessToken: `at-${provider}-${counter}`, refreshToken: noRefreshToken ? "" : `rt-${provider}-${counter}`, revoked: false, email: googleEmail };
           accounts.push(account);
           send(response, 200, tokenResponse(provider, account, issued.scope));
           return;
         }
         if (params.grant_type === "refresh_token") {
-          const account = accounts.find((entry) => entry.refreshToken === params.refresh_token && !entry.revoked);
+          if (rateLimitRefresh) {
+            send(response, 429, { error: "rate_limited" }, { "retry-after": "1" });
+            return;
+          }
+          const account = accounts.find((entry) => entry.refreshToken && entry.refreshToken === params.refresh_token && !entry.revoked);
           if (!account || refuseRefresh) {
             send(response, 400, { error: "invalid_grant", error_description: "The refresh token is not valid" });
             return;
@@ -195,7 +220,7 @@ export async function startMockOAuthProvider(options: { port?: number; host?: st
         const bearer = /^Bearer (\S+)$/.exec(request.headers.authorization ?? "")?.[1];
         const form = request.headers["content-type"]?.includes("json") ? (JSON.parse(body || "{}") as Record<string, string>) : Object.fromEntries(new URLSearchParams(body));
         const token = bearer ?? form.token ?? form.access_token ?? "";
-        const account = accounts.find((entry) => entry.accessToken === token || entry.refreshToken === token);
+        const account = accounts.find((entry) => entry.accessToken === token || (entry.refreshToken && entry.refreshToken === token));
         if (account) {
           account.revoked = true;
           stats.revocations += 1;

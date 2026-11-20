@@ -16439,6 +16439,7 @@ const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and meth
     store,
     service: connectedAccountService,
     webOrigin: config.WEB_ORIGIN.split(",").map((entry) => entry.trim()).find(Boolean) ?? "/",
+    webOrigins: config.WEB_ORIGIN.split(",").map((entry) => entry.trim().replace(/\/+$/, "")).filter(Boolean),
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     requireStepUp: async (request, reply, action) => await requireStepUp(request, reply, action),
     can: async (user, projectId, permission) => await rbacService.can(user, projectId, permission),

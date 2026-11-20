@@ -119,3 +119,12 @@ describe("Connector nodes offer their provider's account", () => {
     expect(optionLabels(picker!).some((label) => label?.startsWith("Google ·"))).toBe(false);
   });
 });
+
+describe("Pickers without a provider to connect", () => {
+  it("a model's API key picker does not list connected accounts", () => {
+    render(<NodeInspector {...props("llm_call", { provider: { providerId: "openai", model: "gpt-4o-mini" }, userPromptTemplate: "hi" })} />);
+    const pickers = screen.getAllByRole("combobox").filter((element) => optionLabels(element).some((label) => label?.includes("Tickets key")));
+    expect(pickers.length).toBeGreaterThan(0);
+    for (const picker of pickers) expect(optionLabels(picker).some((label) => label?.startsWith("Google ·"))).toBe(false);
+  });
+});

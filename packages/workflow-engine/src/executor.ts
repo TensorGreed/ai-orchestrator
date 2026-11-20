@@ -4423,6 +4423,9 @@ function protectionNodesFor(guardNode: WorkflowNode, context: NodeRuntimeContext
  * Returns what the handler sends instead after a rewrite, and for HTTP
  * Request the check each redirect hop gets.
  */
+/** HTTP Request's OAuth2 client credentials: how long the token request may take. */
+const CLIENT_CREDENTIALS_TOKEN_TIMEOUT_MS = 15_000;
+
 async function outboundPreCheck(
   node: WorkflowNode,
   config: Record<string, unknown>,
@@ -4826,8 +4829,12 @@ async function executeNodeHandler(
         config: dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD,
         ...(dependencies.outboundDnsResolver ? { resolver: dependencies.outboundDnsResolver } : {})
       };
-      // The token request goes through the same outbound checks as the request itself, and never follows a redirect.
-      const postTokenRequest = async (url: string, init: RequestInit) => await guardedFetch(url, { ...init, redirect: "manual", signal: dependencies.abortSignal ?? null }, guardOptions);
+      // The token request goes through the same outbound checks as the request itself and never follows a redirect (a
+      // 307 would carry the client secret to the next hop). It has its own time limit, not the run's abort signal: one
+      // token request may serve several runs at once (getClientCredentialsToken), and one run stopping must not fail
+      // the others.
+      const postTokenRequest = async (url: string, init: RequestInit) =>
+        await guardedFetch(url, { ...init, redirect: "manual", signal: AbortSignal.timeout(CLIENT_CREDENTIALS_TOKEN_TIMEOUT_MS) }, { ...guardOptions, maxRedirects: 0 });
       const secretRef = toRecord(config.secretRef);
       if (typeof secretRef.secretId === "string" && secretRef.secretId.trim()) {
         const secretValue = await dependencies.resolveSecret({ secretId: secretRef.secretId.trim() });

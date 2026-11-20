@@ -86,6 +86,8 @@ interface PendingConnect {
   scopes: string[];
   /** Reconnect: the account secret whose tokens the sign-in replaces. */
   reconnectSecretId?: string;
+  /** The web origin (one of WEB_ORIGIN) the sign-in was started from: the callback page's message goes there. */
+  openerOrigin?: string;
   expiresAtMs: number;
 }
 
@@ -96,6 +98,11 @@ export interface ConnectCallbackOutcome {
   projectId?: string;
   accountLabel?: string | null;
   reconnected?: boolean;
+  /** Reconnect: the label before, and whether a different account signed in. */
+  previousAccountLabel?: string | null;
+  accountChanged?: boolean;
+  /** Where the callback page posts its message (the starting page's origin); unset = the first WEB_ORIGIN. */
+  openerOrigin?: string;
   error?: string;
 }
 
@@ -124,6 +131,8 @@ export interface ConnectedAccountServiceOptions {
 const PROVIDER_TIMEOUT_MS = 15_000;
 /** Access tokens handed to runs, remembered (as hashes) so a 401 to one can be answered with a fresh token. */
 const MAX_ISSUED = 10_000;
+/** After a renewal, a run's 401 does not renew the account again for this long. */
+const REJECTION_REFRESH_COOLDOWN_MS = 60_000;
 
 function hash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -303,6 +312,8 @@ export class ConnectedAccountService {
     userId: string;
     userEmail: string;
     reconnectSecretId?: string;
+    /** Already checked against WEB_ORIGIN by the route. */
+    openerOrigin?: string;
   }): Promise<{ authorizationUrl: string; expiresAt: string; redirectUri: string }> {
     const definition = this.provider(input.providerId);
     let projectId = input.projectId;
@@ -337,6 +348,7 @@ export class ConnectedAccountService {
       appId: app.id,
       scopes,
       ...(input.reconnectSecretId ? { reconnectSecretId: input.reconnectSecretId } : {}),
+      ...(input.openerOrigin ? { openerOrigin: input.openerOrigin } : {}),
       expiresAtMs
     };
     await this.options.challenges.issue({ kind: "oauth_account", id: state, userId: input.userId, scope: projectId, payload: pending, ttlMs: this.options.stateTtlMs });
@@ -374,8 +386,17 @@ export class ConnectedAccountService {
     const consumed = state ? await this.options.challenges.consume<PendingConnect>("oauth_account", state) : null;
     if (!consumed) return { ok: false, providerId: null, error: "This sign-in link is unknown or was already used. Start again from Connected accounts." };
     const pending = consumed.payload;
+    const outcome = await this.finishConnect(input, pending, consumed.expired);
+    return pending.openerOrigin ? { ...outcome, openerOrigin: pending.openerOrigin } : outcome;
+  }
+
+  private async finishConnect(
+    input: Parameters<ConnectedAccountService["completeConnect"]>[0],
+    pending: PendingConnect,
+    expired: boolean
+  ): Promise<ConnectCallbackOutcome> {
     const fail = (error: string): ConnectCallbackOutcome => ({ ok: false, providerId: pending.providerId, projectId: pending.projectId, error });
-    if (consumed.expired || pending.expiresAtMs <= Date.now()) return fail("This sign-in took too long. Start again from Connected accounts.");
+    if (expired || pending.expiresAtMs <= Date.now()) return fail("This sign-in took too long. Start again from Connected accounts.");
     if (!input.sessionId || hash(input.sessionId) !== pending.sessionHash || input.userId !== pending.userId) {
       return fail("This sign-in was started by another session. Sign in to L2M as the person who started it and connect again.");
     }
@@ -412,7 +433,9 @@ export class ConnectedAccountService {
       const account = await this.store.getOAuthAccount(pending.reconnectSecretId);
       if (!account || account.providerId !== definition.id) return fail("That connected account was removed while signing in. Connect it again.");
       const previous = parseStored(await this.secretService.readConnectedAccountValue(account.secretId));
-      const stored = this.storedTokens(definition.id, tokens, scopes, previous?.refreshToken);
+      // Someone else signed in: their tokens only. The old account's refresh token is never kept with them.
+      const accountChanged = Boolean(accountLabel && account.accountLabel && accountLabel !== account.accountLabel);
+      const stored = this.storedTokens(definition.id, tokens, scopes, accountChanged ? undefined : previous?.refreshToken);
       await this.writeAccountSecret(account.secretId, stored);
       await this.store.saveOAuthAccount({
         ...account,
@@ -427,7 +450,16 @@ export class ConnectedAccountService {
         connectedAt: now,
         lastRefreshAt: null
       });
-      return { ok: true, providerId: definition.id, secretId: account.secretId, projectId: account.projectId, accountLabel: accountLabel ?? account.accountLabel, reconnected: true };
+      return {
+        ok: true,
+        providerId: definition.id,
+        secretId: account.secretId,
+        projectId: account.projectId,
+        accountLabel: accountLabel ?? account.accountLabel,
+        reconnected: true,
+        previousAccountLabel: account.accountLabel,
+        accountChanged
+      };
     }
 
     const stored = this.storedTokens(definition.id, tokens, scopes);
@@ -481,7 +513,7 @@ export class ConnectedAccountService {
     if (!response.ok) {
       const code = typeof json.error === "string" ? json.error.slice(0, 80) : `HTTP ${response.status}`;
       const description = typeof json.error_description === "string" ? `: ${json.error_description.slice(0, 160)}` : "";
-      throw new TokenRefusedError(`${definition.label} refused the request (${code}${description}).`, response.status);
+      throw new TokenRefusedError(`${definition.label} refused the request (${code}${description}).`, response.status, typeof json.error === "string" ? json.error : undefined);
     }
     return definition.parseTokenResponse(json);
   }
@@ -529,7 +561,7 @@ export class ConnectedAccountService {
    * The current access token of a connected account, renewed when it is due (or when `force`). Throws a plain message
    * when the account needs reconnecting. Several callers wanting a renewal share one request.
    */
-  async getAccessToken(secretId: string, options: { force?: boolean; seenToken?: string } = {}): Promise<string> {
+  async getAccessToken(secretId: string, options: { force?: boolean; seenToken?: string; afterRejection?: boolean } = {}): Promise<string> {
     const account = await this.store.getOAuthAccount(secretId);
     const stored = parseStored(await this.secretService.readConnectedAccountValue(secretId));
     if (!account || !stored) throw new ConnectedAccountError("This connected account is missing its sign-in. Connect it again under Secrets → Connected accounts.", 404);
@@ -545,12 +577,21 @@ export class ConnectedAccountService {
       return stored.accessToken;
     }
     if (!stored.refreshToken) {
-      if (!options.force && !this.isExpired(stored)) {
-        this.remember(stored.accessToken, secretId);
-        return stored.accessToken;
+      if (!this.isExpired(stored)) {
+        // Nothing to renew with. A 401 from some server says nothing about the account itself: it stands.
+        if (!options.force) {
+          this.remember(stored.accessToken, secretId);
+          return stored.accessToken;
+        }
+        throw new ConnectedAccountError(`This ${definition?.label ?? account.providerId} account has no refresh token, so its access token cannot be renewed here.`, 409);
       }
       await this.markNeedsReconnect(account, "The access token expired and the provider gave no way to renew it.", "expired");
       throw new ConnectedAccountError(this.reconnectMessage(definition, account), 409);
+    }
+    // A run's 401 to a token renewed moments ago: renewing again would not help (the server refuses this account for
+    // another reason), and a server that answers 401 to everything must not churn the provider's refresh tokens.
+    if (options.afterRejection && !this.isDue(stored) && account.lastRefreshAt && Date.now() - Date.parse(account.lastRefreshAt) < REJECTION_REFRESH_COOLDOWN_MS) {
+      throw new ConnectedAccountError(`The ${definition?.label ?? account.providerId} account's token was renewed less than a minute ago and was refused again; it is not renewed again yet.`, 409);
     }
     const running = this.refreshing.get(secretId);
     if (running) return await running;
@@ -596,19 +637,22 @@ export class ConnectedAccountService {
       tokens = await this.tokenRequest(definition, app, clientSecret, { type: "refresh_token", refreshToken: stored.refreshToken });
     } catch (error) {
       // A refusal (a revoked or used refresh token, a changed app) needs a new sign-in; an outage does not.
-      const refused = error instanceof TokenRefusedError ? error.status >= 400 && error.status < 500 : error instanceof OAuthProviderError;
+      const refused = isGrantRefusal(error);
       const message = failureMessage(error);
       if (refused) {
         await this.markNeedsReconnect(account, `Renewing the token failed: ${message}`, "refused");
         throw new ConnectedAccountError(this.reconnectMessage(definition, account), 409);
       }
-      await this.store.saveOAuthAccount({ ...account, lastError: `Renewing the token failed: ${message} L2M tries again on the next use.`.slice(0, 500) });
+      await this.patchAccount(secretId, { lastError: `Renewing the token failed: ${message} L2M tries again on the next use.`.slice(0, 500) });
       throw new ConnectedAccountError(`The ${definition.label} account could not be renewed just now: ${message} Try again shortly.`, 502);
     }
     const next = this.storedTokens(definition.id, tokens, tokens.scopes.length > 0 ? tokens.scopes : stored.scopes, stored.refreshToken);
+    // A Reconnect or Disconnect that finished while the provider answered wins: these tokens are dropped.
+    const latest = parseStored(await this.secretService.readConnectedAccountValue(secretId));
+    if (!latest) throw new ConnectedAccountError("This connected account was removed.", 404);
+    if (latest.accessToken !== stored.accessToken) return latest.accessToken;
     await this.writeAccountSecret(secretId, next);
-    await this.store.saveOAuthAccount({
-      ...account,
+    await this.patchAccount(secretId, {
       scopes: next.scopes,
       expiresAt: next.expiresAt ?? null,
       hasRefreshToken: Boolean(next.refreshToken),
@@ -618,9 +662,16 @@ export class ConnectedAccountService {
     return next.accessToken;
   }
 
+  /** Saves `patch` over the account's current row; nothing when the account (or its secret) is gone meanwhile. */
+  private async patchAccount(secretId: string, patch: Partial<OAuthAccountRecord>): Promise<boolean> {
+    const current = await this.store.getOAuthAccount(secretId);
+    if (!current || !(await this.store.getSecret(secretId))) return false;
+    await this.store.saveOAuthAccount({ ...current, ...patch });
+    return true;
+  }
+
   private async markNeedsReconnect(account: OAuthAccountRecord, message: string, reason: string): Promise<void> {
-    const current = (await this.store.getOAuthAccount(account.secretId)) ?? account;
-    await this.store.saveOAuthAccount({ ...current, status: "needs_reconnect", lastError: message.slice(0, 500) });
+    if (!(await this.patchAccount(account.secretId, { status: "needs_reconnect", lastError: message.slice(0, 500) }))) return;
     await this.options.onAudit?.({
       eventType: "oauth_account.refresh_failed",
       outcome: "failure",
@@ -657,7 +708,7 @@ export class ConnectedAccountService {
       refreshRejected: async (token) => {
         const secretId = mine.get(hash(token));
         if (!secretId) return undefined;
-        const fresh = await this.getAccessToken(secretId, { force: true, seenToken: token });
+        const fresh = await this.getAccessToken(secretId, { force: true, seenToken: token, afterRejection: true });
         mine.set(hash(fresh), secretId);
         return fresh;
       }
@@ -702,7 +753,14 @@ export class ConnectedAccountService {
    */
   async disconnect(secretId: string): Promise<{ revoked: boolean; providerId: string; projectId: string }> {
     const account = await this.store.getOAuthAccount(secretId);
-    if (!account) throw new ConnectedAccountError("Connected account not found.", 404);
+    if (!account) {
+      // The details row went missing (an interrupted connect, a partial restore): the secret still goes.
+      const secret = await this.store.getSecret(secretId);
+      if (!secret || secret.provider !== CONNECTED_ACCOUNT_SECRET_PROVIDER) throw new ConnectedAccountError("Connected account not found.", 404);
+      for (const [key, id] of this.issued) if (id === secretId) this.issued.delete(key);
+      await this.secretService.deleteSecret(secretId);
+      return { revoked: false, providerId: "unknown", projectId: secret.projectId ?? "default" };
+    }
     const stored = parseStored(await this.secretService.readConnectedAccountValue(secretId));
     const definition = this.options.registry.get(account.providerId);
     let revoked = false;
@@ -715,6 +773,8 @@ export class ConnectedAccountService {
     }
     for (const [key, id] of this.issued) if (id === secretId) this.issued.delete(key);
     await this.secretService.deleteSecret(secretId);
+    // A refresh that failed while this ran may have written the row back.
+    await this.store.deleteOAuthAccount(secretId);
     return { revoked, providerId: account.providerId, projectId: account.projectId };
   }
 
@@ -750,11 +810,24 @@ export class ConnectedAccountService {
   }
 }
 
+/** A refresh the provider answered with one of these needs a new sign-in; anything else (429, 5xx, timeouts) is retried. */
+const GRANT_REFUSAL_CODES = new Set(["invalid_grant", "invalid_client", "unauthorized_client", "invalid_refresh_token", "token_revoked", "token_expired", "account_inactive", "invalid_client_id", "bad_client_secret", "invalid_token"]);
+
+function isGrantRefusal(error: unknown): boolean {
+  if (error instanceof TokenRefusedError) {
+    if (error.code) return GRANT_REFUSAL_CODES.has(error.code);
+    return error.status === 400 || error.status === 401;
+  }
+  if (error instanceof OAuthProviderError) return error.code === undefined || GRANT_REFUSAL_CODES.has(error.code);
+  return false;
+}
+
 /** The token endpoint answered with an error status. */
 class TokenRefusedError extends Error {
   constructor(
     message: string,
-    readonly status: number
+    readonly status: number,
+    readonly code?: string
   ) {
     super(message);
     this.name = "TokenRefusedError";

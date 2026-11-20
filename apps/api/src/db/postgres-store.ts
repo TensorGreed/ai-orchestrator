@@ -1747,6 +1747,9 @@ export class PostgresStore implements Store {
   async saveOAuthAccount(...args: Parameters<Store["saveOAuthAccount"]>): ReturnType<Store["saveOAuthAccount"]> {
     return oauthAccounts.saveOAuthAccount(this.ctx, ...args);
   }
+  async deleteOAuthAccount(...args: Parameters<Store["deleteOAuthAccount"]>): ReturnType<Store["deleteOAuthAccount"]> {
+    return oauthAccounts.deleteOAuthAccount(this.ctx, ...args);
+  }
   async listSecretShares(...args: Parameters<Store["listSecretShares"]>): ReturnType<Store["listSecretShares"]> {
     return secrets.listSecretShares(this.ctx, ...args);
   }

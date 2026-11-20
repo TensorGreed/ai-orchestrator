@@ -12,6 +12,8 @@ import { validateWorkflowGraph as validateWorkflow } from "./validation";
 import { DEFAULT_OUTBOUND_GUARD } from "./outbound-url-guard";
 import { clearClientCredentialsTokenCache } from "./http-auth";
 import { executeTier1Node } from "./connectors/tier1-dispatch";
+import { describeEgressRequest } from "./destination-guard";
+import { connectorAddressInSecret, connectorDestinationRef } from "@ai-orchestrator/shared";
 
 const node = (id: string, type: string, config: Record<string, unknown> = {}): WorkflowNode => ({ id, type: type as WorkflowNode["type"], name: id, position: { x: 0, y: 0 }, config });
 
@@ -29,6 +31,12 @@ beforeAll(async () => {
     request.on("data", (chunk) => (body += chunk));
     request.on("end", () => {
       seen.push({ url: request.url ?? "", method: request.method ?? "", headers: request.headers, body });
+      if (request.url === "/oauth/moved") {
+        // A token endpoint that redirects: a 307 keeps the POST and its body (the client secret) on the next hop.
+        response.writeHead(307, { location: "/oauth/token" });
+        response.end();
+        return;
+      }
       if (request.url === "/oauth/token") {
         tokenRequests += 1;
         const form = new URLSearchParams(body);
@@ -135,6 +143,23 @@ describe("HTTP Request OAuth2 client credentials", () => {
     expect(tokenRequests).toBe(4);
   });
 
+  it("never follows a redirect from the token endpoint, so the client secret goes nowhere else", async () => {
+    const result = await executeWorkflow(
+      { workflow: workflow(ccAuth({ tokenUrl: `${base}/oauth/moved` })), executionId: "cc-moved", webhookPayload: {} },
+      deps()
+    );
+    expect(result.status).toBe("error");
+    expect(tokenRequests).toBe(0);
+    expect(JSON.stringify(result)).not.toContain("cs-secret");
+  });
+
+  it("the token URL is a destination of the request, judged by the destination rules with the URL", () => {
+    const request = describeEgressRequest({ type: "http_request", name: "h", id: "h" }, { method: "GET", urlTemplate: "https://api.example.com/items", ...ccAuth({ tokenUrl: "https://login.example.net/oauth/token" }) }, {});
+    expect(request!.refs.map((ref) => ref.host)).toEqual(["api.example.com", "login.example.net"]);
+    const plain = describeEgressRequest({ type: "http_request", name: "h", id: "h" }, { method: "GET", urlTemplate: "https://api.example.com/items" }, {});
+    expect(plain!.refs.map((ref) => ref.host)).toEqual(["api.example.com"]);
+  });
+
   it("fails with a plain message when the token endpoint refuses, without the secret", async () => {
     const result = await executeWorkflow(
       { workflow: workflow(ccAuth({ clientId: "wrong" })), executionId: "cc-refused", webhookPayload: {} },
@@ -213,6 +238,30 @@ describe("Teams with a Microsoft account", () => {
     expect(calls[0]!.url).toBe("https://graph.microsoft.com/v1.0/teams/team-1/channels/19%3Aabc%40thread.tacv2/messages");
     expect(calls[0]!.auth).toBe("Bearer ms-token");
     expect(JSON.parse(calls[0]!.body)).toEqual({ body: { contentType: "html", content: "<p><strong>Build</strong></p><p>Done &#60;ok&#62;</p>" } });
+  });
+
+  it("is addressed at Microsoft Graph for the destination rules, not at its secret", () => {
+    const graph = { teamId: "team-1", channelId: "c", secretRef: { secretId: "sec_ms" } };
+    expect(connectorAddressInSecret("teams_send_message", graph)).toBe(false);
+    expect(connectorDestinationRef("teams_send_message", graph)?.host).toBe("graph.microsoft.com");
+    expect(connectorAddressInSecret("teams_send_message", { secretRef: { secretId: "sec_hook" } })).toBe(true);
+  });
+
+  it("refuses a webhook secret that is not a URL without echoing it (a connected account needs Team ID and Channel ID)", async () => {
+    const { executeTier2Node } = await import("./connectors/tier2-dispatch");
+    const config = { text: "hi", secretRef: { secretId: "sec_ms" } };
+    let fetched = false;
+    const run = executeTier2Node(node("t", "teams_send_message", config), config, {
+      templateData: {},
+      resolveSecret: async () => "eyJ0eXAiOiJKV1QiLCJhbGciOiJub25lIn0.access-token",
+      fetchImpl: (async () => {
+        fetched = true;
+        return new Response("1");
+      }) as typeof fetch
+    });
+    await expect(run).rejects.toThrow(/Team ID and Channel ID/);
+    await expect(run).rejects.not.toThrow(/access-token/);
+    expect(fetched).toBe(false);
   });
 
   it("asks for both ids", async () => {

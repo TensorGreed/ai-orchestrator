@@ -1643,6 +1643,8 @@ export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentR
   listOAuthAccounts(secretIds?: readonly string[]): Promise<OAuthAccountRecord[]>;
   getOAuthAccount(secretId: string): Promise<OAuthAccountRecord | null>;
   saveOAuthAccount(input: OAuthAccountWrite): Promise<OAuthAccountRecord>;
+  /** v82 — removes an account's details row (the secret delete removes it too; this clears a row left behind). */
+  deleteOAuthAccount(secretId: string): Promise<boolean>;
   listSecretShares(secretId: string): Promise<Array<{
     secretId: string;
     projectId: string;

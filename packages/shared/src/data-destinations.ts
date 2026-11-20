@@ -858,13 +858,20 @@ const CONNECTOR_SDK_NODES: Readonly<Record<string, string>> = {
   qdrant_vector_store: "qdrant"
 };
 
+/** Teams Send Message posts through Microsoft Graph when a team or channel is set (connectors/tier2.ts). */
+function teamsPostsThroughGraph(config: Record<string, unknown>): boolean {
+  return Boolean(textSetting(config, "teamId") || textSetting(config, "channelId"));
+}
+
 /** Each connector node type: exactly the settings its handler builds its address from. */
 const CONNECTOR_ADDRESS: Readonly<Record<string, AddressOf>> = {
   // Webhook mode (the default) posts to the webhook URL; bot mode always calls slack.com.
   slack_send_message: (config) => ((textSetting(config, "authType") || "webhook") === "webhook" ? destinationHostOfSetting(config.webhookUrl) : "slack.com"),
   discord_send_message: fromKey("webhookUrl"),
-  // The webhook URL, else the whole secret value is the URL.
-  teams_send_message: (config, secretAddress) => (textSetting(config, "webhookUrl") ? destinationHostOfSetting(config.webhookUrl) : destinationHostOfSetting(secretAddress)),
+  // Team ID or Channel ID set: Microsoft Graph (the secret is an access token). Else the webhook URL, else the whole
+  // secret value is the URL.
+  teams_send_message: (config, secretAddress) =>
+    teamsPostsThroughGraph(config) ? "graph.microsoft.com" : textSetting(config, "webhookUrl") ? destinationHostOfSetting(config.webhookUrl) : destinationHostOfSetting(secretAddress),
   smtp_send_email: fromKey("host"),
   postgres_query: fromKey("host"),
   mysql_query: fromKey("host"),
@@ -918,7 +925,7 @@ export function azureStorageSecretAddressConfig(nodeType: string, config: Record
 /** Connector node types whose address can come from their secret (the engine passes the secret's value for the host only). */
 export function connectorAddressInSecret(nodeType: string, config: Record<string, unknown>): boolean {
   if (nodeType === "mongo_operation") return Boolean(plainRecord(config.secretRef)?.secretId);
-  if (nodeType === "teams_send_message") return !textSetting(config, "webhookUrl") && Boolean(plainRecord(config.secretRef)?.secretId);
+  if (nodeType === "teams_send_message") return !teamsPostsThroughGraph(config) && !textSetting(config, "webhookUrl") && Boolean(plainRecord(config.secretRef)?.secretId);
   return azureStorageSecretAddressConfig(nodeType, config) !== undefined;
 }
 

@@ -67,3 +67,8 @@ export async function saveOAuthAccount(ctx: PgContext, input: OAuthAccountWrite)
   );
   return (await getOAuthAccount(ctx, input.secretId))!;
 }
+
+export async function deleteOAuthAccount(ctx: PgContext, secretId: string): Promise<boolean> {
+  const result = await ctx.pool.query(`DELETE FROM oauth_accounts WHERE secret_id = $1`, [secretId]);
+  return (result.rowCount ?? 0) > 0;
+}

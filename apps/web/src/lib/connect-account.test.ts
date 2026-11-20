@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { connectedAccountSummary, readConnectMessage, secretOptionLabel } from "./connect-account";
 
 describe("readConnectMessage", () => {
@@ -56,5 +56,47 @@ describe("HTTP Request Auth choice", () => {
     expect(applyHttpAuthMode({ secretRef: { secretId: "s1" } }, "connected")).toEqual({ secretRef: undefined, secretAuth: { type: "connected" } });
     expect(applyHttpAuthMode({ secretRef: { secretId: "acct" }, secretAuth: { type: "connected" } }, "bearer").secretRef).toBeUndefined();
     expect(applyHttpAuthMode({}, "oauth2_client_credentials").secretAuth).toEqual({ type: "oauth2_client_credentials", tokenUrl: "", clientId: "", clientAuth: "body" });
+  });
+});
+
+describe("connectAccountInPopup", () => {
+  it("says to allow pop-ups when the browser blocks the window, without leaving the page or starting a sign-in", async () => {
+    const api = await import("./api");
+    const start = vi.spyOn(api, "startConnect");
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
+    const { connectAccountInPopup } = await import("./connect-account");
+    const result = await connectAccountInPopup({ providerId: "slack" });
+    expect(result).toMatchObject({ ok: false, providerId: "slack" });
+    expect(result.error).toMatch(/Allow pop-ups/);
+    expect(start).not.toHaveBeenCalled();
+    open.mockRestore();
+    start.mockRestore();
+  });
+
+  it("a window that closes without a message is reported as closed (the sign-in may still have finished), each in its own window", async () => {
+    const api = await import("./api");
+    const start = vi.spyOn(api, "startConnect").mockResolvedValue({ authorizationUrl: "https://provider.example/authorize", expiresAt: "", redirectUri: "" });
+    const popup = { closed: false, close: vi.fn(), location: { href: "" } };
+    const names: string[] = [];
+    const open = vi.spyOn(window, "open").mockImplementation((_url, name) => {
+      names.push(String(name));
+      return popup as unknown as Window;
+    });
+    vi.useFakeTimers();
+    try {
+      const { connectAccountInPopup } = await import("./connect-account");
+      const pending = connectAccountInPopup({ providerId: "google" });
+      const second = connectAccountInPopup({ providerId: "google" });
+      await vi.advanceTimersByTimeAsync(10);
+      popup.closed = true;
+      await vi.advanceTimersByTimeAsync(600);
+      expect(await pending).toMatchObject({ ok: false, closed: true, providerId: "google" });
+      await second;
+      expect(new Set(names).size).toBe(2);
+    } finally {
+      vi.useRealTimers();
+      open.mockRestore();
+      start.mockRestore();
+    }
   });
 });

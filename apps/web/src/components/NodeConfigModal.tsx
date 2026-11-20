@@ -2307,9 +2307,10 @@ export function NodeInspector({
       const connectProviders = input.connect?.providers ?? [];
       const filteredSecrets = (input.filter ? availableSecrets.filter(input.filter) : availableSecrets).filter((secret) => {
         if (!isConnectedAccount(secret)) return !input.connect?.only;
-        // A connected account shows where its provider is offered; elsewhere it is still listed when already picked.
+        // A connected account shows only where its provider is offered (never as, say, a model API key); elsewhere it
+        // is still listed when already picked.
         const providerId = secret.connection?.providerId;
-        return secret.id === input.value || !providerId || connectProviders.includes(providerId) || !input.connect;
+        return secret.id === input.value || (providerId !== undefined && connectProviders.includes(providerId));
       });
       const options = [
         { value: "", label: input.noneLabel },
@@ -2337,6 +2338,10 @@ export function NodeInspector({
             }
             input.onSelect(result.secretId);
             setConnectState(null);
+          } else if (result.closed) {
+            // The sign-in may have finished without reporting back: reload, and the account is there to pick.
+            if (onRefreshSecrets) await onRefreshSecrets().catch(() => undefined);
+            setConnectState({ fieldKey: input.fieldKey, busy: false, message: result.error ?? "The sign-in window closed." });
           } else {
             setConnectState({ fieldKey: input.fieldKey, busy: false, message: result.error ?? "The account was not connected." });
           }

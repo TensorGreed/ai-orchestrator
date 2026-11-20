@@ -9095,6 +9095,12 @@ export class SqliteStore implements Store {
     return (await this.getOAuthAccount(input.secretId))!;
   }
 
+  async deleteOAuthAccount(secretId: string): Promise<boolean> {
+    const changes = this.db.prepare(`DELETE FROM oauth_accounts WHERE secret_id = ?`).run(secretId).changes;
+    this.persist();
+    return changes > 0;
+  }
+
   async deleteOpenApiSpec(id: string): Promise<boolean> {
     const changes = this.db.prepare(`DELETE FROM openapi_specs WHERE id = ?`).run(id).changes;
     this.persist();
