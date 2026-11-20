@@ -64,8 +64,13 @@ methods it takes, or the endpoints of that method they may run.
 
 A webhook switched off with a bearer token or HMAC signature says it is off (`trigger_off`) only to a call that passes
 that check; anyone else gets the plain `404`. One with Auth Mode **None** says it is off only to a signed-in person
-(studio session or API key) who may edit the workflow. A deactivated gated workflow's `409` is likewise only for its
-signed-in editors; anyone else gets the plain `404`.
+(studio session or API key) who may edit the workflow. A deactivated gated workflow's `409`, and an open webhook's
+`409` `workflow_unfinished`, are likewise only for its signed-in editors (a protected webhook says it is unfinished once
+the token or signature checks out); anyone else gets the plain `404`.
+
+Forms (`/api/forms/:path`) and the MCP Server Trigger (`/api/mcp-server/:path/*`) do the same: switched off or
+deactivated, they answer as a missing form or tool ("Form not found", "MCP server not found", `404`) to anyone but a
+signed-in editor of the workflow, who gets `trigger_off` or the `409`.
 
 ## Chat (`/api/chat/:workflowId`)
 
@@ -91,7 +96,8 @@ The test URL runs the saved draft, so it is only for people who may edit the wor
 A webhook, form, chat, MCP or app trigger whose node has `active: false` takes no production calls: `/webhook/:path`,
 `/api/forms/:path`, `/api/chat/:workflowId`, `/api/mcp-server/:path/*` and the app routes answer `404` with
 `"code": "trigger_off"` (a protected webhook and the app routes only once the caller's token or signature checks out;
-an open webhook and chat only to a signed-in editor of the workflow),
+an open webhook, chat, forms and MCP triggers only to a signed-in editor of the workflow; anyone else gets their plain
+`404`),
 and the MCP gateway leaves the tool out. `/webhook-test/:path` answers the same `404`. The editor's **Run** and
 **Webhook run** still work.
 Unset means on, so nodes saved before the setting are unchanged. Starter templates ship with theirs off; the node's

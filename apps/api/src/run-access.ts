@@ -15,10 +15,10 @@
  * List endpoints are narrowed to the workflows (or projects) the user can
  * read before paging, so totals never count rows from other projects.
  *
- * Someone who can read a workflow only through a share with them (not as a
- * member of its project, not through a share to a project they are a member
- * of, not an admin) sees only their own runs of it, in every isolation mode
- * (the global role `role` isolation lends a non-member does not count): the runs they started and the runs whose sessions are
+ * Someone who can read a workflow only through a share with them (nothing
+ * else reaches its project: no membership, no role `role` isolation lends a
+ * non-member, not an admin; and no membership of a project it is shared to)
+ * sees only their own runs of it: the runs they started and the runs whose sessions are
  * theirs (`session_owner`). Who started a run is its starter's user id (v80;
  * migration 80 set it on the runs recorded before), never an email
  * (`runOwnedBy`). Anyone else's run answers 404, as a missing one.
@@ -185,9 +185,9 @@ export function createRunAccess(deps: RunAccessDeps): RunAccess {
   // One membership lookup per project instead of one (or two) per workflow:
   // a workflow is readable when its project is, or when it is shared to a
   // project the user can read. Same rule as `canAccessWorkflow`, batched.
-  // `ownOnly` holds the readable workflows the user reads only through a share with them: a workflow shared with the
-  // person is theirs to see in full only through a membership (its project's, or one of a project it is shared to),
-  // never through the global role `role` isolation lends a non-member, so a person share means the same in both modes.
+  // `ownOnly` holds the readable workflows the user reads only through a share with them: nothing else reaches the
+  // workflow's project (no membership, no role `role` isolation lends a non-member, not an admin) and no membership of a
+  // project it is shared to. A share never takes away what someone has, so anyone else sees every run.
   const classifyWorkflows = async (user: SafeUser): Promise<{ full: string[]; ownOnly: string[] }> => {
     const cached = (check: (user: SafeUser, projectId: string, permission: RunPermission) => Promise<boolean>) => {
       const verdicts = new Map<string, boolean>();
@@ -220,7 +220,7 @@ export function createRunAccess(deps: RunAccessDeps): RunAccess {
     for (const workflow of await deps.listWorkflows()) {
       const projectId = workflow.projectId ?? DEFAULT_PROJECT_ID;
       if (sharedToUser.has(workflow.id) && scopeAllows(projectId)) {
-        if (sharedToMemberProject.has(workflow.id) || await canReadAsMember(projectId)) full.push(workflow.id);
+        if (sharedToMemberProject.has(workflow.id) || await canRead(projectId)) full.push(workflow.id);
         else ownOnly.push(workflow.id);
       } else if (shared.has(workflow.id) || await canRead(projectId)) {
         full.push(workflow.id);

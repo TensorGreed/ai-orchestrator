@@ -399,10 +399,16 @@ describe("starters start switched off", () => {
     const { workflow } = await useStarter("Form intake: route requests");
     const form = workflow.nodes.find((node) => node.type === "form_trigger")!;
     const formPath = String((form.config as Record<string, unknown>).path);
-    const page = await anonymous("GET", `/api/forms/${formPath}`);
+    // Anyone but a signed-in editor gets the answer a missing form gets; the editor is told it is off.
+    const anonymousPage = await anonymous("GET", `/api/forms/${formPath}`);
+    expect(anonymousPage.statusCode).toBe(404);
+    expect(anonymousPage.body).toContain("Form not found");
+    const anonymousSubmit = await anonymous("POST", `/api/forms/${formPath}`, { name: "Grace", email: "grace@example.com", topic: "Support", message: "Help" });
+    expect(anonymousSubmit.json()).toEqual({ error: "Form not found" });
+    const page = await call("GET", `/api/forms/${formPath}`);
     expect(page.statusCode).toBe(404);
     expect(page.body).toContain("This form is turned off");
-    const submit = await anonymous("POST", `/api/forms/${formPath}`, { name: "Grace", email: "grace@example.com", topic: "Support", message: "Help" });
+    const submit = await call("POST", `/api/forms/${formPath}`, { name: "Grace", email: "grace@example.com", topic: "Support", message: "Help" });
     expect(submit.statusCode).toBe(404);
     expect(submit.json()).toMatchObject({ code: "trigger_off" });
     expect((await webhookRun(workflow)).status).toBe("success");
@@ -433,7 +439,8 @@ describe("starters start switched off", () => {
     const mcpOff = workflow("wf-mcp-off", { type: "mcp_server_trigger", config: { path: "mcp-off", toolName: "off_tool", authMode: "public", active: false } });
     await context.store.upsertWorkflow(mcpOff);
     expect((await anonymous("GET", "/api/mcp-server/mcp-off/manifest")).statusCode).toBe(404);
-    const invoke = await anonymous("POST", "/api/mcp-server/mcp-off/invoke", { arguments: {} });
+    expect((await anonymous("POST", "/api/mcp-server/mcp-off/invoke", { arguments: {} })).json()).toEqual({ error: "MCP server not found" });
+    const invoke = await call("POST", "/api/mcp-server/mcp-off/invoke", { arguments: {} });
     expect(invoke.statusCode).toBe(404);
     expect(invoke.json()).toMatchObject({ code: "trigger_off" });
 

@@ -13453,17 +13453,20 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     "/api/forms/:path",
     async (request, reply) => {
       const found = await findFormWorkflow(request.params.path);
+      // Why a form takes nothing (deactivated, switched off) is told only to a signed-in editor of its workflow; anyone
+      // else gets the page a missing form gets.
       if (!found) {
         const deactivated = await deactivatedMatch((workflow) => formNodeFor(workflow, request.params.path) !== null);
-        reply.code(deactivated ? 409 : 404);
+        const tell = deactivated !== null && (await signedInEditorOf(request, deactivated.id));
+        reply.code(tell ? 409 : 404);
         reply.type("text/html");
-        return deactivated ? `<h1>${escapeHtml(DEACTIVATED_MESSAGE)}</h1>` : "<h1>Form not found</h1>";
+        return tell ? `<h1>${escapeHtml(DEACTIVATED_MESSAGE)}</h1>` : "<h1>Form not found</h1>";
       }
       const cfg = asRecord(found.node.config);
       if (isLiveEntryOff(found.node)) {
         reply.code(404);
         reply.type("text/html");
-        return `<h1>${escapeHtml(liveEntryOffMessage("form_trigger"))}</h1>`;
+        return (await signedInEditorOf(request, found.workflow.id)) ? `<h1>${escapeHtml(liveEntryOffMessage("form_trigger"))}</h1>` : "<h1>Form not found</h1>";
       }
       const unknownFormMode = unknownAuthMode(found.node);
       if (unknownFormMode !== null) {
@@ -13493,12 +13496,14 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
       const found = await findFormWorkflow(request.params.path);
       if (!found) {
         const deactivated = await deactivatedMatch((workflow) => formNodeFor(workflow, request.params.path) !== null);
-        reply.code(deactivated ? 409 : 404);
-        return { error: deactivated ? DEACTIVATED_MESSAGE : "Form not found" };
+        const tell = deactivated !== null && (await signedInEditorOf(request, deactivated.id));
+        reply.code(tell ? 409 : 404);
+        return { error: tell ? DEACTIVATED_MESSAGE : "Form not found" };
       }
       const cfg = asRecord(found.node.config);
       if (isLiveEntryOff(found.node)) {
         reply.code(404);
+        if (!(await signedInEditorOf(request, found.workflow.id))) return { error: "Form not found" };
         return { error: liveEntryOffMessage("form_trigger"), code: LIVE_ENTRY_OFF_CODE };
       }
       const unknownFormMode = unknownAuthMode(found.node);
@@ -13684,22 +13689,25 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     return null;
   };
   /** Phase 15.4 — the answer when no active workflow serves an MCP trigger path: deactivated (409) or not found (404). */
-  const mcpServerMissing = async (reply: FastifyReply, p: string): Promise<{ error: string }> => {
+  /** Only a signed-in editor of the workflow is told it is deactivated; anyone else gets the plain 404. */
+  const mcpServerMissing = async (request: FastifyRequest, reply: FastifyReply, p: string): Promise<{ error: string }> => {
     const deactivated = await deactivatedMatch((workflow) => mcpServerNodeFor(workflow, p) !== null);
-    reply.code(deactivated ? 409 : 404);
-    return { error: deactivated ? DEACTIVATED_MESSAGE : "MCP server not found" };
+    const tell = deactivated !== null && (await signedInEditorOf(request, deactivated.id));
+    reply.code(tell ? 409 : 404);
+    return { error: tell ? DEACTIVATED_MESSAGE : "MCP server not found" };
   };
 
-  /** An MCP trigger switched off: no manifest and no calls until it is turned on. */
-  const mcpServerOff = (reply: FastifyReply): { error: string; code: string } => {
+  /** An MCP trigger switched off: no manifest and no calls until it is turned on. Only its editors are told why. */
+  const mcpServerOff = async (request: FastifyRequest, reply: FastifyReply, workflowId: string): Promise<{ error: string; code?: string }> => {
     reply.code(404);
+    if (!(await signedInEditorOf(request, workflowId))) return { error: "MCP server not found" };
     return { error: liveEntryOffMessage("mcp_server_trigger"), code: LIVE_ENTRY_OFF_CODE };
   };
 
   app.get<{ Params: { path: string } }>("/api/mcp-server/:path/manifest", async (request, reply) => {
     const found = await findMcpServerWorkflow(request.params.path);
-    if (!found) return await mcpServerMissing(reply, request.params.path);
-    if (isLiveEntryOff(found.node)) return mcpServerOff(reply);
+    if (!found) return await mcpServerMissing(request, reply, request.params.path);
+    if (isLiveEntryOff(found.node)) return await mcpServerOff(request, reply, found.workflow.id);
     const cfg = asRecord(found.node.config);
     return {
       // A tool left unnamed is named by its node id, as the MCP gateway names it.
@@ -13713,8 +13721,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     "/api/mcp-server/:path/invoke",
     async (request, reply) => {
       const found = await findMcpServerWorkflow(request.params.path);
-      if (!found) return await mcpServerMissing(reply, request.params.path);
-      if (isLiveEntryOff(found.node)) return mcpServerOff(reply);
+      if (!found) return await mcpServerMissing(request, reply, request.params.path);
+      if (isLiveEntryOff(found.node)) return await mcpServerOff(request, reply, found.workflow.id);
       const cfg = asRecord(found.node.config);
       const unknownToolMode = unknownAuthMode(found.node);
       if (unknownToolMode !== null) {
@@ -14384,9 +14392,15 @@ const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and meth
           return { error: authResult.message };
         }
 
-        // Production's version has unfinished settings: its live triggers are paused, and no run is created.
+        // Production's version has unfinished settings: its live triggers are paused, and no run is created. A caller that
+        // passed the webhook's token or signature is told why; on an open webhook (Auth Mode None) only a signed-in
+        // editor of the workflow is, and anyone else gets the plain 404.
         const paused = isTestRoute ? null : await releaseService.pausedRefusal(match.workflow);
         if (paused) {
+          if (security.authMode === "none" && !(await signedInEditorOf(request, match.workflow.id))) {
+            reply.code(404);
+            return { error: NO_WEBHOOK_MATCH_MESSAGE };
+          }
           reply.code(409);
           return { error: paused, code: "workflow_unfinished", path: request.params.path };
         }

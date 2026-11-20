@@ -38,8 +38,8 @@ Set `SECRET_MASTER_KEY_BASE64` in `.env` with a base64-encoded 32-byte value.
 
 The webhook (or form, chat or MCP trigger) is switched off, as a starter template's is until you turn it on. Open the
 trigger node, click **Turn on** and save. The editor's **Run** and **Webhook run** work while it is off; the
-`/webhook-test/` URL answers the same `404` until you turn it on. A webhook with Auth Mode **None**, and chat, say so
-only to someone signed in who may edit the workflow; anyone else gets a plain `404`.
+`/webhook-test/` URL answers the same `404` until you turn it on. A webhook with Auth Mode **None**, chat, forms and
+MCP triggers say so only to someone signed in who may edit the workflow; anyone else gets a plain `404`.
 
 ## Webhook 404 with no detail
 

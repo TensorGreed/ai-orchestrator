@@ -277,14 +277,12 @@ step-up. Project editors cannot share workflows; a project admin can.
 
 Someone who has a workflow only through a share with them sees only their own runs of it: the runs they started and
 the runs that used their session memory (a retry of their run by someone else, for example). Other people's runs, with
-their inputs, outputs and node data, stay hidden. This applies when the share is all they have: not a member of the
-workflow's project with a role that reads it, not a member of a project the workflow is shared to, and not an admin. A
-project member keeps the full view, and so does anyone who also has the workflow through their project.
-It holds in both isolation modes: under `role` isolation the global role a person gets in a project they are not a
-member of does not count, so a person share keeps them to their own runs there too. Workflows not shared with them
-keep the view their role gives. Beyond that a person share never takes away what someone has: it caps someone at its
-level (a builder cannot save, publish, delete or re-share the workflow, `403`) only when it is their only way to the
-workflow, with no membership, no role that reaches the project under the isolation mode, and not an admin.
+their inputs, outputs and node data, stay hidden. This applies only when the share is their only way to the workflow:
+no membership of its project with a role that reads it, no role that reaches its project under the isolation mode
+(under `role` isolation everyone's role reaches every project), no membership of a project it is shared to, and not an
+admin. Then the share also caps them at its level (a builder cannot save, publish, delete or re-share it, `403`). A
+person share never takes away what someone has: anyone whose membership or role already reaches the project keeps the
+full view and everything else.
 
 - **Whose run it is.** A run records the user id of the person who started it: from the app, with their API key, or
   by a signed-in form submission or chat (a signed-in form also keeps the submitter's session memory to them, as a

@@ -311,8 +311,7 @@ export class RbacService {
 
   /**
    * `permission` in the project from a membership (or as a global admin), never from the global role that `role`
-   * isolation lends a non-member. What decides whether a person share is all someone has: a person share narrows what
-   * they see of the workflow's runs to their own in every isolation mode, unless a membership gives them more.
+   * isolation lends a non-member. Who manages a project's members and person shares goes by this.
    */
   async canAsMember(user: SafeUser, projectId: string, permission: Permission): Promise<boolean> {
     if (user.projectScope && !user.projectScope.includes(projectId)) return false;
@@ -418,14 +417,13 @@ export class RbacService {
    * Only then are they held to the share's level (read, or run); a person share never takes away what someone has.
    */
   async shareIsOnlyWay(user: SafeUser, workflow: { id: string; projectId?: string | null }): Promise<boolean> {
-    if (!(await this.onlyThroughUserShare(user, workflow, "workflow:read"))) return false;
-    return !(await this.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "workflow:read"));
+    return await this.onlyThroughUserShare(user, workflow, "workflow:read");
   }
 
   /**
-   * True when the person has `permission` on this workflow only through a share with them: no membership in its project
-   * that grants it and none through a share to a project they are a member of. The global role `role` isolation lends
-   * a non-member does not count: a person share means the same in every isolation mode. For `workflow:execute` the
+   * True when the person has `permission` on this workflow only through a share with them: not an admin, nothing in its
+   * project that grants it (a membership, or the role `role` isolation lends a non-member) and none through a share to
+   * a project they are a member of. A person share never takes away what someone has. For `workflow:execute` the
    * person's share must be an execute share (and only execute shares to projects count); such runs keep session memory
    * to the person (run-scope.ts). For `workflow:read` any share counts; such a person sees only their own runs of it
    * (run-access.ts).
@@ -438,7 +436,9 @@ export class RbacService {
     const execute = permission === "workflow:execute";
     const own = await this.userShareAccess(user, workflow);
     if (!own || (execute && own !== "execute")) return false;
-    if (await this.canAsMember(user, workflow.projectId ?? DEFAULT_PROJECT_ID, permission)) return false;
+    // A share never takes away what someone has: a membership, an admin, or (under `role` isolation) the role lent to a
+    // non-member that reaches the project all count.
+    if (await this.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, permission)) return false;
     for (const share of await this.store.listWorkflowShares(workflow.id)) {
       if (execute && share.accessLevel !== "execute") continue;
       if (await this.canAsMember(user, share.projectId, permission)) return false;
