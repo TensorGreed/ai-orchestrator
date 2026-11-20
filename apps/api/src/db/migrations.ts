@@ -3175,6 +3175,52 @@ export const MIGRATIONS: Migration[] = [
     down: `
       DROP TABLE IF EXISTS openapi_specs;
     `
+  },
+  {
+    version: 82,
+    description: "Connected accounts: OAuth apps per provider and what may be shown about each connected account",
+    // oauth_apps: the OAuth app a deployment registered with a provider (Slack, Google, GitHub, Microsoft, Notion), for
+    // the whole instance (project_id NULL) or one project. id is '<provider>:<project or *>'. The client secret is an
+    // internal secret (client_secret_id); nothing secret is in the row.
+    // oauth_accounts: one row per connected account, keyed by its secret (provider 'oauth_account', which holds the
+    // tokens encrypted): the account label, scopes, status and expiry the UI shows. Removed with the secret.
+    up: `
+      CREATE TABLE IF NOT EXISTS oauth_apps (
+        id TEXT PRIMARY KEY,
+        provider_id TEXT NOT NULL,
+        project_id TEXT,
+        client_id TEXT NOT NULL,
+        client_secret_id TEXT,
+        tenant TEXT,
+        updated_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_oauth_apps_project ON oauth_apps(project_id);
+      CREATE TABLE IF NOT EXISTS oauth_accounts (
+        secret_id TEXT PRIMARY KEY,
+        provider_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        app_id TEXT,
+        account_label TEXT,
+        scopes TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'connected',
+        last_error TEXT,
+        expires_at TIMESTAMPTZ,
+        has_refresh_token INTEGER NOT NULL DEFAULT 0,
+        connected_by TEXT,
+        connected_at TIMESTAMPTZ NOT NULL,
+        last_refresh_at TIMESTAMPTZ,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_oauth_accounts_project ON oauth_accounts(project_id);
+    `,
+    // An older build ignores both tables. Dropping them leaves the account secrets in place but unusable (their
+    // provider is unknown to an older build, which hands their stored value to no node).
+    down: `
+      DROP TABLE IF EXISTS oauth_accounts;
+      DROP TABLE IF EXISTS oauth_apps;
+    `
   }
 ];
 

@@ -11,6 +11,7 @@ import * as audit from "./postgres/audit.js";
 import * as auth from "./postgres/auth.js";
 import * as capture from "./postgres/capture.js";
 import * as openapiSpecs from "./postgres/openapi-specs.js";
+import * as oauthAccounts from "./postgres/oauth-accounts.js";
 import * as cluster from "./postgres/cluster.js";
 import * as data_destinations from "./postgres/data-destinations.js";
 import * as data_labels from "./postgres/data-labels.js";
@@ -1724,6 +1725,27 @@ export class PostgresStore implements Store {
   }
   async deleteOpenApiSpec(...args: Parameters<Store["deleteOpenApiSpec"]>): ReturnType<Store["deleteOpenApiSpec"]> {
     return openapiSpecs.deleteOpenApiSpec(this.ctx, ...args);
+  }
+  async listOAuthApps(...args: Parameters<Store["listOAuthApps"]>): ReturnType<Store["listOAuthApps"]> {
+    return oauthAccounts.listOAuthApps(this.ctx, ...args);
+  }
+  async getOAuthApp(...args: Parameters<Store["getOAuthApp"]>): ReturnType<Store["getOAuthApp"]> {
+    return oauthAccounts.getOAuthApp(this.ctx, ...args);
+  }
+  async saveOAuthApp(...args: Parameters<Store["saveOAuthApp"]>): ReturnType<Store["saveOAuthApp"]> {
+    return oauthAccounts.saveOAuthApp(this.ctx, ...args);
+  }
+  async deleteOAuthApp(...args: Parameters<Store["deleteOAuthApp"]>): ReturnType<Store["deleteOAuthApp"]> {
+    return oauthAccounts.deleteOAuthApp(this.ctx, ...args);
+  }
+  async listOAuthAccounts(...args: Parameters<Store["listOAuthAccounts"]>): ReturnType<Store["listOAuthAccounts"]> {
+    return oauthAccounts.listOAuthAccounts(this.ctx, ...args);
+  }
+  async getOAuthAccount(...args: Parameters<Store["getOAuthAccount"]>): ReturnType<Store["getOAuthAccount"]> {
+    return oauthAccounts.getOAuthAccount(this.ctx, ...args);
+  }
+  async saveOAuthAccount(...args: Parameters<Store["saveOAuthAccount"]>): ReturnType<Store["saveOAuthAccount"]> {
+    return oauthAccounts.saveOAuthAccount(this.ctx, ...args);
   }
   async listSecretShares(...args: Parameters<Store["listSecretShares"]>): ReturnType<Store["listSecretShares"]> {
     return secrets.listSecretShares(this.ctx, ...args);

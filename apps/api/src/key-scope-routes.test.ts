@@ -45,6 +45,8 @@ const NO_API_KEY_ROUTES = new Set<string>([
   "GET /api/forms/:path",
   "GET /api/mcp-server/:path/manifest",
   "GET /api/mcp/oauth/callback",
+  // The provider sends the browser back here; it reads the session cookie only.
+  "GET /api/connect/callback",
   "GET /api/mcp/oauth/client-metadata.json",
   "GET /api/openapi.json",
   // The starter templates' sample data: no sign-in, no stored data (sample-data-routes.ts).

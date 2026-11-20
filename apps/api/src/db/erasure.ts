@@ -304,6 +304,8 @@ export const STAFF_AUTHORSHIP_COLUMNS: readonly StaffAuthorshipColumn[] = [
   { table: "model_allowlist_entries", column: "created_by" },
   { table: "variables", column: "created_by" },
   { table: "openapi_specs", column: "created_by" },
+  { table: "oauth_apps", column: "updated_by" },
+  { table: "oauth_accounts", column: "connected_by" },
   { table: "secret_shares", column: "shared_by" },
   { table: "workflow_shares", column: "shared_by" },
   { table: "workflow_user_shares", column: "shared_by" },

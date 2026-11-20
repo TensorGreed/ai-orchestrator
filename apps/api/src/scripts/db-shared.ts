@@ -117,6 +117,8 @@ export const EXPORTED_TABLES = [
   // Config / vars
   "variables",
   "openapi_specs",
+  "oauth_apps",
+  "oauth_accounts",
   "git_configs",
   "notification_configs",
   "log_stream_destinations",

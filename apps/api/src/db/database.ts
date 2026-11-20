@@ -217,9 +217,14 @@ import type {
   UserInviteCreate,
   UserInviteRecord,
   OpenApiSpecRecord,
-  OpenApiSpecWrite
+  OpenApiSpecWrite,
+  OAuthAccountRecord,
+  OAuthAccountWrite,
+  OAuthAppRecord,
+  OAuthAppWrite
 } from "./store.js";
 import { mapOpenApiSpecRow, OPENAPI_SPEC_COLUMNS, type OpenApiSpecRow } from "./openapi-spec-rows.js";
+import { mapOAuthAccountRow, mapOAuthAppRow, OAUTH_ACCOUNT_COLUMNS, OAUTH_APP_COLUMNS, oauthAccountValues, type OAuthAccountRow, type OAuthAppRow } from "./oauth-rows.js";
 import {
   decideLostJob,
   lostJobEffects,
@@ -4610,6 +4615,38 @@ export class SqliteStore implements Store {
       );
       CREATE INDEX IF NOT EXISTS idx_openapi_specs_project ON openapi_specs(project_id);
     `);
+    // v82 — connected accounts: OAuth apps and account details (tokens live in the account's secret).
+    this.exec(`
+      CREATE TABLE IF NOT EXISTS oauth_apps (
+        id TEXT PRIMARY KEY,
+        provider_id TEXT NOT NULL,
+        project_id TEXT,
+        client_id TEXT NOT NULL,
+        client_secret_id TEXT,
+        tenant TEXT,
+        updated_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_oauth_apps_project ON oauth_apps(project_id);
+      CREATE TABLE IF NOT EXISTS oauth_accounts (
+        secret_id TEXT PRIMARY KEY,
+        provider_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        app_id TEXT,
+        account_label TEXT,
+        scopes TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'connected',
+        last_error TEXT,
+        expires_at TEXT,
+        has_refresh_token INTEGER NOT NULL DEFAULT 0,
+        connected_by TEXT,
+        connected_at TEXT NOT NULL,
+        last_refresh_at TEXT,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_oauth_accounts_project ON oauth_accounts(project_id);
+    `);
 
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_project_id ON workflows(project_id)`);
     this.exec(`CREATE INDEX IF NOT EXISTS idx_workflows_folder_id ON workflows(folder_id)`);
@@ -5225,6 +5262,8 @@ export class SqliteStore implements Store {
     this.exec(`DELETE FROM secrets WHERE id = ?`, [id]);
     this.exec(`DELETE FROM secret_shares WHERE secret_id = ?`, [id]);
     this.exec(`DELETE FROM external_secret_cache WHERE secret_id = ?`, [id]);
+    // v82 — a connected account's details go with its secret.
+    this.exec(`DELETE FROM oauth_accounts WHERE secret_id = ?`, [id]);
     this.persist();
     return true;
   }
@@ -8045,6 +8084,9 @@ export class SqliteStore implements Store {
     this.exec(`DELETE FROM variables WHERE project_id = ?`, [id]);
     // v81 — and its OpenAPI specs (project configuration, like variables).
     this.exec(`DELETE FROM openapi_specs WHERE project_id = ?`, [id]);
+    // v82 — and its own OAuth apps with their client secrets.
+    this.exec(`DELETE FROM secrets WHERE id IN (SELECT client_secret_id FROM oauth_apps WHERE project_id = ?)`, [id]);
+    this.exec(`DELETE FROM oauth_apps WHERE project_id = ?`, [id]);
     this.exec(`DELETE FROM guard_bindings WHERE scope = 'project' AND scope_id = ?`, [id]);
     // 12.6 — a re-created project with the same id starts with no model allowlist.
     this.exec(`DELETE FROM model_allowlist_entries WHERE scope = 'project' AND project_id = ?`, [id]);
@@ -8990,6 +9032,67 @@ export class SqliteStore implements Store {
     );
     this.persist();
     return (await this.getOpenApiSpec(input.id))!;
+  }
+
+  // ---------------------------------------------------------------------------
+  // v82 — connected accounts
+  // ---------------------------------------------------------------------------
+
+  async listOAuthApps(): Promise<OAuthAppRecord[]> {
+    return this.queryAll<OAuthAppRow>(`SELECT ${OAUTH_APP_COLUMNS} FROM oauth_apps ORDER BY id`).map(mapOAuthAppRow);
+  }
+
+  async getOAuthApp(id: string): Promise<OAuthAppRecord | null> {
+    const row = this.queryOne<OAuthAppRow>(`SELECT ${OAUTH_APP_COLUMNS} FROM oauth_apps WHERE id = ?`, [id]);
+    return row ? mapOAuthAppRow(row) : null;
+  }
+
+  async saveOAuthApp(input: OAuthAppWrite): Promise<OAuthAppRecord> {
+    const now = new Date().toISOString();
+    this.exec(
+      `INSERT INTO oauth_apps (${OAUTH_APP_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET client_id = excluded.client_id, client_secret_id = excluded.client_secret_id,
+         tenant = excluded.tenant, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
+      [input.id, input.providerId, input.projectId, input.clientId, input.clientSecretId, input.tenant, input.updatedBy, now, now]
+    );
+    this.persist();
+    return (await this.getOAuthApp(input.id))!;
+  }
+
+  async deleteOAuthApp(id: string): Promise<boolean> {
+    const changes = this.db.prepare(`DELETE FROM oauth_apps WHERE id = ?`).run(id).changes;
+    this.persist();
+    return changes > 0;
+  }
+
+  async listOAuthAccounts(secretIds?: readonly string[]): Promise<OAuthAccountRecord[]> {
+    if (secretIds && secretIds.length === 0) return [];
+    const rows = secretIds
+      ? this.queryAll<OAuthAccountRow>(
+          `SELECT ${OAUTH_ACCOUNT_COLUMNS} FROM oauth_accounts WHERE secret_id IN (${secretIds.map(() => "?").join(", ")}) ORDER BY secret_id`,
+          [...secretIds]
+        )
+      : this.queryAll<OAuthAccountRow>(`SELECT ${OAUTH_ACCOUNT_COLUMNS} FROM oauth_accounts ORDER BY secret_id`);
+    return rows.map(mapOAuthAccountRow);
+  }
+
+  async getOAuthAccount(secretId: string): Promise<OAuthAccountRecord | null> {
+    const row = this.queryOne<OAuthAccountRow>(`SELECT ${OAUTH_ACCOUNT_COLUMNS} FROM oauth_accounts WHERE secret_id = ?`, [secretId]);
+    return row ? mapOAuthAccountRow(row) : null;
+  }
+
+  async saveOAuthAccount(input: OAuthAccountWrite): Promise<OAuthAccountRecord> {
+    this.exec(
+      `INSERT INTO oauth_accounts (${OAUTH_ACCOUNT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(secret_id) DO UPDATE SET provider_id = excluded.provider_id, project_id = excluded.project_id,
+         app_id = excluded.app_id, account_label = excluded.account_label, scopes = excluded.scopes, status = excluded.status,
+         last_error = excluded.last_error, expires_at = excluded.expires_at, has_refresh_token = excluded.has_refresh_token,
+         connected_by = excluded.connected_by, connected_at = excluded.connected_at, last_refresh_at = excluded.last_refresh_at,
+         updated_at = excluded.updated_at`,
+      oauthAccountValues(input, new Date().toISOString())
+    );
+    this.persist();
+    return (await this.getOAuthAccount(input.secretId))!;
   }
 
   async deleteOpenApiSpec(id: string): Promise<boolean> {

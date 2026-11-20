@@ -522,6 +522,51 @@ export interface OpenApiSpecWrite {
   fetchedAt?: string;
 }
 
+/**
+ * v82 — the OAuth app a deployment registered with a provider, for connected accounts. One per provider for the whole
+ * instance (`projectId` null) and at most one per provider per project (a project's own app wins). The client secret
+ * is an internal secret (provider `oauth_client`), never returned.
+ */
+export interface OAuthAppRecord {
+  /** `<providerId>:<projectId or *>`. */
+  id: string;
+  providerId: string;
+  projectId: string | null;
+  clientId: string;
+  clientSecretId: string | null;
+  /** Microsoft: the tenant (null = `common`). */
+  tenant: string | null;
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type OAuthAppWrite = Omit<OAuthAppRecord, "createdAt" | "updatedAt">;
+
+/**
+ * v82 — what may be shown about a connected account (the secret with provider `oauth_account` it belongs to holds the
+ * tokens, encrypted). Removed with its secret.
+ */
+export interface OAuthAccountRecord {
+  secretId: string;
+  providerId: string;
+  projectId: string;
+  /** The app it was connected with (refreshes use that app's current client id and secret). */
+  appId: string | null;
+  accountLabel: string | null;
+  scopes: string[];
+  status: "connected" | "needs_reconnect";
+  lastError: string | null;
+  expiresAt: string | null;
+  hasRefreshToken: boolean;
+  connectedBy: string | null;
+  connectedAt: string;
+  lastRefreshAt: string | null;
+  updatedAt: string;
+}
+
+export type OAuthAccountWrite = Omit<OAuthAccountRecord, "updatedAt">;
+
 export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentRedactionStore {
   // ---- Store lifecycle
 
@@ -1588,6 +1633,16 @@ export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentR
   /** v81 — adds a spec or replaces one (an existing id keeps its project, creator and creation time). */
   saveOpenApiSpec(input: OpenApiSpecWrite): Promise<OpenApiSpecRecord>;
   deleteOpenApiSpec(id: string): Promise<boolean>;
+  /** v82 — every OAuth app for connected accounts (a short list: providers × scopes). */
+  listOAuthApps(): Promise<OAuthAppRecord[]>;
+  getOAuthApp(id: string): Promise<OAuthAppRecord | null>;
+  /** v82 — adds or replaces the app with this id (an existing one keeps its creation time). */
+  saveOAuthApp(input: OAuthAppWrite): Promise<OAuthAppRecord>;
+  deleteOAuthApp(id: string): Promise<boolean>;
+  /** v82 — the connected accounts for these secret ids (every one when unset). */
+  listOAuthAccounts(secretIds?: readonly string[]): Promise<OAuthAccountRecord[]>;
+  getOAuthAccount(secretId: string): Promise<OAuthAccountRecord | null>;
+  saveOAuthAccount(input: OAuthAccountWrite): Promise<OAuthAccountRecord>;
   listSecretShares(secretId: string): Promise<Array<{
     secretId: string;
     projectId: string;
