@@ -1,0 +1,20 @@
+name: Install Playwright Chromium
+description: Restores the Playwright browser cache for the installed Playwright version, then installs Chromium and its system packages.
+runs:
+  using: composite
+  steps:
+    - name: Read the Playwright version
+      id: version
+      shell: bash
+      run: echo "version=$(pnpm --filter @ai-orchestrator/web exec playwright --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+
+    - name: Restore the browser cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/ms-playwright
+        key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.version.outputs.version }}
+
+    # With a cache hit the browser download is skipped; the system packages are always installed.
+    - name: Install Chromium
+      shell: bash
+      run: pnpm --filter @ai-orchestrator/web exec playwright install --with-deps chromium

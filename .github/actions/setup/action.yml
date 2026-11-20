@@ -1,0 +1,20 @@
+name: Set up Node.js and dependencies
+description: Enables Corepack, sets up Node.js 24 with the pnpm store cache and installs the workspace (frozen lockfile).
+runs:
+  using: composite
+  steps:
+    # Corepack must run BEFORE setup-node: `cache: "pnpm"` on setup-node invokes `pnpm` to compute the cache key,
+    # so pnpm has to already be on PATH at that point.
+    - name: Enable Corepack
+      shell: bash
+      run: corepack enable
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v7
+      with:
+        node-version: "24"
+        cache: "pnpm"
+
+    - name: Install dependencies
+      shell: bash
+      run: pnpm install --frozen-lockfile

@@ -6,6 +6,9 @@ All notable changes to L2M are documented here. The format follows [Keep a Chang
 
 ## [Unreleased]
 
+### Changed
+- **Faster CI, same tests.** Pull request CI runs its suites side by side instead of one after another: lint and build, the other packages' unit tests, the API unit tests in four shards, the API suite on Postgres in five shards, the web E2E suites and the VS Code extension all start at once. The required checks keep their names (**Lint Test Build**, **API on Postgres**, **Web E2E**); the first two now wait for their shards and pass only when every shard passed. A pull request that changes nothing the API suite covers (only the web app, docs or other workflows) skips the Postgres shards, and one that changes nothing the end-to-end suites cover (only unit tests, deployment files or docs) skips them; both checks still report, and say why. Pushes to main run everything. The rules are in `scripts/ci/changed-areas.mjs`; an unknown path runs every suite.
+
 ## [0.1.0] - 2026-11-20
 
 The first tagged release. Install it with `curl -fsSL https://lsquarem.com/install.sh | sh` or two Docker Compose commands; see [Install with Docker](apps/docs/docs/getting-started/install.md).
