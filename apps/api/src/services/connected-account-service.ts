@@ -433,9 +433,11 @@ export class ConnectedAccountService {
       const account = await this.store.getOAuthAccount(pending.reconnectSecretId);
       if (!account || account.providerId !== definition.id) return fail("That connected account was removed while signing in. Connect it again.");
       const previous = parseStored(await this.secretService.readConnectedAccountValue(account.secretId));
-      // Someone else signed in: their tokens only. The old account's refresh token is never kept with them.
+      // The earlier refresh token is kept (for a provider that sends none on a new sign-in) only when the same account
+      // is known to have signed in again; otherwise only the new sign-in's tokens are stored.
+      const sameAccount = Boolean(accountLabel && account.accountLabel && accountLabel === account.accountLabel);
       const accountChanged = Boolean(accountLabel && account.accountLabel && accountLabel !== account.accountLabel);
-      const stored = this.storedTokens(definition.id, tokens, scopes, accountChanged ? undefined : previous?.refreshToken);
+      const stored = this.storedTokens(definition.id, tokens, scopes, sameAccount ? previous?.refreshToken : undefined);
       await this.writeAccountSecret(account.secretId, stored);
       await this.store.saveOAuthAccount({
         ...account,
@@ -636,6 +638,10 @@ export class ConnectedAccountService {
     try {
       tokens = await this.tokenRequest(definition, app, clientSecret, { type: "refresh_token", refreshToken: stored.refreshToken });
     } catch (error) {
+      // A Reconnect or Disconnect that finished meanwhile wins: this failure is about tokens no longer stored.
+      const latest = parseStored(await this.secretService.readConnectedAccountValue(secretId));
+      if (!latest) throw new ConnectedAccountError("This connected account was removed.", 404);
+      if (latest.accessToken !== stored.accessToken) return latest.accessToken;
       // A refusal (a revoked or used refresh token, a changed app) needs a new sign-in; an outage does not.
       const refused = isGrantRefusal(error);
       const message = failureMessage(error);
@@ -810,15 +816,19 @@ export class ConnectedAccountService {
   }
 }
 
-/** A refresh the provider answered with one of these needs a new sign-in; anything else (429, 5xx, timeouts) is retried. */
-const GRANT_REFUSAL_CODES = new Set(["invalid_grant", "invalid_client", "unauthorized_client", "invalid_refresh_token", "token_revoked", "token_expired", "account_inactive", "invalid_client_id", "bad_client_secret", "invalid_token"]);
+/**
+ * Provider answers to a refresh that are worth trying again later (an outage or a rate limit). Any other answer from
+ * the provider (invalid_grant, GitHub's bad_refresh_token, Microsoft's interaction_required, a changed client secret,
+ * …) needs a new sign-in. A network failure or timeout never reaches the provider's answer and is retried too.
+ */
+const TRANSIENT_REFRESH_CODES = new Set(["temporarily_unavailable", "server_error", "ratelimited", "rate_limited", "slow_down", "internal_error", "service_unavailable", "request_timeout"]);
 
 function isGrantRefusal(error: unknown): boolean {
   if (error instanceof TokenRefusedError) {
-    if (error.code) return GRANT_REFUSAL_CODES.has(error.code);
-    return error.status === 400 || error.status === 401;
+    if (error.status === 408 || error.status === 429 || error.status >= 500) return false;
+    return !(error.code && TRANSIENT_REFRESH_CODES.has(error.code));
   }
-  if (error instanceof OAuthProviderError) return error.code === undefined || GRANT_REFUSAL_CODES.has(error.code);
+  if (error instanceof OAuthProviderError) return !(error.code && TRANSIENT_REFRESH_CODES.has(error.code));
   return false;
 }
 

@@ -13,7 +13,7 @@ import {
   saveConnectApp,
   type SecretListItem
 } from "../lib/api";
-import { connectAccountInPopup, connectedAccountSummary, isConnectedAccount, providerLabel } from "../lib/connect-account";
+import { connectAccountInPopup, connectedAccountSummary, isConnectedAccount, providerLabel, reloadNowAndWhenBack } from "../lib/connect-account";
 
 interface Props {
   projectId?: string;
@@ -82,9 +82,12 @@ export function ConnectedAccountsPanel({ projectId, secrets, onChanged }: Props)
         ...(provider.scopeSets.length > 0 && !reconnectSecretId ? { scopeSets: scopeSetsFor(provider) } : {}),
         ...(reconnectSecretId ? { reconnectSecretId } : {})
       });
-      await onChanged();
+      if (!result.closed) await onChanged();
       // The window closed without a word: the sign-in may have finished anyway, and the reloaded list shows it.
-      if (result.closed) return result.error ?? `The ${provider.label} sign-in window closed.`;
+      if (result.closed) {
+        reloadNowAndWhenBack(onChanged);
+        return result.error ?? `The ${provider.label} sign-in window closed.`;
+      }
       if (!result.ok) throw new Error(result.error ?? `${provider.label} was not connected.`);
       return reconnectSecretId ? `${provider.label} reconnected.` : `${provider.label} connected. Pick it in a node's credential field.`;
     });

@@ -128,3 +128,12 @@ describe("Pickers without a provider to connect", () => {
     for (const picker of pickers) expect(optionLabels(picker).some((label) => label?.startsWith("Google ·"))).toBe(false);
   });
 });
+
+describe("Google Drive Source", () => {
+  it("offers Google accounts and Connect Google", () => {
+    render(<NodeInspector {...props("google_drive_source", {})} />);
+    const picker = screen.getAllByRole("combobox").find((element) => optionLabels(element).includes("+ Connect Google…"));
+    expect(picker).toBeTruthy();
+    expect(optionLabels(picker!)).toContain("Google · ana@example.com (needs reconnect)");
+  });
+});

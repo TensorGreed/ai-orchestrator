@@ -65,7 +65,7 @@ async function createTestContext(env: Record<string, string> = {}): Promise<Test
 }
 
 afterEach(async () => {
-  mock.control({ accessTtl: 3600, refuseRefresh: false, rateLimitRefresh: false, noRefreshToken: false, googleEmail: "person@mock.example", client: { id: "l2m-test-client", secret: "l2m-test-secret" } });
+  mock.control({ accessTtl: 3600, refuseRefresh: false, rateLimitRefresh: false, noRefreshToken: false, googleEmail: "person@mock.example", refuseRefreshWith: null, refreshDelayMs: 0, identityDown: false, client: { id: "l2m-test-client", secret: "l2m-test-secret" } });
   while (contexts.length > 0) {
     const context = contexts.pop()!;
     await context.app.close();
@@ -395,6 +395,52 @@ describe("connected accounts", () => {
     const audit = (await call(context, "GET", "/api/audit?eventType=oauth_account.reconnected", admin.cookie)).json() as { items: Array<{ eventType: string; metadata?: Record<string, unknown> }> };
     const reconnected = audit.items.find((event) => event.eventType === "oauth_account.reconnected");
     expect(reconnected?.metadata).toMatchObject({ accountChanged: true, previousAccountLabel: "person@mock.example", accountLabel: "someone.else@mock.example" });
+  });
+
+  it("treats a provider's own refusal codes as a reconnect, even under a 200 (GitHub bad_refresh_token)", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    await setUpApp(context, admin, "github");
+    await connect(context, builder.cookie, "github");
+    const account = ((await call(context, "GET", "/api/secrets", builder.cookie)).json() as Array<{ id: string; provider: string }>).find((secret) => secret.provider === "oauth_account")!;
+    mock.control({ expireAccess: true, refuseRefreshWith: { status: 200, body: { error: "bad_refresh_token", error_description: "The refresh token passed is incorrect or expired." } } });
+    const run = await executeAs(context, builder.cookie, runWorkflow(account.id));
+    expect(run.json().status).toBe("error");
+    const view = (await call(context, "GET", `/api/connect/accounts/${account.id}`, builder.cookie)).json() as { connection: { status: string } };
+    expect(view.connection.status).toBe("needs_reconnect");
+  });
+
+  it("a refresh refused while a Reconnect finishes leaves the reconnected account connected", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    await setUpApp(context, admin);
+    await connect(context, builder.cookie);
+    const account = ((await call(context, "GET", "/api/secrets", builder.cookie)).json() as Array<{ id: string; provider: string }>).find((secret) => secret.provider === "oauth_account")!;
+    mock.control({ expireAccess: true, refuseRefresh: true, refreshDelayMs: 400 });
+    const running = executeAs(context, builder.cookie, runWorkflow(account.id));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const again = await connect(context, builder.cookie, "slack", { reconnectSecretId: account.id });
+    expect(again.callback.statusCode, again.callback.body).toBe(200);
+    await running;
+    const view = (await call(context, "GET", `/api/connect/accounts/${account.id}`, builder.cookie)).json() as { connection: { status: string } };
+    expect(view.connection.status).toBe("connected");
+  });
+
+  it("keeps no earlier refresh token on a Reconnect whose account cannot be told", async () => {
+    const context = await createTestContext();
+    const admin = await login(context, "admin");
+    const builder = await login(context, "builder");
+    await setUpApp(context, admin, "github");
+    await connect(context, builder.cookie, "github");
+    const account = ((await call(context, "GET", "/api/secrets", builder.cookie)).json() as Array<{ id: string; provider: string; connection?: { refreshable: boolean } }>).find((secret) => secret.provider === "oauth_account")!;
+    expect(account.connection!.refreshable).toBe(true);
+    mock.control({ identityDown: true, noRefreshToken: true });
+    const again = await connect(context, builder.cookie, "github", { reconnectSecretId: account.id });
+    expect(again.callback.statusCode, again.callback.body).toBe(200);
+    const view = (await call(context, "GET", `/api/connect/accounts/${account.id}`, builder.cookie)).json() as { connection: { refreshable: boolean } };
+    expect(view.connection.refreshable).toBe(false);
   });
 
   it("reports back to the web origin the sign-in was started from, when it is one of WEB_ORIGIN", async () => {

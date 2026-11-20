@@ -100,3 +100,19 @@ describe("connectAccountInPopup", () => {
     }
   });
 });
+
+describe("reloadNowAndWhenBack", () => {
+  it("reloads now and once more on the next focus", async () => {
+    const { reloadNowAndWhenBack } = await import("./connect-account");
+    const reload = vi.fn();
+    reloadNowAndWhenBack(reload);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(reload).toHaveBeenCalledTimes(1);
+    window.dispatchEvent(new Event("focus"));
+    window.dispatchEvent(new Event("focus"));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(reload).toHaveBeenCalledTimes(2);
+  });
+});

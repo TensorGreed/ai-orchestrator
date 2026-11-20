@@ -148,9 +148,11 @@ export async function executeTeamsSendMessage(
   const NODE = "teams_send_message";
   // A team and channel: post through Microsoft Graph with the secret as the access token (a connected Microsoft
   // account with ChannelMessage.Send). Otherwise the incoming webhook, as before.
-  const teamId = renderTemplate(getString(config, "teamId"), ctx.templateData).trim();
-  const channelId = renderTemplate(getString(config, "channelId"), ctx.templateData).trim();
-  if (teamId || channelId) {
+  // The mode follows the settings as written (as the destination rules read them), never what they render to: a
+  // template that renders empty is an error, not a fall-back to the webhook.
+  if (getString(config, "teamId").trim() || getString(config, "channelId").trim()) {
+    const teamId = renderTemplate(getString(config, "teamId"), ctx.templateData).trim();
+    const channelId = renderTemplate(getString(config, "channelId"), ctx.templateData).trim();
     if (!teamId || !channelId) {
       throw new WorkflowError(`${NODE}: set both Team ID and Channel ID to post with a Microsoft account.`, ErrorCategory.NODE_CONFIG, false);
     }

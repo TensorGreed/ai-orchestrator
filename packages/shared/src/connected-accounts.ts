@@ -36,6 +36,7 @@ export const NODE_CONNECTED_ACCOUNT_PROVIDERS: Readonly<Record<string, Connected
   google_sheets_update: "google",
   google_sheets_trigger: "google",
   google_drive_trigger: "google",
+  google_drive_source: "google",
   google_calendar_create_event: "google",
   google_calendar_list_events: "google",
   github_action: "github",

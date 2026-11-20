@@ -75,6 +75,7 @@ import {
   HTTP_AUTH_OPTIONS,
   applyHttpAuthMode,
   connectAccountInPopup,
+  reloadNowAndWhenBack,
   httpAuthMode,
   isConnectedAccount,
   providerLabel,
@@ -2339,8 +2340,8 @@ export function NodeInspector({
             input.onSelect(result.secretId);
             setConnectState(null);
           } else if (result.closed) {
-            // The sign-in may have finished without reporting back: reload, and the account is there to pick.
-            if (onRefreshSecrets) await onRefreshSecrets().catch(() => undefined);
+            // The sign-in may have finished without reporting back: reload now and when this page is back in focus.
+            if (onRefreshSecrets) reloadNowAndWhenBack(onRefreshSecrets);
             setConnectState({ fieldKey: input.fieldKey, busy: false, message: result.error ?? "The sign-in window closed." });
           } else {
             setConnectState({ fieldKey: input.fieldKey, busy: false, message: result.error ?? "The account was not connected." });
@@ -2444,7 +2445,10 @@ export function NodeInspector({
                   setConnectState({ fieldKey: input.fieldKey, busy: true, message: "Waiting for sign-in…" });
                   void connectAccountInPopup({ providerId: picked.connection!.providerId, reconnectSecretId: picked.id }).then(
                     async (result) => {
-                      if (onRefreshSecrets) await onRefreshSecrets().catch(() => undefined);
+                      if (onRefreshSecrets) {
+                        if (result.closed) reloadNowAndWhenBack(onRefreshSecrets);
+                        else await onRefreshSecrets().catch(() => undefined);
+                      }
                       setConnectState(result.ok ? null : { fieldKey: input.fieldKey, busy: false, message: result.error ?? "Not reconnected." });
                     },
                     (error: unknown) =>
@@ -5428,6 +5432,7 @@ export function NodeInspector({
           value: toStringValue(asRecord(config.secretRef).secretId),
           noneLabel: "None (demo fallback)",
           preferredProvider: "google_drive",
+          connect: { providers: ["google"] },
           onSelect: (next) =>
             setConfig((current) => ({
               ...current,

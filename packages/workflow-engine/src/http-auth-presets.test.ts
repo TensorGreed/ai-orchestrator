@@ -264,6 +264,23 @@ describe("Teams with a Microsoft account", () => {
     expect(fetched).toBe(false);
   });
 
+  it("a Team ID template that renders empty is an error, never a fall-back to the webhook", async () => {
+    const { executeTier2Node } = await import("./connectors/tier2-dispatch");
+    const config = { teamId: "{{team}}", channelId: "{{channel}}", webhookUrl: "https://hooks.example.test/x", text: "hi", secretRef: { secretId: "sec_ms" } };
+    let fetched = false;
+    await expect(
+      executeTier2Node(node("t", "teams_send_message", config), config, {
+        templateData: { team: "", channel: "" },
+        resolveSecret: async () => "token",
+        fetchImpl: (async () => {
+          fetched = true;
+          return new Response("1");
+        }) as typeof fetch
+      })
+    ).rejects.toThrow(/both Team ID and Channel ID/);
+    expect(fetched).toBe(false);
+  });
+
   it("asks for both ids", async () => {
     const { executeTier2Node } = await import("./connectors/tier2-dispatch");
     const config = { teamId: "team-1", secretRef: { secretId: "sec_ms" } };

@@ -12,7 +12,7 @@ work with:
 | Service   | Nodes                                                                                         |
 | --------- | --------------------------------------------------------------------------------------------- |
 | Slack     | Slack Send Message (Auth Type: Bot Token or Connected Account)                                |
-| Google    | Google Sheets (read, append, update, trigger), Google Drive Trigger, Google Calendar          |
+| Google    | Google Sheets (read, append, update, trigger), Google Drive Trigger and Source, Calendar      |
 | GitHub    | GitHub                                                                                        |
 | Microsoft | Teams Send Message (with Team ID and Channel ID set)                                          |
 | Notion    | Notion Create Page, Notion Query Database                                                     |
@@ -100,8 +100,9 @@ again that you may still create secrets in the project.
   the account shows **Needs reconnect**, runs that use it fail with a message saying so, and the audit log records
   `oauth_account.refresh_failed`. **Reconnect** signs in again and keeps the same secret, so workflows do not change.
   A network failure, a rate limit or a server error does not mark the account; the next use tries again.
-- If someone else signs in on **Reconnect**, the secret holds that account's tokens from then on (none of the earlier
-  account's), the account name changes on the Secrets page, and the audit entry records both names.
+- On **Reconnect**, the secret keeps the earlier refresh token only when the same account signs in again. If someone
+  else signs in, the secret holds that account's tokens from then on, the account name changes on the Secrets page,
+  and the audit entry records both names.
 - A Slack app without token rotation issues tokens that do not expire; there is nothing to renew.
 
 ## Disconnecting

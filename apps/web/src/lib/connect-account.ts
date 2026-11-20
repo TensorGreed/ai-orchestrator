@@ -128,6 +128,23 @@ export async function connectAccountInPopup(input: {
   });
 }
 
+/**
+ * After a sign-in window closed without reporting back: reloads once now and once more when this page is next
+ * focused (a provider page can cut the window off from this one while the person is still signing in there).
+ */
+export function reloadNowAndWhenBack(reload: () => unknown): void {
+  const again = () => {
+    window.removeEventListener("focus", again);
+    void Promise.resolve()
+      .then(reload)
+      .catch(() => undefined);
+  };
+  window.addEventListener("focus", again);
+  void Promise.resolve()
+    .then(reload)
+    .catch(() => undefined);
+}
+
 // ---- HTTP Request: one Auth choice -------------------------------------------------------------------------------
 
 export type HttpAuthMode = "none" | "bearer" | "basic" | "header" | "query" | "oauth2_client_credentials" | "connected";

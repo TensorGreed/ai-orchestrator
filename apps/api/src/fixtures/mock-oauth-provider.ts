@@ -44,6 +44,12 @@ export interface MockOAuthControl {
   rateLimitRefresh?: boolean;
   /** New sign-ins get no refresh token (as GitHub OAuth apps and Notion). */
   noRefreshToken?: boolean;
+  /** Refresh answers this status and body instead (GitHub answers errors under a 200). */
+  refuseRefreshWith?: { status: number; body: Record<string, unknown> } | null;
+  /** Refresh answers only after this many ms. */
+  refreshDelayMs?: number;
+  /** The identity endpoints answer 500. */
+  identityDown?: boolean;
   /** Google: the email the next sign-ins report (default person@mock.example). */
   googleEmail?: string;
   client?: { id: string; secret: string };
@@ -89,6 +95,9 @@ export async function startMockOAuthProvider(options: { port?: number; host?: st
   let rateLimitRefresh = false;
   let noRefreshToken = false;
   let googleEmail = "person@mock.example";
+  let refuseRefreshWith: { status: number; body: Record<string, unknown> } | null = null;
+  let refreshDelayMs = 0;
+  let identityDown = false;
   let client = { id: "l2m-test-client", secret: "l2m-test-secret" };
   const stats = { codes: 0, tokenExchanges: 0, refreshes: 0, revocations: 0, whoami: 0 };
   const authorizations: Array<Record<string, string>> = [];
@@ -99,6 +108,9 @@ export async function startMockOAuthProvider(options: { port?: number; host?: st
     if (typeof input.rateLimitRefresh === "boolean") rateLimitRefresh = input.rateLimitRefresh;
     if (typeof input.noRefreshToken === "boolean") noRefreshToken = input.noRefreshToken;
     if (typeof input.googleEmail === "string") googleEmail = input.googleEmail;
+    if (input.refuseRefreshWith !== undefined) refuseRefreshWith = input.refuseRefreshWith;
+    if (typeof input.refreshDelayMs === "number") refreshDelayMs = input.refreshDelayMs;
+    if (typeof input.identityDown === "boolean") identityDown = input.identityDown;
     if (input.client) client = input.client;
     if (input.expireAccess) for (const account of accounts) account.accessToken = `expired-${account.accessToken}`;
   };
@@ -194,6 +206,11 @@ export async function startMockOAuthProvider(options: { port?: number; host?: st
           return;
         }
         if (params.grant_type === "refresh_token") {
+          if (refreshDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, refreshDelayMs));
+          if (refuseRefreshWith) {
+            send(response, refuseRefreshWith.status, refuseRefreshWith.body);
+            return;
+          }
           if (rateLimitRefresh) {
             send(response, 429, { error: "rate_limited" }, { "retry-after": "1" });
             return;
@@ -236,6 +253,10 @@ export async function startMockOAuthProvider(options: { port?: number; host?: st
 
       // Identity.
       if (request.method === "GET" && /(user|userinfo|me)$/.test(tail)) {
+        if (identityDown) {
+          send(response, 500, { error: "down" });
+          return;
+        }
         const token = /^Bearer (\S+)$/.exec(request.headers.authorization ?? "")?.[1] ?? "";
         if (!accounts.some((entry) => entry.accessToken === token && !entry.revoked)) {
           send(response, 401, { error: "invalid_token" });
