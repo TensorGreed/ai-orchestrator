@@ -46,6 +46,25 @@ See [MCP 2026-07-28 support](../product/mcp-2026-07-28.md#l2m-as-a-client).
 [MCP tool policy](../product/mcp-tool-policy.md) decides which tools each role may call, and the
 [agent loop](../runtime/agent-loop.md) explains how calls and results flow.
 
+## Setting up an MCP Tool node for a real endpoint
+
+Use an `MCP Tool` node attached to the Agent `tool` port.
+
+1. Open the MCP node config.
+2. Set `MCP Server Adapter` to `HTTP MCP Server (http_mcp)`.
+3. Set `Endpoint` to your MCP server URL.
+4. Set `Request Timeout (ms)` for the tool's latency (for large fetches use `60000` to `300000`).
+5. Set `Authentication` (`None`, `Bearer` or `Basic`) and choose an `Auth Secret` if needed.
+6. Click `Discover Tools`, then select the discovered tool.
+7. To expose every discovered tool to the agent, set `Tools To Include` to `All discovered tools (agent decides)`.
+
+Notes:
+
+- `mock-mcp` is a demo adapter and always returns the demo tools `get_current_time`, `calculator` and `lookup_kb`.
+- For a new adapter implementation, select `Custom Adapter ID` and register the adapter in `packages/mcp-sdk/src/index.ts`.
+- If a server exposes many large tool schemas, model context limits can be hit. The runtime compacts tool schemas, truncates oversized tool outputs in conversation memory, and caps the tool metadata sent to the model.
+- Every tool an MCP Tool node selects is sent to the model, so for large servers prefer `Select multiple tools`. A keyword shortlist by prompt relevance applies only to an agent with no MCP Tool or Workflow Tool node, whose tools come from its inline `mcpServers` config; Supervisor workers are always offered.
+
 ## Best practices
 
 - Keep selected tool set minimal per workflow

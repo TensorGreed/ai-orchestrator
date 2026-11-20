@@ -186,6 +186,17 @@ put credentials in a secret instead.
 **New workflow** opens a User Prompt → Output starter in the editor without saving it. Its first edit (or a save or a
 run) saves it; open another workflow first and nothing is kept.
 
+## Organizing and debugging workflows
+
+- Projects isolate workflows and secrets. The API creates a default project and backfills legacy rows on startup.
+- Folders organize workflows inside a project. Deleting a folder moves its workflows back to the project root.
+- Tags are stored on workflows and can be edited or filtered from the dashboard.
+- The dashboard supports project switching, folder filtering, tag filtering, and search by name, ID or tag.
+- Pinned node data is stored in `workflow.pinnedData` and reused during test runs unless `usePinnedData=false`.
+- A single-node run uses `runMode: "single_node"` with a selected `startNodeId` and either supplied previous node outputs or pinned parent data.
+- A run from execution history can be loaded back into the editor to debug a failure, or re-run with `sourceExecutionId`.
+- Debug mode shows compact node input, output and error previews on the canvas, and schema and table views in the node inspector.
+
 ## Run data
 
 Run a workflow from the editor with **Debug** on (the default) and the canvas shows that run on every node, with

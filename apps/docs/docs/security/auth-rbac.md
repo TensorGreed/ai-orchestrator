@@ -144,6 +144,24 @@ needs a role also accepts every role above it.
     Refusals are audited as `user.register` with outcome `denied`.
   - `admin` can invite a user by email (see [User invites](#user-invites))
 
+## Register request and bootstrap
+
+`POST /api/auth/register` takes:
+
+- `email` (required)
+- `password` (required, at least 8 characters)
+- `role` (optional: `admin`, `builder`, `operator` or `viewer`)
+- `admin` (optional boolean shortcut, the same as `role: "admin"`)
+
+Bootstrap strategy:
+
+- If `BOOTSTRAP_ADMIN_EMAIL` and `BOOTSTRAP_ADMIN_PASSWORD` are set and there are no users yet, the API creates the
+  first admin account on startup.
+- If they are not set, create the first user with `POST /api/auth/register`; the first user defaults to `admin`.
+- Keep `AUTH_ALLOW_PUBLIC_REGISTER=false` outside development.
+
+API errors: `401` for a missing, invalid or expired session, and `403` for an authenticated user without the required role.
+
 ## User invites
 
 An admin invites someone by email and role (`POST /api/users/invite`, see [Endpoints](#endpoints)). The invite creates

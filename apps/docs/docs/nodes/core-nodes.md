@@ -6,7 +6,7 @@ description: "The core L2M nodes by group: inputs, prompting, LLM and agent, MCP
 # Core Nodes
 
 The nodes most workflows are built from, by their type id (the `type` in workflow JSON). Every node, with its
-fields, is in the [node reference](./reference/index.md). [Templates and expressions](/runtime/templates-and-expressions)
+fields, is in the [node reference](./reference/index.md); the triggers, integrations and model nodes are listed in [Triggers and integrations](./triggers-and-integrations.md). [Templates and expressions](/runtime/templates-and-expressions)
 covers what a templated field can read from earlier steps.
 
 ## Input
@@ -62,6 +62,18 @@ covers what a templated field can read from earlier steps.
 ## Output
 
 - `output`
+
+## PDF Output rendering
+
+The `PDF Output` node has two render modes:
+
+- `text` (default): a fast plain-text PDF
+- `html`: renders HTML, CSS and images with headless Chromium
+
+For charts and reports, set `renderMode = html`, put the report HTML in `htmlTemplate` or in the upstream `inputKey`,
+keep `printBackground = true`, and choose a `pageFormat` (`A4` by default). Install Chromium once with
+`pnpm exec playwright install chromium`. If Chromium is not detected, set
+`PDF_CHROMIUM_EXECUTABLE_PATH=/absolute/path/to/chrome-or-chromium`.
 
 ## Notes on execution
 

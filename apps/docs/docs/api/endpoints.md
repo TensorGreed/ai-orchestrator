@@ -5,6 +5,60 @@ description: "L2M HTTP API endpoints by area: auth, SSO, workflows, runs, MCP re
 
 # API Endpoints
 
+## Core routes at a glance
+
+A quick list of the routes a new integration usually needs. The sections below add the details.
+
+Health and metadata:
+
+- `GET /health`
+- `GET /api/definitions`
+- `GET /api/integrations`
+
+Workflows:
+
+- `GET /api/workflows?projectId=&folderId=&tag=&search=`
+- `GET /api/workflows/:id/variables`, `PUT /api/workflows/:id/variables`
+- `POST /api/workflows/:id/move`
+- `POST /api/workflows/:id/enqueue`
+
+Projects, folders, tags and pins:
+
+- `GET|POST /api/projects`, `PUT|DELETE /api/projects/:id`
+- `GET /api/folders?projectId=`, `POST /api/folders`, `PUT|DELETE /api/folders/:id`
+- `GET /api/workflows/:id/pins`
+- `PUT|DELETE /api/workflows/:id/pins/:nodeId`
+
+Execution history, debug helpers and approvals:
+
+- `GET /api/executions?page=&pageSize=&status=&workflowId=&triggerType=`
+- `POST /api/code-node/test`
+- `POST /api/expressions/preview`
+- `GET /api/approvals`, `POST /api/approvals/:id/approve`, `POST /api/approvals/:id/reject`
+
+Trigger and webhook entry points:
+
+- `POST /api/webhooks/execute`, `POST /api/webhooks/execute/stream`
+- `POST /api/webhooks/slack/:workflowId`, `POST /api/webhooks/github/:workflowId`
+- `POST /api/triggers/manual/:workflowId`
+- `GET|POST /api/forms/:path`
+- `POST /api/chat/:workflowId`
+- `GET /api/mcp-server/:path/manifest`, `POST /api/mcp-server/:path/invoke`
+- `ANY /webhook/:path` (the configured production webhook URL)
+- `ANY /webhook-test/:path` (the configured test webhook URL; runs the draft for a signed-in editor or an API key)
+
+Queue:
+
+- `GET /api/queue/depth`
+- `GET /api/queue/dlq`
+
+Secrets and connection tests:
+
+- `POST /api/secrets`, `GET /api/secrets?projectId=`
+- `POST /api/connectors/test`
+- `POST /api/providers/test`
+- `POST /api/mcp/discover-tools`
+
 ## Pagination
 
 List endpoints answer the whole list by default, exactly as before. Add `page` and/or `pageSize` to get one page in
