@@ -4,6 +4,7 @@
 #
 #   - /health answers ok and /ready answers ready, and the container HEALTHCHECK reports healthy (SQLite run)
 #   - the bootstrap admin signs in
+#   - the Starter templates (samples/starters) are seeded
 #   - samples/workflows/mcp-agent-quickstart-flow.json (echo model + mock MCP, no keys) imports and runs, every
 #     node succeeding
 #   - scripts/release/smoke-workflow.json runs a JavaScript code node (QuickJS sandbox) and a guard node: a plain
@@ -92,6 +93,11 @@ check_api() {
     "$api/api/auth/login" | jq -r '.user.email // empty')
   [ "$user" = "$admin_email" ] || fail "bootstrap admin could not sign in"
   pass "signed in as $user"
+
+  local starters
+  starters=$(curl -sS -b "$work/jar" "$api/api/templates?setup=none" | jq '[.templates[] | select(.category == "Starters")] | length')
+  [ "$starters" -gt 0 ] || fail "the image seeded no Starter templates (samples/starters missing from the image?)"
+  pass "Starter templates seeded: $starters"
 
   jq -n --rawfile s "$repo/samples/workflows/mcp-agent-quickstart-flow.json" '{json: $s}' > "$work/quickstart.json"
   local id result

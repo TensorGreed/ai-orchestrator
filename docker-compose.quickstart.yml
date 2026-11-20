@@ -1,0 +1,71 @@
+## L2M quickstart: the published images, SQLite in a Docker volume, nothing to configure.
+##
+##   curl -fsSL https://raw.githubusercontent.com/TensorGreed/l2m/v0.1.0/docker-compose.quickstart.yml -o docker-compose.yml
+##   docker compose up -d
+##
+## Then open http://localhost:8080 and sign in as admin@l2m.local with the password printed once in the log:
+##   docker compose logs api
+## (or run https://lsquarem.com/install.sh, which does the same and prints it for you).
+##
+## On the first start the API makes a master key for stored secrets and the admin password, and keeps both in the
+## l2m-data volume (quickstart/master-key and quickstart/initial-admin-password, readable only inside the
+## container). Back up that volume. Set SECRET_MASTER_KEY_BASE64, BOOTSTRAP_ADMIN_EMAIL or BOOTSTRAP_ADMIN_PASSWORD
+## (in the shell or a .env file next to this one) to choose your own.
+##
+## Settings you can set the same way (all optional):
+##   L2M_VERSION   image tag (default v0.1.0, the release this file belongs to; `latest` follows new releases)
+##   L2M_PORT      port of the studio on this machine (default 8080)
+##   L2M_BIND      address the port listens on (default 127.0.0.1, this machine only; 0.0.0.0 for your network,
+##                 behind HTTPS: sign-in cookies are sent over plain HTTP here)
+##   OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY   model keys (or add them as secrets in the studio)
+##   OLLAMA_BASE_URL   a local Ollama, e.g. http://host.docker.internal:11434/v1
+##
+## Upgrade: set L2M_VERSION to the new tag (or keep `latest`), then `docker compose pull && docker compose up -d`.
+## Remove everything, data included: `docker compose down -v`.
+## Postgres, several replicas, Helm: see https://lsquarem.com/docs/getting-started/install
+
+name: l2m
+
+services:
+  api:
+    image: ghcr.io/tensorgreed/l2m:${L2M_VERSION:-v0.1.0}
+    restart: unless-stopped
+    # Makes the master key and the admin password on the first start (see the top of this file), then starts the
+    # API as the image does.
+    command: ["sh", "/app/apps/api/scripts/quickstart-start.sh"]
+    environment:
+      L2M_PUBLIC_URL: http://localhost:${L2M_PORT:-8080}
+      WEB_ORIGIN: http://localhost:${L2M_PORT:-8080}
+      SECRET_MASTER_KEY_BASE64: ${SECRET_MASTER_KEY_BASE64:-}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@l2m.local}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+      AUTH_ALLOW_PUBLIC_REGISTER: "false"
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+    # host.docker.internal reaches services on this machine (a local Ollama) on Linux too.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - l2m-data:/app/apps/api/data
+    # The image's check, polled more often so the studio starts as soon as the API is up.
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:4000/health"]
+      interval: 5s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+    # No published port: the studio below forwards /api, /webhook, /mcp and /v1 to it.
+
+  web:
+    image: ghcr.io/tensorgreed/l2m-web:${L2M_VERSION:-v0.1.0}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${L2M_BIND:-127.0.0.1}:${L2M_PORT:-8080}:80"
+
+volumes:
+  l2m-data:
