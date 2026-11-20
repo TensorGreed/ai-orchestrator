@@ -277,7 +277,7 @@ describe.each(["role", "strict"] as const)("the production webhook URL lists not
   });
 
   it("a webhook switched off says so only to a caller that passes its token check; anyone else gets the plain 404", async () => {
-    const { context } = await seed();
+    const { context, owner, viewer } = await seed();
     const secret = await context.secretService.createSecret({ name: "hook token", provider: "webhook", value: "tok-off", projectId: "team" });
     await context.store.upsertWorkflow(hookWorkflow("wf-off-bearer", { active: false, authMode: "bearer_token", authHeaderName: "authorization", secretRef: secret }));
     await context.store.upsertWorkflow(hookWorkflow("wf-off-open", { active: false }));
@@ -289,9 +289,42 @@ describe.each(["role", "strict"] as const)("the production webhook URL lists not
     const told = await context.app.inject({ method: "POST", url: "/webhook/orders-wf-off-bearer", headers: { authorization: "Bearer tok-off" }, payload: {} });
     expect(told.statusCode).toBe(404);
     expect(told.json()).toMatchObject({ code: LIVE_ENTRY_OFF_CODE });
-    // No token to check: the path is the only key, and it says it is off.
-    expect((await context.app.inject({ method: "POST", url: "/webhook/orders-wf-off-open", payload: {} })).json()).toMatchObject({ code: LIVE_ENTRY_OFF_CODE });
+    // No token to check: only a signed-in editor is told it is off; anyone else (a person who may only run it too) gets the plain 404.
+    expect((await context.app.inject({ method: "POST", url: "/webhook/orders-wf-off-open", payload: {} })).json()).toEqual(PLAIN_404);
+    expect((await context.app.inject({ method: "POST", url: "/webhook/orders-wf-off-open", headers: { cookie: viewer.cookie }, payload: {} })).json()).toEqual(PLAIN_404);
+    expect((await context.app.inject({ method: "POST", url: "/webhook/orders-wf-off-open", headers: { cookie: owner.cookie }, payload: {} })).json()).toMatchObject({ code: LIVE_ENTRY_OFF_CODE });
     expect((await context.store.listExecutionHistory({ page: 1, pageSize: 10 })).total).toBe(0);
+  });
+
+  it("the chat endpoint: missing, no Chat trigger and switched off answer one plain 404 to all but a signed-in editor", async () => {
+    const { context, owner, operator, viewer } = await seed();
+    const chatWorkflow = (id: string, chatConfig: Record<string, unknown> | null): Workflow => ({
+      ...hookWorkflow(id),
+      nodes: [
+        chatConfig === null
+          ? { id: "start", type: "manual_trigger", name: "Start", position: { x: 0, y: 0 }, config: {} }
+          : { id: "start", type: "chat_trigger", name: "Chat", position: { x: 0, y: 0 }, config: chatConfig },
+        { id: "out", type: "output", name: "Out", position: { x: 200, y: 0 }, config: { responseTemplate: "ok" } }
+      ],
+      edges: [{ id: "e1", source: "start", target: "out" }]
+    });
+    await context.store.upsertWorkflow(chatWorkflow("wf-nochat", null));
+    await context.store.upsertWorkflow(chatWorkflow("wf-chatoff", { active: false, authMode: "public" }));
+    await context.store.upsertWorkflow(chatWorkflow("wf-chaton", { authMode: "public" }));
+    const chat = (id: string, cookie?: string) =>
+      context.app.inject({ method: "POST", url: `/api/chat/${id}`, headers: cookie ? { cookie } : {}, payload: { message: "hi" } });
+    for (const id of ["wf-missing", "wf-nochat", "wf-chatoff"]) {
+      for (const person of [null, operator, viewer]) {
+        const response = await chat(id, person?.cookie);
+        expect(response.statusCode, `${id} ${person?.email ?? "anonymous"}`).toBe(404);
+        expect(response.json(), id).toEqual({ error: "Not found" });
+      }
+    }
+    expect((await chat("wf-nochat", owner.cookie)).statusCode).toBe(400);
+    const off = await chat("wf-chatoff", owner.cookie);
+    expect(off.statusCode).toBe(404);
+    expect(off.json()).toMatchObject({ code: LIVE_ENTRY_OFF_CODE });
+    expect((await chat("wf-chaton")).statusCode).toBe(200);
   });
 });
 

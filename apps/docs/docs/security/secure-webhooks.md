@@ -63,7 +63,15 @@ no methods. A signed-in person (or an API key) who may run a workflow on that pa
 methods it takes, or the endpoints of that method they may run.
 
 A webhook switched off with a bearer token or HMAC signature says it is off (`trigger_off`) only to a call that passes
-that check; anyone else gets the plain `404`. One with Auth Mode **None** says it is off to anyone who has its path.
+that check; anyone else gets the plain `404`. One with Auth Mode **None** says it is off only to a signed-in person
+(studio session or API key) who may edit the workflow. A deactivated gated workflow's `409` is likewise only for its
+signed-in editors; anyone else gets the plain `404`.
+
+## Chat (`/api/chat/:workflowId`)
+
+A workflow that does not exist, is deactivated or unfinished, has no Chat trigger, or whose Chat trigger is switched
+off answers the same plain `404` (`{"error": "Not found"}`) to anyone but a signed-in person who may edit it. They get
+the detail: `409` deactivated or unfinished, `400` no Chat trigger, `404` `trigger_off`.
 
 ## The test URL (`/webhook-test/:path`)
 
@@ -82,7 +90,8 @@ The test URL runs the saved draft, so it is only for people who may edit the wor
 
 A webhook, form, chat, MCP or app trigger whose node has `active: false` takes no production calls: `/webhook/:path`,
 `/api/forms/:path`, `/api/chat/:workflowId`, `/api/mcp-server/:path/*` and the app routes answer `404` with
-`"code": "trigger_off"` (a protected webhook and the app routes only once the caller's token or signature checks out),
+`"code": "trigger_off"` (a protected webhook and the app routes only once the caller's token or signature checks out;
+an open webhook and chat only to a signed-in editor of the workflow),
 and the MCP gateway leaves the tool out. `/webhook-test/:path` answers the same `404`. The editor's **Run** and
 **Webhook run** still work.
 Unset means on, so nodes saved before the setting are unchanged. Starter templates ship with theirs off; the node's

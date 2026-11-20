@@ -13562,13 +13562,19 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     "/api/chat/:workflowId",
     async (request, reply) => {
       const workflow = await productionWorkflow(request.params.workflowId);
-      if (!workflow) return await productionMissing(reply, request.params.workflowId);
-      const chatNode = workflow.nodes.find((n) => n.type === "chat_trigger");
-      if (!chatNode) {
-        reply.code(400);
-        return { error: "Workflow has no chat_trigger node" };
-      }
-      if (isLiveEntryOff(chatNode)) {
+      const chatNode = workflow?.nodes.find((n) => n.type === "chat_trigger");
+      // Why a workflow takes no chat (missing, deactivated, unfinished, no Chat trigger, switched off) is told only to a
+      // signed-in editor of it; anyone else gets one plain 404, so the route never says which workflow ids exist.
+      if (!workflow || !chatNode || isLiveEntryOff(chatNode)) {
+        if (!(await signedInEditorOf(request, request.params.workflowId))) {
+          reply.code(404);
+          return { error: APP_TRIGGER_NOT_FOUND_MESSAGE };
+        }
+        if (!workflow) return await productionMissing(reply, request.params.workflowId);
+        if (!chatNode) {
+          reply.code(400);
+          return { error: "Workflow has no chat_trigger node" };
+        }
         reply.code(404);
         return { error: liveEntryOffMessage("chat_trigger"), code: LIVE_ENTRY_OFF_CODE };
       }
@@ -14211,6 +14217,17 @@ const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and meth
     return checked.user;
   };
 
+  /**
+   * Whether the call comes from a signed-in person (a studio session or an API key) who may edit the workflow: only
+   * they are told why a production entry point takes no call (missing, deactivated, switched off).
+   */
+  const signedInEditorOf = async (request: FastifyRequest, workflowId: string): Promise<boolean> => {
+    const caller = await webhookTestCaller(request);
+    if (!caller) return false;
+    const editedWorkflow = await store.getWorkflow(workflowId);
+    return editedWorkflow ? await runAccess.mayEdit(caller, editedWorkflow) : false;
+  };
+
   const registerConfiguredWebhookRoute = (routePath: "/webhook/:path" | "/webhook-test/:path") => {
     const isTestRoute = routePath.startsWith("/webhook-test");
     // Phase 15.4 — /webhook/ is production traffic (the published version when there is one); /webhook-test/ runs the draft.
@@ -14247,11 +14264,12 @@ const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and meth
 
         const match = await selectWebhookByPath(store, request.params.path, request.method, callerMayRun, loadForRoute);
         if (!match) {
-          // Phase 15.4 — a deactivated gated workflow on this path: say so rather than "not found".
+          // Phase 15.4 — a deactivated gated workflow on this path: say so rather than "not found", to its signed-in
+          // editors only (anyone else gets the answer a missing path gets).
           if (!isTestRoute) {
             const wanted = normalizeWebhookPath(request.params.path, "").toLowerCase();
             const deactivated = await deactivatedMatch((workflow) => listWebhookEndpoints(workflow).some((endpoint) => endpoint.path.toLowerCase() === wanted));
-            if (deactivated) {
+            if (deactivated && (await signedInEditorOf(request, deactivated.id))) {
               reply.code(409);
               return { error: DEACTIVATED_MESSAGE, path: request.params.path };
             }
@@ -14299,7 +14317,7 @@ const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and meth
         // A webhook switched off (a starter's, until its owner turns it on) takes no calls on its URL or its test URL;
         // the editor's Run and Webhook run still work.
         // On production, a webhook with a token or signature says it is off only to a caller that passes that check;
-        // anyone else gets the plain 404.
+        // anyone else gets the plain 404. Without one (Auth Mode none) only a signed-in editor is told.
         if (match.endpoint.config.active === false) {
           const offSecurity = normalizeWebhookSecurityConfig(match.endpoint.config);
           if (!isTestRoute && offSecurity.authMode !== "none") {
@@ -14315,6 +14333,10 @@ const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and meth
               reply.code(404);
               return { error: NO_WEBHOOK_MATCH_MESSAGE };
             }
+          } else if (!isTestRoute && !(await signedInEditorOf(request, match.workflow.id))) {
+            // No token or signature to check: only a signed-in editor is told it is off.
+            reply.code(404);
+            return { error: NO_WEBHOOK_MATCH_MESSAGE };
           }
           reply.code(404);
           return { error: liveEntryOffMessage("webhook_input"), code: LIVE_ENTRY_OFF_CODE, path: request.params.path };

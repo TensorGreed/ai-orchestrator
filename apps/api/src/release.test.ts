@@ -1461,7 +1461,11 @@ describe("deactivation (L9, N3)", () => {
     expect(await prodHook(context, "hook-wf-kill")).toMatchObject({ status: 200, output: { result: "live" } });
     expect((await call(context, "POST", "/api/workflows/wf-kill/deactivate", builder.cookie, {})).statusCode).toBe(200);
 
-    const hook = await context.app.inject({ method: "POST", url: "/webhook/hook-wf-kill", payload: {} });
+    // Anyone but a signed-in editor gets the plain 404 a missing path gets; the editor is told why.
+    const anonymousHook = await context.app.inject({ method: "POST", url: "/webhook/hook-wf-kill", payload: {} });
+    expect(anonymousHook.statusCode).toBe(404);
+    expect(anonymousHook.body).not.toMatch(/deactivated/);
+    const hook = await context.app.inject({ method: "POST", url: "/webhook/hook-wf-kill", headers: { cookie: builder.cookie }, payload: {} });
     expect(hook.statusCode).toBe(409);
     expect(hook.json<{ error: string }>().error).toBe("This workflow is deactivated, so production runs are refused. Activate it to serve production again.");
     expect(hook.body).not.toMatch(/release gate/i);

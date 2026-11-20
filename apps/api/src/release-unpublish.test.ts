@@ -447,7 +447,11 @@ describe("unpublish with a release gate", () => {
 
     // Deactivated: production refuses the draft as it refused the published version.
     expect((await callAs(ctx, "POST", "/api/workflows/wf-on/deactivate", admin.cookie, {})).statusCode).toBe(200);
-    const deactivated = await ctx.app.inject({ method: "POST", url: "/webhook/hook-wf-on", payload: {} });
+    // Only a signed-in editor is told why; anyone else gets the plain 404 a missing path gets.
+    const anonymous = await ctx.app.inject({ method: "POST", url: "/webhook/hook-wf-on", payload: {} });
+    expect(anonymous.statusCode).toBe(404);
+    expect(anonymous.body).not.toMatch(/deactivated/);
+    const deactivated = await ctx.app.inject({ method: "POST", url: "/webhook/hook-wf-on", headers: { cookie: admin.cookie }, payload: {} });
     expect(deactivated.statusCode).toBe(409);
     expect(deactivated.body).toMatch(/deactivated/);
 

@@ -365,7 +365,11 @@ describe("starters start switched off", () => {
     expect(hook.config).toMatchObject({ active: false });
     const webhookPath = String((hook.config as Record<string, unknown>).path);
     const body = { first_name: "Ada", last_name: "Lovelace", email: "ADA@example.com", plan: "enterprise" };
-    const off = await anonymous("POST", `/webhook/${webhookPath}`, body);
+    // Its editor is told it is off; anyone else gets the plain 404 (it has no token to check).
+    const anonymousOff = await anonymous("POST", `/webhook/${webhookPath}`, body);
+    expect(anonymousOff.statusCode).toBe(404);
+    expect(anonymousOff.json()).toEqual({ error: "No webhook endpoint matches this path and method" });
+    const off = await context.app.inject({ method: "POST", url: `/webhook/${webhookPath}`, headers: { cookie: context.cookie }, payload: body });
     expect(off.statusCode).toBe(404);
     expect(off.json()).toMatchObject({ code: "trigger_off", error: "This webhook is turned off. Turn it on in the workflow editor to accept live calls." });
     // Another method or path does not advertise it either.
@@ -421,7 +425,8 @@ describe("starters start switched off", () => {
         edges: [{ id: "e1", source: "start", target: "reply" }]
       }) as unknown as Workflow;
     await context.store.upsertWorkflow(workflow("wf-chat-off", { type: "chat_trigger", config: { path: "chat-off", authMode: "public", active: false } }));
-    const chat = await anonymous("POST", "/api/chat/wf-chat-off", { message: "hi" });
+    expect((await anonymous("POST", "/api/chat/wf-chat-off", { message: "hi" })).json()).toEqual({ error: "Not found" });
+    const chat = await context.app.inject({ method: "POST", url: "/api/chat/wf-chat-off", headers: { cookie: context.cookie }, payload: { message: "hi" } });
     expect(chat.statusCode).toBe(404);
     expect(chat.json()).toMatchObject({ code: "trigger_off", error: "This chat is turned off. Turn it on in the workflow editor to accept live calls." });
 

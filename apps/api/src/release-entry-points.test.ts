@@ -89,6 +89,7 @@ const WORKFLOW_LOADS: LoadSite[] = [
   { file: "app.ts", match: "const stored = await store.getWorkflow(sourceId);", kind: "not_run", why: "a JSON import reads the stored workflow with the file's id: to name and diff it, and (12.2) to keep its trigger trust settings on a replace; nothing runs" },
   { file: "app.ts", match: "if (!await store.getWorkflow(workflowId)) {", kind: "not_run", why: "a tool policy rule's workflow principal must exist when the rule is saved; nothing runs" },
   { file: "app.ts", match: "const gatedWorkflow = await store.getWorkflow(workflowId);", kind: "not_run", why: "whether the reader of a release gate's cases sees every run of the workflow; nothing runs" },
+  { file: "app.ts", match: "const editedWorkflow = await store.getWorkflow(workflowId);", kind: "not_run", why: "whether a production entry point's caller may edit the workflow, to tell them why it takes no call; nothing runs" },
   { file: "app.ts", match: "const releasedWorkflow = await store.getWorkflow(workflowId);", kind: "not_run", why: "whether the reader of the publish preview or the release history sees every run of the workflow; nothing runs" },
 
   // app.ts: production traffic.
