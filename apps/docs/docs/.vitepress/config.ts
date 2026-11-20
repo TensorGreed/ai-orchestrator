@@ -315,6 +315,7 @@ export default defineConfig({
           { text: "Service Accounts + API Keys", link: "/security/service-accounts" },
           { text: "SCIM Provisioning", link: "/security/scim" },
           { text: "Secrets", link: "/security/secrets" },
+          { text: "Connect accounts", link: "/security/connect-accounts" },
           { text: "Secure Webhooks", link: "/security/secure-webhooks" },
           { text: "Audit Log", link: "/security/audit-log" },
           { text: "Audit Bundles", link: "/security/audit-bundles" },

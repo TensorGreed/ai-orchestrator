@@ -38,6 +38,12 @@ that user to hold `secret:use` in the workflow's project, or in a project the
 workflow is shared to with `execute`. See
 [Authentication and RBAC](./auth-rbac.md#what-a-running-workflow-can-reach).
 
+## Connected accounts
+
+Instead of pasting a token, you can sign in to Slack, Google, GitHub, Microsoft or Notion on the Secrets page
+(**Connected accounts**). The result is a secret with provider `oauth_account` that nodes pick like any other; L2M
+renews its access token and shows when it needs a reconnect. See [Connect accounts](./connect-accounts.md).
+
 ## Creating secrets
 
 Use the UI secret picker inline in node config, or call API directly.
