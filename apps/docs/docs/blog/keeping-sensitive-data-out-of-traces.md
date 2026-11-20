@@ -95,4 +95,4 @@ Content capture and marks are covered on the [OpenTelemetry page](/operations/op
 
 - [LLM02:2025 Sensitive Information Disclosure](https://genai.owasp.org/llmrisk/llm022025-sensitive-information-disclosure/) (OWASP Top 10 for LLM Applications)
 - [GenAI spans](https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/gen-ai/gen-ai-spans.md), v1.41.0: message attributes are opt-in and "likely to contain sensitive information" (OpenTelemetry)
-- Pull requests: [#212 marks on session state (v73)](https://github.com/TensorGreed/ai-orchestrator/pull/212), [#213 marks on runs, pins and knowledge base chunks (v74)](https://github.com/TensorGreed/ai-orchestrator/pull/213) (GitHub)
+- Pull requests: [#212 marks on session state (v73)](https://github.com/TensorGreed/l2m/pull/212), [#213 marks on runs, pins and knowledge base chunks (v74)](https://github.com/TensorGreed/l2m/pull/213) (GitHub)

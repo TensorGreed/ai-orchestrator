@@ -28,7 +28,7 @@ related: ["hybrid-search","rag","vector-store","grounding"]
 
 ## Steps
 
-1. Download <a href="/docs/recipes/files/rag-hybrid-rerank-flow.json" download>rag-hybrid-rerank-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/rag-hybrid-rerank-flow.json).
+1. Download <a href="/docs/recipes/files/rag-hybrid-rerank-flow.json" download>rag-hybrid-rerank-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/rag-hybrid-rerank-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
 3. Create a knowledge base and add documents, as in the [knowledge base recipe](/recipes/rag-knowledge-base#create-a-knowledge-base-with-the-api), with the embedder the **Retrieve (hybrid)** node uses (`openai-embedder` as shipped). Open **Retrieve (hybrid)** and pick it under **Knowledge Base** (or put its id in place of `<your-kb-id>` in the JSON file).
 4. Store your Cohere key as a [secret](/security/secrets). Open **Rerank** and pick it under **Reranker API Key Secret**. Or delete `secretRef` from the file and set `COHERE_API_KEY` on the server. For Jina or Voyage, change `providerId`, `model` and the key.

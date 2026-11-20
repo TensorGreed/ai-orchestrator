@@ -28,7 +28,7 @@ A **Text Input** and a **Prompt Template** build the prompt, the **Azure OpenAI 
 
 ## Steps
 
-1. Download <a href="/docs/recipes/files/azure-openai-flow.json" download>azure-openai-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/azure-openai-flow.json).
+1. Download <a href="/docs/recipes/files/azure-openai-flow.json" download>azure-openai-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/azure-openai-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
 3. Store the key as a secret. In the node's config, open **Azure OpenAI Secret** and choose **+ Add New Credential...** (the provider is already set to Azure OpenAI), name it and paste the key. Or use the API (below).
 4. On the **Azure OpenAI Chat Model** node, set **Endpoint** to `https://<your-resource>.openai.azure.com`, **Deployment** to your deployment's name (not the model's name, unless you named it after the model) and pick the secret under **Azure OpenAI Secret**. Save.

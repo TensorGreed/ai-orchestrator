@@ -244,7 +244,7 @@ docker compose up --build
 - Web: `http://localhost:5173`
 - API: `http://localhost:4000`
 
-This builds the images from source. Tagged releases also publish signed multi-arch images to GHCR (`ghcr.io/tensorgreed/ai-orchestrator`, `ghcr.io/tensorgreed/ai-orchestrator-web`) with SBOMs and build provenance; see [Verify a release](https://lsquarem.com/docs/operations/verify-a-release) to check one and pin its digest.
+This builds the images from source. Tagged releases also publish signed multi-arch images to GHCR (`ghcr.io/tensorgreed/l2m`, `ghcr.io/tensorgreed/l2m-web`) with SBOMs and build provenance, and the same images on Docker Hub (`lsquarem/l2m`, `lsquarem/l2m-web`); see [Verify a release](https://lsquarem.com/docs/operations/verify-a-release) to check one and pin its digest.
 
 ## CI
 
@@ -804,7 +804,7 @@ Third-party developers can ship `l2m-nodes-*` npm packages that contribute LLM p
 
 ## Contributing
 
-L2M is **pure OSS (MIT)** and the project's growth depends on community contributions — adapters, MCP integrations, docs, bug reports, real-world patterns. Start with [CONTRIBUTING.md](CONTRIBUTING.md). Bug? File a [bug report](https://github.com/TensorGreed/ai-orchestrator/issues/new?template=bug_report.yml). Question or design discussion? Use [GitHub Discussions](https://github.com/TensorGreed/ai-orchestrator/discussions). Security issue? Use a [private advisory](https://github.com/TensorGreed/ai-orchestrator/security/advisories/new) — see [SECURITY.md](SECURITY.md). Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md). Notable changes are tracked in [CHANGELOG.md](CHANGELOG.md).
+L2M is **pure OSS (MIT)** and the project's growth depends on community contributions — adapters, MCP integrations, docs, bug reports, real-world patterns. Start with [CONTRIBUTING.md](CONTRIBUTING.md). Bug? File a [bug report](https://github.com/TensorGreed/l2m/issues/new?template=bug_report.yml). Question or design discussion? Use [GitHub Discussions](https://github.com/TensorGreed/l2m/discussions). Security issue? Use a [private advisory](https://github.com/TensorGreed/l2m/security/advisories/new) — see [SECURITY.md](SECURITY.md). Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md). Notable changes are tracked in [CHANGELOG.md](CHANGELOG.md).
 
 ## Status and roadmap
 

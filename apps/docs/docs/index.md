@@ -16,7 +16,7 @@ hero:
       link: /why
     - theme: alt
       text: GitHub
-      link: https://github.com/TensorGreed/ai-orchestrator
+      link: https://github.com/TensorGreed/l2m
 features:
   - title: MCP-first
     details: Wire any Model Context Protocol server in as an agent tool. Tool schemas are compacted, and full outputs are cached across multi-turn sessions. Expose your own workflows back out as MCP tools that other agents invoke.

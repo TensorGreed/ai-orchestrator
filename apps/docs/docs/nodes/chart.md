@@ -93,7 +93,7 @@ Wire `chart` → `prompt_template` → `pdf_output`. The Prompt Template body re
 <div class="chart">{{cloudChart.svg}}</div>
 ```
 
-The full pattern is in [samples/workflows/report-with-charts-flow.json](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/report-with-charts-flow.json) — three charts (bar / arc / age-bucket) merged into one branded HTML report and rendered to PDF.
+The full pattern is in [samples/workflows/report-with-charts-flow.json](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/report-with-charts-flow.json) — three charts (bar / arc / age-bucket) merged into one branded HTML report and rendered to PDF.
 
 ## When the spec is dynamic
 

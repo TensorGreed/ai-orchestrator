@@ -28,7 +28,7 @@ The L2M VS Code extension sends each chat message, with a bounded bundle of work
 
 ## Steps
 
-1. Download <a href="/docs/recipes/files/vscode-l2m-coding-agent-flow.json" download>vscode-l2m-coding-agent-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/vscode-l2m-coding-agent-flow.json).
+1. Download <a href="/docs/recipes/files/vscode-l2m-coding-agent-flow.json" download>vscode-l2m-coding-agent-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/vscode-l2m-coding-agent-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
 3. Point the **Chat Model** node at a model you have: pull `qwen2.5:7b` into Ollama, or switch the provider to OpenAI, Anthropic or any OpenAI-compatible endpoint with its key as a stored secret. A larger model follows the JSON contract more reliably. Save.
 4. Create an API key in **Settings → Account → API Keys** (a builder role or above can run workflows). It is shown once.

@@ -4,18 +4,18 @@
   "description": "Interactive VS Code coding and data analytics agent backed by L2M webhook workflows.",
   "version": "0.1.0",
   "private": true,
-  "publisher": "ai-orchestrator",
+  "publisher": "l2m",
   "license": "UNLICENSED",
   "type": "commonjs",
   "main": "./dist/extension.js",
   "repository": {
     "type": "git",
-    "url": "https://github.com/TensorGreed/ai-orchestrator.git",
+    "url": "https://github.com/TensorGreed/l2m.git",
     "directory": "apps/vscode-l2m-agent"
   },
-  "homepage": "https://github.com/TensorGreed/ai-orchestrator#readme",
+  "homepage": "https://github.com/TensorGreed/l2m#readme",
   "bugs": {
-    "url": "https://github.com/TensorGreed/ai-orchestrator/issues"
+    "url": "https://github.com/TensorGreed/l2m/issues"
   },
   "keywords": [
     "ai",

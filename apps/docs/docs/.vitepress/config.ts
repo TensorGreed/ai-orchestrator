@@ -360,7 +360,7 @@ export default defineConfig({
       ]
     },
     socialLinks: [
-      { icon: "github", link: "https://github.com/TensorGreed/ai-orchestrator" }
+      { icon: "github", link: "https://github.com/TensorGreed/l2m" }
     ]
   }
 });

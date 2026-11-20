@@ -31,7 +31,7 @@ A **Question** node holds the question. **RAG Retrieve** searches a built-in kno
 
 ## Steps
 
-1. Download <a href="/docs/recipes/files/rag-knowledge-base-flow.json" download>rag-knowledge-base-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/rag-knowledge-base-flow.json).
+1. Download <a href="/docs/recipes/files/rag-knowledge-base-flow.json" download>rag-knowledge-base-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/rag-knowledge-base-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
 3. As an admin, create a knowledge base with the `token-embedder` and add a document, under **Knowledge** in the sidebar or with the API (below). Get its id (`kb_...`) from the create response or from `GET /api/knowledge-bases`; the Knowledge page does not show it.
 4. Open the **RAG Retrieve (KB)** node and replace `<your-kb-id>` with that id. Save.
@@ -91,7 +91,7 @@ Two things to know:
 
 ## Variant: retrieve from a connector
 
-[`rag-flow.json`](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/rag-flow.json) loads documents from a **Connector Source** (Google Drive) on every run and retrieves from them in memory, with no knowledge base. As shipped it runs on the built-in echo model. We ran it that way with no Google credentials: the connector ran in demo-fallback mode and returned five built-in sample documents, and retrieval put the three closest to "How does MCP fit into an AI workflow builder?" into the prompt. Use a knowledge base when the documents should be ingested once and kept; use a connector for small sets that change between runs.
+[`rag-flow.json`](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/rag-flow.json) loads documents from a **Connector Source** (Google Drive) on every run and retrieves from them in memory, with no knowledge base. As shipped it runs on the built-in echo model. We ran it that way with no Google credentials: the connector ran in demo-fallback mode and returned five built-in sample documents, and retrieval put the three closest to "How does MCP fit into an AI workflow builder?" into the prompt. Use a knowledge base when the documents should be ingested once and kept; use a connector for small sets that change between runs.
 
 ## Make it yours
 

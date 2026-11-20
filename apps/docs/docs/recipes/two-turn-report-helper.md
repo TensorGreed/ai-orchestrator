@@ -28,7 +28,7 @@ A **Webhook Input** at `POST /webhook/two-turn-report-code-helper` takes a `user
 
 ## Steps
 
-1. Download <a href="/docs/recipes/files/two-turn-report-code-helper-flow.json" download>two-turn-report-code-helper-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/two-turn-report-code-helper-flow.json).
+1. Download <a href="/docs/recipes/files/two-turn-report-code-helper-flow.json" download>two-turn-report-code-helper-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/two-turn-report-code-helper-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
 3. Point **Chat Model** at a model that can call tools and keep to a JSON format: pull `qwen2.5:7b` into Ollama, or switch the provider and pick a stored key. To check the plumbing without a model, set its `providerId` to `echo` in the JSON file and import it again (the **Provider** list has no echo entry). Echo never calls a tool.
 4. Point **MCP Tools** at your MCP server: set `connection.endpoint` to its streamable HTTP URL (`http://127.0.0.1:7001/mcp` is a placeholder). `toolName: "__all__"` gives the agent every tool the server lists. For a token, set `connection.authType` to `bearer` and a `secretRef`, or register the server in the [MCP server registry](/product/mcp-server-registry) and set `registryServerId`.

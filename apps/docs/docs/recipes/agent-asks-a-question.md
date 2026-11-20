@@ -28,7 +28,7 @@ A **Chat** trigger sends each message to one Agent Orchestrator with a chat mode
 
 ## Steps
 
-1. Download <a href="/docs/recipes/files/agent-clarify-flow.json" download>agent-clarify-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/agent-clarify-flow.json).
+1. Download <a href="/docs/recipes/files/agent-clarify-flow.json" download>agent-clarify-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/agent-clarify-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
 3. Open the **GPT-4o-mini** chat model node and pick a stored secret that holds your OpenAI API key (or set `OPENAI_API_KEY` on the API server). Save the node and the workflow. Without a key the run fails with `Chat model node "GPT-4o-mini" (model_1) has no OpenAI API key`. To use another model, replace the node with any chat model node on the agent's `chat_model` port.
 4. On the **Workflows** page, open the workflow's menu and choose **Chat**.

@@ -1,4 +1,4 @@
-## Production docker-compose topology for ai-orchestrator.
+## Production docker-compose topology for L2M.
 ##
 ## Features:
 ##  - Two API replicas (multi-main HA via DB leader lease)
@@ -14,7 +14,7 @@
 ##      BOOTSTRAP_ADMIN_EMAIL, BOOTSTRAP_ADMIN_PASSWORD, LLM keys, etc.
 ##   2. Ensure ports 80/443 are free on the host.
 ##
-## See ops/helm/ai-orchestrator for the Kubernetes equivalent.
+## See ops/helm/l2m for the Kubernetes equivalent.
 
 version: "3.9"
 
@@ -32,7 +32,8 @@ x-api-env: &api-env
   DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:-ai_orchestrator}
   DB_POSTGRESDB_USER: ${POSTGRES_USER:-ao}
   DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
-  SECRET_MASTER_KEY_BASE64: ${SECRET_MASTER_KEY_BASE64:?required — generate with: node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"}
+  # Quoted: the hint contains ": ", which YAML would otherwise read as a nested mapping.
+  SECRET_MASTER_KEY_BASE64: "${SECRET_MASTER_KEY_BASE64:?required — generate with: node -e \"console.log(require('crypto').randomBytes(32).toString('base64'))\"}"
   BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
   BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
   AUTH_ALLOW_PUBLIC_REGISTER: "false"

@@ -31,7 +31,7 @@ A **System Prompt** tells the model to answer only with JSON that has `name` and
 
 ## Steps
 
-1. Download <a href="/docs/recipes/files/structured-output-flow.json" download>structured-output-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/structured-output-flow.json).
+1. Download <a href="/docs/recipes/files/structured-output-flow.json" download>structured-output-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/structured-output-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
 3. Open the **LLM Call** node and point it at a model you have: pull `llama3.1` into Ollama, or switch the provider and store its key as a [secret](/security/secrets). In Docker, `localhost` is the container: use `http://host.docker.internal:11434/v1` for Ollama on the host. On Linux that name resolves only if the `api` service has `extra_hosts: ["host.docker.internal:host-gateway"]`, which the repo's `docker-compose.yml` does not set. Save.
 4. Run it, then open the run and click **Output Parser** to see `parsed`, `retries` and `parserTrace`.

@@ -1,14 +1,14 @@
 {{/*
 Expand the name of the chart.
 */}}
-{{- define "ai-orchestrator.name" -}}
+{{- define "l2m.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{/*
 Fully qualified app name.
 */}}
-{{- define "ai-orchestrator.fullname" -}}
+{{- define "l2m.fullname" -}}
 {{- if .Values.fullnameOverride -}}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
 {{- else -}}
@@ -17,13 +17,13 @@ Fully qualified app name.
 {{- end -}}
 {{- end -}}
 
-{{- define "ai-orchestrator.chart" -}}
+{{- define "l2m.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "ai-orchestrator.labels" -}}
-helm.sh/chart: {{ include "ai-orchestrator.chart" . }}
-app.kubernetes.io/name: {{ include "ai-orchestrator.name" . }}
+{{- define "l2m.labels" -}}
+helm.sh/chart: {{ include "l2m.chart" . }}
+app.kubernetes.io/name: {{ include "l2m.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if .Chart.AppVersion }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
@@ -31,35 +31,35 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
 
-{{- define "ai-orchestrator.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "ai-orchestrator.name" . }}
+{{- define "l2m.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "l2m.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
-{{- define "ai-orchestrator.serviceAccountName" -}}
+{{- define "l2m.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
-{{- default (include "ai-orchestrator.fullname" .) .Values.serviceAccount.name -}}
+{{- default (include "l2m.fullname" .) .Values.serviceAccount.name -}}
 {{- else -}}
 {{- default "default" .Values.serviceAccount.name -}}
 {{- end -}}
 {{- end -}}
 
-{{- define "ai-orchestrator.secretName" -}}
+{{- define "l2m.secretName" -}}
 {{- if .Values.secrets.existingSecret -}}
 {{- .Values.secrets.existingSecret -}}
 {{- else -}}
-{{- printf "%s-secrets" (include "ai-orchestrator.fullname" .) -}}
+{{- printf "%s-secrets" (include "l2m.fullname" .) -}}
 {{- end -}}
 {{- end -}}
 
-{{- define "ai-orchestrator.configMapName" -}}
-{{- printf "%s-config" (include "ai-orchestrator.fullname" .) -}}
+{{- define "l2m.configMapName" -}}
+{{- printf "%s-config" (include "l2m.fullname" .) -}}
 {{- end -}}
 
 {{/*
 The drain on SIGTERM in seconds, from config.SHUTDOWN_DRAIN_MS (milliseconds), or 0 when it is not set.
 */}}
-{{- define "ai-orchestrator.drainSeconds" -}}
+{{- define "l2m.drainSeconds" -}}
 {{- $drain := .Values.config.SHUTDOWN_DRAIN_MS | default "" | toString -}}
 {{- if $drain -}}
 {{- div (add (int $drain) 999) 1000 -}}
@@ -71,7 +71,7 @@ The drain on SIGTERM in seconds, from config.SHUTDOWN_DRAIN_MS (milliseconds), o
 {{/*
 "true" when the chart runs on Postgres (config.DB_TYPE postgres or postgresql, as the server reads it), else empty.
 */}}
-{{- define "ai-orchestrator.isPostgres" -}}
+{{- define "l2m.isPostgres" -}}
 {{- if has (lower (.Values.config.DB_TYPE | default "" | toString)) (list "postgres" "postgresql") -}}true{{- end -}}
 {{- end -}}
 
@@ -81,10 +81,10 @@ else the minimum (empty = leave the Kubernetes default). When config.SHUTDOWN_DR
 drains 20 s in cluster mode, so that is the drain assumed for workers and for Postgres with HA on.
 Call with (dict "root" $ "explicit" <value> "minimum" <n> "worker" <bool>).
 */}}
-{{- define "ai-orchestrator.terminationGracePeriod" -}}
-{{- $drain := int (include "ai-orchestrator.drainSeconds" .root) -}}
+{{- define "l2m.terminationGracePeriod" -}}
+{{- $drain := int (include "l2m.drainSeconds" .root) -}}
 {{- $unset := eq (.root.Values.config.SHUTDOWN_DRAIN_MS | default "" | toString) "" -}}
-{{- if and $unset (or .worker (and .root.Values.api.haEnabled (include "ai-orchestrator.isPostgres" .root))) -}}
+{{- if and $unset (or .worker (and .root.Values.api.haEnabled (include "l2m.isPostgres" .root))) -}}
 {{- $drain = 20 -}}
 {{- end -}}
 {{- $explicit := .explicit | default "" | toString -}}

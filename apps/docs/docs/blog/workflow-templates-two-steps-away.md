@@ -109,4 +109,4 @@ Open the [live demo](https://lsquarem.com/demo/){target="_self"}, no sign-up nee
 ## Further reading
 
 - [Property accessors](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Property_accessors): dot notation needs a valid identifier, bracket notation takes any string (MDN)
-- Pull request: [#214 `$node()` in templates, scope docs and preview parity](https://github.com/TensorGreed/ai-orchestrator/pull/214) (GitHub)
+- Pull request: [#214 `$node()` in templates, scope docs and preview parity](https://github.com/TensorGreed/l2m/pull/214) (GitHub)

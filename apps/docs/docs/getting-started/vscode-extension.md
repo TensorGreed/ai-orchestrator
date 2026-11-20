@@ -21,7 +21,7 @@ Until the extension ships to the Marketplace, install the `.vsix` directly.
 
 ### From CI
 
-Every CI run on `main` produces a `vscode-l2m-agent-vsix` workflow artifact. Download the latest one from the [Actions tab](https://github.com/TensorGreed/ai-orchestrator/actions), unzip, and:
+Every CI run on `main` produces a `vscode-l2m-agent-vsix` workflow artifact. Download the latest one from the [Actions tab](https://github.com/TensorGreed/l2m/actions), unzip, and:
 
 ```bash
 code --install-extension vscode-l2m-agent.vsix

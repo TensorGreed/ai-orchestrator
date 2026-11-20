@@ -10,12 +10,12 @@ These need to be made before the first publication; they're hard to change later
 
 ### 1. Publisher account
 
-The package.json currently sets `"publisher": "ai-orchestrator"`. **You probably want this to match your real publisher identity** — likely `tensorgreed` or a dedicated `l2m` publisher. The publisher is a global namespace on each marketplace and you have to register it once.
+The package.json sets `"publisher": "l2m"`, the publisher ID on the VS Code Marketplace and the namespace on Open VSX. Both are global namespaces you register once; the extension ID is `l2m.vscode-l2m-agent`.
 
 - VS Code Marketplace: <https://marketplace.visualstudio.com/manage/publishers>
 - Open VSX: <https://open-vsx.org/user-settings/namespaces>
 
-Edit `package.json` → `"publisher"` to your chosen ID before the first publish.
+Register `l2m` on both before the first publish. If you publish under another ID, change `package.json` → `"publisher"` to it first.
 
 ### 2. License
 

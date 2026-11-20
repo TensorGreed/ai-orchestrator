@@ -129,7 +129,7 @@ export class MfaService {
   constructor(
     private readonly store: Store,
     rawMasterKey: string | undefined,
-    private readonly issuer: string = "ai-orchestrator"
+    private readonly issuer: string = "L2M"
   ) {
     this.key = parseMasterKey(rawMasterKey);
   }

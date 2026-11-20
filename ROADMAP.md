@@ -254,7 +254,7 @@
 
 ## Phase 6: AI Feature Expansion (Sprints 15-16)
 
-> ai-orchestrator already leads in some AI areas (MCP, Swarm). Focus on closing remaining gaps.
+> L2M already leads in some AI areas (MCP, Swarm). Focus on closing remaining gaps.
 
 ### 6.1 Additional AI Agent Types
 - [x] Plan-and-Execute agent type — `packages/agent-runtime/src/default-agent-runtime.ts` `plan-and-execute`
@@ -293,7 +293,7 @@
 ## Phase 7: Scaling & Production Hardening (Sprints 17-18)
 
 ### 7.1 Deployment & Infrastructure
-- [x] Kubernetes Helm chart — [ops/helm/ai-orchestrator](ops/helm/ai-orchestrator/) with Chart.yaml, values.yaml, and templates for API deployment, dedicated webhook deployment, web UI, Service, Ingress, ConfigMap, Secret, HPA, ServiceAccount, _helpers.tpl. Supports `api.replicaCount`, `api.haEnabled`, `webhook.enabled`, `ingress.hosts[*].paths[*].service` per-path routing, and optional CPU-based autoscaling.
+- [x] Kubernetes Helm chart — [ops/helm/l2m](ops/helm/l2m/) with Chart.yaml, values.yaml, and templates for API deployment, dedicated webhook deployment, web UI, Service, Ingress, ConfigMap, Secret, HPA, ServiceAccount, _helpers.tpl. Supports `api.replicaCount`, `api.haEnabled`, `webhook.enabled`, `ingress.hosts[*].paths[*].service` per-path routing, and optional CPU-based autoscaling.
 - [x] Docker Compose production template — [docker-compose.prod.yml](docker-compose.prod.yml) spins up Postgres 16, Redis 7, two API replicas (`HA_ENABLED=true`, distinct `HA_INSTANCE_ID` per container), a `webhook` service (2 replicas, `WORKER_MODE=webhook`), the web UI, and an Nginx front-end that routes `/webhook/*`, `/webhook-test/*`, `/api/webhooks/*` to webhook replicas and everything else to the API replicas. Nginx config at [ops/nginx/ai-orchestrator.conf](ops/nginx/ai-orchestrator.conf).
 - [x] AWS ECS Fargate deployment guide — [ops/aws/ecs-fargate.md](ops/aws/ecs-fargate.md) end-to-end walkthrough with topology diagram, Secrets Manager wiring, ALB path-based routing, autoscaling policy, CloudWatch Logs Insights queries for leader transitions. Ready-to-edit task definitions at [ops/aws/task-definition-api.example.json](ops/aws/task-definition-api.example.json) and [ops/aws/task-definition-webhook.example.json](ops/aws/task-definition-webhook.example.json).
 - [x] Multi-main high availability (leader election) — `LeaderElectionService` in [apps/api/src/services/leader-election-service.ts](apps/api/src/services/leader-election-service.ts) uses a new `leader_leases` DB table (v10 migration) with atomic `tryAcquireLease` (insert-or-steal-if-expired, renew-if-owner). Enabled via `HA_ENABLED=true`; each replica advertises its `HA_INSTANCE_ID` (fed by downward API in Helm / env in ECS). `onBecomeLeader` callback starts `SchedulerService.initialize()` + `TriggerService.initialize()`; `onResignLeader` stops them. Lease TTL/renew configurable (`HA_LEASE_TTL_MS` / `HA_RENEW_INTERVAL_MS`). Admin status route `GET /api/ha/status` returns current holder + lease expiry + all tracked leases.

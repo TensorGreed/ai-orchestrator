@@ -1,7 +1,7 @@
-## ai-orchestrator Helm values
+## L2M Helm values
 ##
-## Example: helm install ao ./ops/helm/ai-orchestrator \
-##   --set image.repository=ghcr.io/your-org/ai-orchestrator \
+## Example: helm install ao ./ops/helm/l2m \
+##   --set image.repository=ghcr.io/your-org/l2m \
 ##   --set image.tag=latest \
 ##   --set api.env.BOOTSTRAP_ADMIN_EMAIL=admin@example.com
 
@@ -9,7 +9,7 @@ nameOverride: ""
 fullnameOverride: ""
 
 image:
-  repository: ghcr.io/tensorgreed/ai-orchestrator
+  repository: ghcr.io/tensorgreed/l2m
   tag: latest
   pullPolicy: IfNotPresent
 
@@ -165,7 +165,7 @@ web:
   enabled: true
   replicaCount: 2
   image:
-    repository: ghcr.io/tensorgreed/ai-orchestrator-web
+    repository: ghcr.io/tensorgreed/l2m-web
     tag: latest
     pullPolicy: IfNotPresent
   service:
@@ -184,7 +184,7 @@ ingress:
   className: nginx
   annotations: {}
   hosts:
-    - host: ai-orchestrator.local
+    - host: l2m.local
       paths:
         - path: /
           pathType: Prefix

@@ -1,4 +1,4 @@
-# Grafana dashboard — ai-orchestrator
+# Grafana dashboard — L2M
 
 Drop [ai-orchestrator-dashboard.json](./ai-orchestrator-dashboard.json) into Grafana via **Dashboards → Import** and point the `datasource` variable at the Prometheus instance scraping `/metrics` on the API.
 

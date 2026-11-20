@@ -7,7 +7,7 @@ description: "Agent workflow patterns for L2M with runnable samples: zero-key MC
 
 Battle-tested topologies you can crib from when designing a workflow. Each pattern names the problem it solves, sketches the topology, points to a runnable sample, and calls out the sharp edges. Patterns are ordered roughly by how often they appear in real deployments.
 
-Every sample lives under [`samples/workflows/`](https://github.com/TensorGreed/ai-orchestrator/tree/main/samples/workflows) and is auto-seeded into a fresh install when `SEED_SAMPLE_WORKFLOWS=true` is in your `.env`. Open the **Templates** panel in Studio, search by name, click **Use template**, and run it.
+Every sample lives under [`samples/workflows/`](https://github.com/TensorGreed/l2m/tree/main/samples/workflows) and is auto-seeded into a fresh install when `SEED_SAMPLE_WORKFLOWS=true` is in your `.env`. Open the **Templates** panel in Studio, search by name, click **Use template**, and run it.
 
 ::: info Looking for full reference implementations?
 The patterns below are minimal building blocks. For real-world end-to-end projects (helpdesk agent, support triage, VS Code repo reviewer), see the dedicated [**l2m-samples**](https://github.com/TensorGreed/l2m-samples) repo — each sample there carries a full README with topology, swap-to-production steps, and deployment notes.

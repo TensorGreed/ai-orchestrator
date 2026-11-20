@@ -20,7 +20,7 @@ On this page:
 
 ## Quick start with a local collector
 
-The repository ships a collector setup for trying this locally: [`ops/otel/docker-compose.yml`](https://github.com/TensorGreed/ai-orchestrator/blob/main/ops/otel/docker-compose.yml) and [`ops/otel/collector.yaml`](https://github.com/TensorGreed/ai-orchestrator/blob/main/ops/otel/collector.yaml). The collector listens for OTLP over HTTP on port 4318, prints a line per batch, and writes everything it receives to JSON-lines files.
+The repository ships a collector setup for trying this locally: [`ops/otel/docker-compose.yml`](https://github.com/TensorGreed/l2m/blob/main/ops/otel/docker-compose.yml) and [`ops/otel/collector.yaml`](https://github.com/TensorGreed/l2m/blob/main/ops/otel/collector.yaml). The collector listens for OTLP over HTTP on port 4318, prints a line per batch, and writes everything it receives to JSON-lines files.
 
 1. Start the collector from the repository root. It runs as your user so it can write `ops/otel/otel-data/`:
 
@@ -439,7 +439,7 @@ Every setting is optional. Unset means the default shown, and an empty value cou
 
 Most standard `OTEL_*` values are read only while they are used, so values meant for other tools sharing the environment do not stop L2M. `OTEL_METRICS_ENABLED`, `OTEL_HTTP_SERVER_SPANS` and `TRACING_ENABLED` take `true`, `false`, `1`, `0`, `yes` or `no`, and `OTEL_METRICS_PUSH_INTERVAL_MS` a positive whole number; another value stops the API at start-up only when it would take effect: `TRACING_ENABLED` unless `OTEL_SDK_DISABLED=true`, `OTEL_HTTP_SERVER_SPANS` while tracing is on, `OTEL_METRICS_ENABLED` with a metrics endpoint set (`OTEL_EXPORTER_OTLP_ENDPOINT` counts), and the interval while metrics are exported. While tracing or metrics export is on, an unsupported value (a sampler, propagator, protocol or number L2M cannot use) falls back to its default with a warning at start-up. Besides those, only these stop the API at start-up, with a message naming the setting: an endpoint L2M is about to use that is not an absolute `http://` or `https://` URL, `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` with a traces or metrics endpoint in use, and a bad `L2M_OTEL_*` value (such as a trusted-proxy entry that is not an IP address or CIDR range, or a trace URL template without `{traceId}`).
 
-All of these are listed, commented, in [`.env.example`](https://github.com/TensorGreed/ai-orchestrator/blob/main/.env.example).
+All of these are listed, commented, in [`.env.example`](https://github.com/TensorGreed/l2m/blob/main/.env.example).
 
 ### Deprecated settings
 
@@ -518,7 +518,7 @@ Releases before the OpenTelemetry SDK sent spans with a hand-built exporter. A d
 - `OTEL_DEPLOYMENT_ENVIRONMENT` sets `deployment.environment.name`; `TRACING_*` and `OTEL_DEPLOYMENT_ENVIRONMENT` are deprecated.
 - The OTLP metric names are unchanged; the percentile gauges are deprecated in favour of the duration histograms.
 
-The [changelog](https://github.com/TensorGreed/ai-orchestrator/blob/main/CHANGELOG.md) lists each change.
+The [changelog](https://github.com/TensorGreed/l2m/blob/main/CHANGELOG.md) lists each change.
 
 ## Related
 

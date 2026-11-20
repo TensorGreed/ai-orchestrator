@@ -10,9 +10,9 @@ We're explicitly **not** chasing connector parity with other automation tools fo
 
 ## Where to start
 
-- **Bug?** Open a [bug report](https://github.com/TensorGreed/ai-orchestrator/issues/new?template=bug_report.yml). Include reproduction steps, what you expected, what you got, and the L2M version (`git rev-parse --short HEAD` if you're on `main`).
-- **Question or design discussion?** Use [GitHub Discussions](https://github.com/TensorGreed/ai-orchestrator/discussions). Don't open an issue for "how do I…" questions.
-- **First contribution?** Look for issues labeled [`good first issue`](https://github.com/TensorGreed/ai-orchestrator/labels/good%20first%20issue) — these are scoped, well-described, and don't require deep familiarity with the runtime.
+- **Bug?** Open a [bug report](https://github.com/TensorGreed/l2m/issues/new?template=bug_report.yml). Include reproduction steps, what you expected, what you got, and the L2M version (`git rev-parse --short HEAD` if you're on `main`).
+- **Question or design discussion?** Use [GitHub Discussions](https://github.com/TensorGreed/l2m/discussions). Don't open an issue for "how do I…" questions.
+- **First contribution?** Look for issues labeled [`good first issue`](https://github.com/TensorGreed/l2m/labels/good%20first%20issue) — these are scoped, well-described, and don't require deep familiarity with the runtime.
 - **Want to ship something larger?** Open a Discussion first describing the change. Saves both of us from a 600-line PR that doesn't land.
 
 ## Setting up
@@ -20,8 +20,8 @@ We're explicitly **not** chasing connector parity with other automation tools fo
 Prerequisites: **Node 24+**, **pnpm 10+**.
 
 ```bash
-git clone https://github.com/TensorGreed/ai-orchestrator.git
-cd ai-orchestrator
+git clone https://github.com/TensorGreed/l2m.git
+cd l2m
 pnpm install
 cp .env.example .env  # edit SECRET_MASTER_KEY_BASE64 — see docs site
 pnpm dev               # API + Web + Docs concurrently
@@ -103,7 +103,7 @@ Drop the JSON into [samples/workflows/](./samples/workflows/) and register it in
 
 ## Reporting security issues
 
-**Do not open a public issue for vulnerabilities.** Use [GitHub's private vulnerability reporting](https://github.com/TensorGreed/ai-orchestrator/security/advisories/new) — see [SECURITY.md](./SECURITY.md) for the full policy.
+**Do not open a public issue for vulnerabilities.** Use [GitHub's private vulnerability reporting](https://github.com/TensorGreed/l2m/security/advisories/new) — see [SECURITY.md](./SECURITY.md) for the full policy.
 
 ## License
 

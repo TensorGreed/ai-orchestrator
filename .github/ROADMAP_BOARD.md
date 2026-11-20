@@ -54,7 +54,7 @@ foreach ($p in $phases) {
 
 ```powershell
 gh issue list --label roadmap --json number --jq ".[].number" | ForEach-Object {
-  gh project item-add <N> --owner TensorGreed --url "https://github.com/TensorGreed/ai-orchestrator/issues/$_"
+  gh project item-add <N> --owner TensorGreed --url "https://github.com/TensorGreed/l2m/issues/$_"
 }
 ```
 

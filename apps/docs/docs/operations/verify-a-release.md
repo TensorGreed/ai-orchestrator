@@ -9,11 +9,13 @@ Every `v*` release tag publishes three multi-arch images (`linux/amd64`, `linux/
 
 | Image | What it is |
 | --- | --- |
-| `ghcr.io/tensorgreed/ai-orchestrator` | The API (Fastify) |
-| `ghcr.io/tensorgreed/ai-orchestrator-web` | The Studio web UI (Nginx) |
-| `ghcr.io/tensorgreed/ai-orchestrator-ner` | [l2m-ner](./entity-service.md), the optional entity service (no model weights; you pull the model yourself) |
+| `ghcr.io/tensorgreed/l2m` | The API (Fastify) |
+| `ghcr.io/tensorgreed/l2m-web` | The Studio web UI (Nginx) |
+| `ghcr.io/tensorgreed/l2m-ner` | [l2m-ner](./entity-service.md), the optional entity service (no model weights; you pull the model yourself) |
 
-The release workflow ([`.github/workflows/release-images.yml`](https://github.com/TensorGreed/ai-orchestrator/blob/main/.github/workflows/release-images.yml)) builds them in GitHub Actions and, before the tags are added, signs and attests them with keyless Sigstore certificates issued for that workflow run (GitHub OIDC; no long-lived keys exist). This page shows how to check, without trusting the project's word:
+The same images are on Docker Hub as `lsquarem/l2m`, `lsquarem/l2m-web` and `lsquarem/l2m-ner`, with the same tags and the same digests, signed and SBOM-attested there by the same release workflow. To check a Docker Hub image, set `API=docker.io/lsquarem/l2m` (and `WEB`, `NER` likewise) below; everything else is unchanged.
+
+The release workflow ([`.github/workflows/release-images.yml`](https://github.com/TensorGreed/l2m/blob/main/.github/workflows/release-images.yml)) builds them in GitHub Actions and, before the tags are added, signs and attests them with keyless Sigstore certificates issued for that workflow run (GitHub OIDC; no long-lived keys exist). This page shows how to check, without trusting the project's word:
 
 - **which image** a tag points to (its digest),
 - **that it was not swapped**: a cosign signature on that digest, made by this repository's release workflow on a release tag,
@@ -51,10 +53,10 @@ Set these once for the commands below:
 
 ```bash
 VERSION=v0.1.0   # the release tag
-REPO=TensorGreed/ai-orchestrator
-API=ghcr.io/tensorgreed/ai-orchestrator
-WEB=ghcr.io/tensorgreed/ai-orchestrator-web
-NER=ghcr.io/tensorgreed/ai-orchestrator-ner   # only if you run l2m-ner
+REPO=TensorGreed/l2m
+API=ghcr.io/tensorgreed/l2m
+WEB=ghcr.io/tensorgreed/l2m-web
+NER=ghcr.io/tensorgreed/l2m-ner   # only if you run l2m-ner
 ISSUER=https://token.actions.githubusercontent.com
 IDENTITY="https://github.com/$REPO/.github/workflows/release-images.yml@refs/tags/$VERSION"
 ```
@@ -89,7 +91,7 @@ This passes only if the digest was signed by a Sigstore certificate issued to th
 
 ```bash
 cosign verify "$API@$API_DIGEST" \
-  --certificate-identity-regexp '^https://github\.com/TensorGreed/ai-orchestrator/\.github/workflows/release-images\.yml@refs/tags/v.+$' \
+  --certificate-identity-regexp '^https://github\.com/TensorGreed/l2m/\.github/workflows/release-images\.yml@refs/tags/v.+$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
@@ -166,7 +168,7 @@ Deploy the digest you checked, not just the tag.
 **Helm.** The chart builds the image reference as `repository:tag`, so a tag with a digest suffix pins the digest:
 
 ```bash
-helm upgrade --install ao ./ops/helm/ai-orchestrator \
+helm upgrade --install ao ./ops/helm/l2m \
   --set image.tag="$VERSION@$API_DIGEST" \
   --set web.image.tag="$VERSION@$WEB_DIGEST"
 ```
@@ -184,10 +186,10 @@ kubectl get pods -l app.kubernetes.io/instance=ao \
 # compose.release.yml
 services:
   api:
-    image: ghcr.io/tensorgreed/ai-orchestrator:v0.1.0@sha256:<api digest>
+    image: ghcr.io/tensorgreed/l2m:v0.1.0@sha256:<api digest>
     build: !reset null
   web:
-    image: ghcr.io/tensorgreed/ai-orchestrator-web:v0.1.0@sha256:<web digest>
+    image: ghcr.io/tensorgreed/l2m-web:v0.1.0@sha256:<web digest>
     build: !reset null
 ```
 
@@ -199,4 +201,4 @@ docker image inspect --format '{{join .RepoDigests "\n"}}' "$API:$VERSION"   # t
 
 ## How releases are scanned
 
-Each release scans every platform image with Grype before the tags are added. Findings go to the repository's code scanning; a CRITICAL finding that already has a fixed version stops the release. The published images are scanned again every week (`.github/workflows/image-scan.yml`), so new advisories against a shipped release surface without waiting for the next tag. Fix targets and how to report a problem: [`SECURITY.md`](https://github.com/TensorGreed/ai-orchestrator/blob/main/SECURITY.md).
+Each release scans every platform image with Grype before the tags are added. Findings go to the repository's code scanning; a CRITICAL finding that already has a fixed version stops the release. The published images are scanned again every week (`.github/workflows/image-scan.yml`), so new advisories against a shipped release surface without waiting for the next tag. Fix targets and how to report a problem: [`SECURITY.md`](https://github.com/TensorGreed/l2m/blob/main/SECURITY.md).

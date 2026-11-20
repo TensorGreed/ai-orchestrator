@@ -17,7 +17,7 @@ The [Model Context Protocol](https://modelcontextprotocol.io) is how an agent di
 
 What you get:
 
-- **Adapter registry.** Wire any MCP server in via the `MCP Tool` node. The `http_mcp` adapter speaks the streamable-HTTP transport; `mock-mcp` ships demo tools (`get_current_time`, `calculator`, `lookup_kb`) so you can build a flow before pointing at a real server. New transports plug into [`packages/mcp-sdk/src/`](https://github.com/TensorGreed/ai-orchestrator/tree/main/packages/mcp-sdk/src).
+- **Adapter registry.** Wire any MCP server in via the `MCP Tool` node. The `http_mcp` adapter speaks the streamable-HTTP transport; `mock-mcp` ships demo tools (`get_current_time`, `calculator`, `lookup_kb`) so you can build a flow before pointing at a real server. New transports plug into [`packages/mcp-sdk/src/`](https://github.com/TensorGreed/l2m/tree/main/packages/mcp-sdk/src).
 - **Schema compaction.** The runtime compacts every tool's description and schema before sending them to the model, so large servers cost fewer tokens. Every tool an MCP Tool node selects is sent, so to keep the list itself short, select the tools each agent needs; a keyword shortlist by prompt relevance applies only to an agent with no tool nodes, whose tools come from its inline `mcpServers` config, and a Supervisor's workers are always offered.
 - **Session tool cache.** Full tool outputs are cached outside the LLM prompt window in `session_tool_cache`. The model sees compact summaries and can fetch the full payload via auto-injected `session_cache_list` / `session_cache_get` tools when it needs detail. Multi-turn conversations stay grounded without re-calling expensive endpoints.
 - **Workflow → MCP-tool exposure.** The `mcp_server_trigger` node exposes any workflow as an MCP tool at `POST /api/mcp-server/:path/invoke` with a manifest at `GET /api/mcp-server/:path/manifest`. Other agents — including other L2M instances — can then call your workflow as a tool. This is an agent-composability story most visual workflow tools don't have. See [Expose a Workflow as an MCP Tool](/runtime/workflow-as-mcp-tool) for the recipe.
@@ -44,7 +44,7 @@ Attachment edges are *not* walked as DAG steps — they're consumed by the agent
 
 ## 3. VS Code agent surface
 
-The repository ships a first-party VS Code extension at [`apps/vscode-l2m-agent`](https://github.com/TensorGreed/ai-orchestrator/tree/main/apps/vscode-l2m-agent) that turns any workflow into a coding agent inside the editor:
+The repository ships a first-party VS Code extension at [`apps/vscode-l2m-agent`](https://github.com/TensorGreed/l2m/tree/main/apps/vscode-l2m-agent) that turns any workflow into a coding agent inside the editor:
 
 - **Sidebar chat** with workspace-scoped session IDs and persistent history across reloads.
 - **Streaming responses** via `POST /api/webhooks/execute/stream` (SSE) — the agent's progress, LLM deltas, and per-node activity are visible inline.

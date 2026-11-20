@@ -23,9 +23,9 @@ Postgres; SQLite + replicaCount > 1 is a misconfiguration.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ include "ai-orchestrator.fullname" . }}-api-data
+  name: {{ include "l2m.fullname" . }}-api-data
   labels:
-    {{- include "ai-orchestrator.labels" . | nindent 4 }}
+    {{- include "l2m.labels" . | nindent 4 }}
     app.kubernetes.io/component: api
 spec:
   accessModes:

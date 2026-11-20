@@ -19,7 +19,7 @@ A rule that says "this agent may use the code-hosting server" covers none of tha
 
 ## Rules that read arguments
 
-[MCP tool policy](/product/mcp-tool-policy) rules can now carry conditions on a call's arguments ([PR #117](https://github.com/TensorGreed/ai-orchestrator/pull/117)): `equals`, `one_of`, `starts_with`, `matches`, number comparisons, `between` and `exists`, with dot paths such as `options.branch` and `files[*].path`. A rule can also test the run's <Term id="data-labels">data labels</Term>, and can be limited to particular workflows or MCP gateway clients.
+[MCP tool policy](/product/mcp-tool-policy) rules can now carry conditions on a call's arguments ([PR #117](https://github.com/TensorGreed/l2m/pull/117)): `equals`, `one_of`, `starts_with`, `matches`, number comparisons, `between` and `exists`, with dot paths such as `options.branch` and `files[*].path`. A rule can also test the run's <Term id="data-labels">data labels</Term>, and can be limited to particular workflows or MCP gateway clients.
 
 Rules have three effects: allow, deny and the new `require_approval`. Precedence is deny, then require approval, then allow, and a narrower rule carves an exception out of a broader one. So the deploy bot above becomes three rules, each limited to the deploy workflow:
 
@@ -33,7 +33,7 @@ We made conditions **fail closed**. A deny rule matches when any item of a list 
 
 ## Argument summaries built to be safe to keep
 
-To learn rules from real calls, you need to know what the calls looked like. Storing raw arguments would put message bodies, email addresses and customer data into telemetry. So every tool-call row now keeps a **summary** of its arguments instead ([PR #118](https://github.com/TensorGreed/ai-orchestrator/pull/118)), described in [MCP tool-call telemetry](/product/mcp-tool-call-telemetry).
+To learn rules from real calls, you need to know what the calls looked like. Storing raw arguments would put message bodies, email addresses and customer data into telemetry. So every tool-call row now keeps a **summary** of its arguments instead ([PR #118](https://github.com/TensorGreed/l2m/pull/118)), described in [MCP tool-call telemetry](/product/mcp-tool-call-telemetry).
 
 The summary is an allow-list. A value is kept as it is only when it is safe by construction: booleans, small numbers, values the tool's schema enumerates, and short lower-case tokens such as `open` or `main` that do not look like names, domains or keys. Repository owners, URL hosts, email domains and path roots are kept as prefixes, with home directories removed. Everything else keeps only its type, a length bucket and a keyed hash (HMAC-SHA-256 under a key derived from the master key). Keys that suggest personal data or secrets (`name`, `email`, `token`, `message` and many more) keep only shape and hash, whatever the schema says.
 
@@ -41,7 +41,7 @@ A hash cannot be read back, but it can be compared: L2M hashes the value in a ru
 
 ## Simulate a rule on recent calls
 
-With summaries in place, [PR #121](https://github.com/TensorGreed/ai-orchestrator/pull/121) lets an admin ask "what would this rule have done?" before saving it. The rule editor runs the draft against the workflow and gateway calls of the last 7 or 30 days and buckets each one: newly denied, newly needs approval, no longer denied or held, unchanged, **undetermined**, or not summarised.
+With summaries in place, [PR #121](https://github.com/TensorGreed/l2m/pull/121) lets an admin ask "what would this rule have done?" before saving it. The rule editor runs the draft against the workflow and gateway calls of the last 7 or 30 days and buckets each one: newly denied, newly needs approval, no longer denied or held, unchanged, **undetermined**, or not summarised.
 
 Undetermined is the honest answer when the summary cannot decide, for example when the value was hashed and the rule tests `starts_with`. Each rule matches, does not match, or cannot be decided from the summary. A call with undecided rules is tried both ways and gets a bucket only when every combination agrees, so a call it cannot decide is never reported as allowed or denied.
 
@@ -74,4 +74,4 @@ Suggestions only tighten: one that would loosen an existing deny or approval rul
 - [OWASP MCP Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/MCP_Security_Cheat_Sheet.html) (owasp.org)
 - [MCP specification 2025-11-25: Tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools) (modelcontextprotocol.io)
 - [MCP Security Best Practices](https://modelcontextprotocol.io/docs/2025-11-25/tutorials/security/security_best_practices) (modelcontextprotocol.io): scope minimisation
-- [CHANGELOG](https://github.com/TensorGreed/ai-orchestrator/blob/main/CHANGELOG.md) (GitHub)
+- [CHANGELOG](https://github.com/TensorGreed/l2m/blob/main/CHANGELOG.md) (GitHub)

@@ -29,7 +29,7 @@ With tracing off, log lines are unchanged. These lines are written at `info`, so
 
 ## Prometheus metrics
 
-`GET /metrics` serves the Prometheus text format. It is not behind a sign-in, so keep it on an internal network or limit it with your proxy. Metric names start with `METRICS_PREFIX` (default `ao`): for example `ao_http_requests_total`, `ao_workflow_executions_total`, `ao_workflow_executions_success_total`, `ao_workflow_executions_failure_total`, `ao_workflow_executions_active`, the duration histograms, queue and worker gauges, and `ao_slo_success_rate` and `ao_slo_healthy`. With `METRICS_INCLUDE_PROCESS=true` (the default) it adds the process's memory and the host's load and memory. [`ops/grafana`](https://github.com/TensorGreed/ai-orchestrator/tree/main/ops/grafana) has a dashboard and a scrape configuration.
+`GET /metrics` serves the Prometheus text format. It is not behind a sign-in, so keep it on an internal network or limit it with your proxy. Metric names start with `METRICS_PREFIX` (default `ao`): for example `ao_http_requests_total`, `ao_workflow_executions_total`, `ao_workflow_executions_success_total`, `ao_workflow_executions_failure_total`, `ao_workflow_executions_active`, the duration histograms, queue and worker gauges, and `ao_slo_success_rate` and `ao_slo_healthy`. With `METRICS_INCLUDE_PROCESS=true` (the default) it adds the process's memory and the host's load and memory. [`ops/grafana`](https://github.com/TensorGreed/l2m/tree/main/ops/grafana) has a dashboard and a scrape configuration.
 
 ### SLO numbers
 

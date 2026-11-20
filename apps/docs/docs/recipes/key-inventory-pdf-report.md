@@ -28,7 +28,7 @@ One **Manual Trigger** starts two branches. The brand branch loads a URL with **
 
 ## Steps
 
-1. Download <a href="/docs/recipes/files/key-inventory-report-flow.json" download>key-inventory-report-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/key-inventory-report-flow.json).
+1. Download <a href="/docs/recipes/files/key-inventory-report-flow.json" download>key-inventory-report-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/key-inventory-report-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
 3. Install Chromium for Playwright on the API host once: `pnpm exec playwright install chromium` from the repo root, or point `PDF_CHROMIUM_EXECUTABLE_PATH` at a Chromium you have. Web Browse and PDF Output both need it.
 4. Let Python code run. With the default `CODE_SANDBOX_MODE=auto`, **Aggregate Keys** runs in a throwaway container when docker or podman is installed and both sandbox images are present locally. Without a container, Python code nodes are off by default and the node fails. See [code execution](/security/code-execution#code-nodes).

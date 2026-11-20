@@ -2,9 +2,9 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ include "ai-orchestrator.fullname" . }}
+  name: {{ include "l2m.fullname" . }}
   labels:
-    {{- include "ai-orchestrator.labels" . | nindent 4 }}
+    {{- include "l2m.labels" . | nindent 4 }}
   {{- with .Values.ingress.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -26,15 +26,15 @@ spec:
             backend:
               service:
                 {{- if eq .service "webhook" }}
-                name: {{ include "ai-orchestrator.fullname" $ }}-webhook
+                name: {{ include "l2m.fullname" $ }}-webhook
                 port:
                   number: {{ $.Values.webhook.service.port }}
                 {{- else if eq .service "web" }}
-                name: {{ include "ai-orchestrator.fullname" $ }}-web
+                name: {{ include "l2m.fullname" $ }}-web
                 port:
                   number: {{ $.Values.web.service.port }}
                 {{- else }}
-                name: {{ include "ai-orchestrator.fullname" $ }}-api
+                name: {{ include "l2m.fullname" $ }}-api
                 port:
                   number: {{ $.Values.api.service.port }}
                 {{- end }}

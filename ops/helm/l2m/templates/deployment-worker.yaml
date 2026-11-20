@@ -2,21 +2,21 @@
 {{- if not .Values.api.haEnabled -}}
 {{- fail "worker.enabled needs cluster mode: set api.haEnabled=true and run on Postgres (config.DB_TYPE=postgres)" -}}
 {{- end -}}
-{{- if not (include "ai-orchestrator.isPostgres" .) -}}
+{{- if not (include "l2m.isPostgres" .) -}}
 {{- fail "worker.enabled needs Postgres: set config.DB_TYPE=postgres and secrets.databaseUrl (or secrets.existingSecret with DATABASE_URL); on SQLite each worker would run its own private database" -}}
 {{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "ai-orchestrator.fullname" . }}-worker
+  name: {{ include "l2m.fullname" . }}-worker
   labels:
-    {{- include "ai-orchestrator.labels" . | nindent 4 }}
+    {{- include "l2m.labels" . | nindent 4 }}
     app.kubernetes.io/component: worker
 spec:
   replicas: {{ .Values.worker.replicaCount }}
   selector:
     matchLabels:
-      {{- include "ai-orchestrator.selectorLabels" . | nindent 6 }}
+      {{- include "l2m.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: worker
   strategy:
     type: RollingUpdate
@@ -26,16 +26,16 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "ai-orchestrator.selectorLabels" . | nindent 8 }}
+        {{- include "l2m.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: worker
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "4000"
         prometheus.io/path: "/metrics"
     spec:
-      serviceAccountName: {{ include "ai-orchestrator.serviceAccountName" . }}
+      serviceAccountName: {{ include "l2m.serviceAccountName" . }}
       # Running jobs get the drain (SHUTDOWN_DRAIN_MS) to finish, then are handed back before the pod is killed.
-      terminationGracePeriodSeconds: {{ include "ai-orchestrator.terminationGracePeriod" (dict "root" $ "explicit" .Values.worker.terminationGracePeriodSeconds "minimum" 30 "worker" true) }}
+      terminationGracePeriodSeconds: {{ include "l2m.terminationGracePeriod" (dict "root" $ "explicit" .Values.worker.terminationGracePeriodSeconds "minimum" 30 "worker" true) }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -77,9 +77,9 @@ spec:
             {{- end }}
           envFrom:
             - configMapRef:
-                name: {{ include "ai-orchestrator.configMapName" . }}
+                name: {{ include "l2m.configMapName" . }}
             - secretRef:
-                name: {{ include "ai-orchestrator.secretName" . }}
+                name: {{ include "l2m.secretName" . }}
           livenessProbe:
             {{- toYaml .Values.worker.livenessProbe | nindent 12 }}
           readinessProbe:

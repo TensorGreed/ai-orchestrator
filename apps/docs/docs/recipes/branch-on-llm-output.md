@@ -31,7 +31,7 @@ A **Webhook Input** at `POST /webhook/conditional-demo` passes `user_prompt`, `s
 
 ## Steps
 
-1. Download <a href="/docs/recipes/files/conditional-flow.json" download>conditional-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/conditional-flow.json).
+1. Download <a href="/docs/recipes/files/conditional-flow.json" download>conditional-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/conditional-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
 3. Keep the built-in Echo model to check the branching first. For real answers, open the **LLM Call** node, pick a provider in the **Provider** list, set the model (**Load models** lists what the provider offers) and, for a hosted provider, its key, then save. For Ollama in Docker, use `http://host.docker.internal:11434/v1` for Ollama on the host (on Linux, add `extra_hosts: ["host.docker.internal:host-gateway"]` to the `api` service).
 4. Send a request:

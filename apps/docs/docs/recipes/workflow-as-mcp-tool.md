@@ -31,7 +31,7 @@ An **Expose as MCP Tool** trigger turns the workflow into a tool named `answer_f
 
 ## Steps
 
-1. Download <a href="/docs/recipes/files/workflow-as-mcp-tool-flow.json" download>workflow-as-mcp-tool-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/workflow-as-mcp-tool-flow.json).
+1. Download <a href="/docs/recipes/files/workflow-as-mcp-tool-flow.json" download>workflow-as-mcp-tool-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/workflow-as-mcp-tool-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
 3. As an admin, open **MCP → Toolsets** in the sidebar, create a toolset and add the workflow. Its endpoint is `/mcp/<slug>` (we named ours `kb-helper`).
 4. Open **MCP → Clients**, create a client for that toolset (admin; you may be asked to confirm your identity again) and copy its token. It is shown once.

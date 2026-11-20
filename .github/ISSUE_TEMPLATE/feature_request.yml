@@ -5,9 +5,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        Before opening a feature issue, please scan [the GA roadmap](https://github.com/TensorGreed/ai-orchestrator/blob/main/.github/ROADMAP_BOARD.md) — your feature may already be planned (or explicitly out of scope).
+        Before opening a feature issue, please scan [the GA roadmap](https://github.com/TensorGreed/l2m/blob/main/.github/ROADMAP_BOARD.md) — your feature may already be planned (or explicitly out of scope).
 
-        **For larger changes, please open a [Discussion](https://github.com/TensorGreed/ai-orchestrator/discussions) first.** A 600-line PR for a feature we hadn't agreed on is painful for everyone.
+        **For larger changes, please open a [Discussion](https://github.com/TensorGreed/l2m/discussions) first.** A 600-line PR for a feature we hadn't agreed on is painful for everyone.
 
   - type: textarea
     id: problem
@@ -69,7 +69,7 @@ body:
     attributes:
       label: Pre-flight checklist
       options:
-        - label: I searched [existing issues](https://github.com/TensorGreed/ai-orchestrator/issues?q=is%3Aissue) and didn't find a duplicate.
+        - label: I searched [existing issues](https://github.com/TensorGreed/l2m/issues?q=is%3Aissue) and didn't find a duplicate.
           required: true
-        - label: I checked the [GA roadmap](https://github.com/TensorGreed/ai-orchestrator/blob/main/.github/ROADMAP_BOARD.md) and this isn't already planned.
+        - label: I checked the [GA roadmap](https://github.com/TensorGreed/l2m/blob/main/.github/ROADMAP_BOARD.md) and this isn't already planned.
           required: true

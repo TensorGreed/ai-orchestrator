@@ -22,8 +22,8 @@ By the end you'll have:
 ## 1. Clone and install (≈ 60 s)
 
 ```bash
-git clone https://github.com/TensorGreed/ai-orchestrator.git
-cd ai-orchestrator
+git clone https://github.com/TensorGreed/l2m.git
+cd l2m
 pnpm install
 ```
 
@@ -136,4 +136,4 @@ Next steps: the [zero-key MCP agent recipe](/recipes/zero-key-mcp-agent) walks t
 - Browser shows "blank page" or "API unreachable" → make sure both the API (`pnpm --filter @ai-orchestrator/api dev`) and Web (`pnpm --filter @ai-orchestrator/web dev`) processes are running. `pnpm dev` runs both, but your terminal needs to stay open.
 - Login fails → the `BOOTSTRAP_ADMIN_*` env vars only seed the admin user on first boot when the user table is empty. If you've already logged in once with different credentials, those persist in `apps/api/data/orchestrator.db`. Delete the file and restart to re-seed.
 - Templates panel is empty → set `SEED_SAMPLE_WORKFLOWS=true` in `.env` and restart. Seeding only runs when the workflow table is empty.
-- Anything else → see [common issues](/troubleshooting/common-issues) or open an issue on [GitHub](https://github.com/TensorGreed/ai-orchestrator/issues).
+- Anything else → see [common issues](/troubleshooting/common-issues) or open an issue on [GitHub](https://github.com/TensorGreed/l2m/issues).

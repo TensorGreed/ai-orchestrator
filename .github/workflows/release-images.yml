@@ -1,17 +1,18 @@
 name: Release Container Images
 
-# Builds, scans, signs and publishes the API, Web and l2m-ner images to GHCR, with SBOMs and build provenance.
+# Builds, scans, signs and publishes the API, Web and l2m-ner images to GHCR, with SBOMs and build provenance,
+# and mirrors each release to Docker Hub (docker.io/lsquarem/l2m{,-web,-ner}) when the DOCKERHUB_TOKEN secret is set.
 #
 # Tag format: v<semver>, e.g.
 #   git tag v0.1.0 && git push origin v0.1.0
 #
 # Each tagged release publishes:
-#   - ghcr.io/tensorgreed/ai-orchestrator:<tag>     (the API image)
-#   - ghcr.io/tensorgreed/ai-orchestrator:latest
-#   - ghcr.io/tensorgreed/ai-orchestrator-web:<tag> (the Web/Studio image)
-#   - ghcr.io/tensorgreed/ai-orchestrator-web:latest
-#   - ghcr.io/tensorgreed/ai-orchestrator-ner:<tag> (l2m-ner, the optional entity service; no model weights)
-#   - ghcr.io/tensorgreed/ai-orchestrator-ner:latest
+#   - ghcr.io/tensorgreed/l2m:<tag>     (the API image)
+#   - ghcr.io/tensorgreed/l2m:latest
+#   - ghcr.io/tensorgreed/l2m-web:<tag> (the Web/Studio image)
+#   - ghcr.io/tensorgreed/l2m-web:latest
+#   - ghcr.io/tensorgreed/l2m-ner:<tag> (l2m-ner, the optional entity service; no model weights)
+#   - ghcr.io/tensorgreed/l2m-ner:latest
 # and, for every image (linux/amd64 + linux/arm64, one multi-arch index each):
 #   - a keyless cosign signature on the index digest (GitHub OIDC + Sigstore public good instance)
 #   - SLSA build provenance for the index digest from actions/attest, stored in GitHub and pushed to GHCR
@@ -19,6 +20,8 @@ name: Release Container Images
 #     that buildx attaches to every platform image
 #   - a CycloneDX SBOM per platform image (Syft), attested on that platform digest with cosign
 #   - a Grype scan of every platform image: SARIF to code scanning; fixable CRITICAL findings stop the release
+# the same indexes (same digests, tags <tag> and latest) on Docker Hub as lsquarem/l2m, lsquarem/l2m-web and
+# lsquarem/l2m-ner, signed and SBOM-attested there too (the dockerhub job; skipped without DOCKERHUB_TOKEN),
 # and a GitHub Release for the tag with the CycloneDX SBOMs (every image plus the pnpm workspace source), the
 # image digests and a SHA256SUMS file. Every SBOM file carries a provenance attestation as well.
 #
@@ -80,7 +83,7 @@ env:
   SYFT_CHECK_FOR_APP_UPDATE: "false"
   GRYPE_CHECK_FOR_APP_UPDATE: "false"
   # The keyless signing identity a release must carry (documented in the verify page and SECURITY.md).
-  RELEASE_IDENTITY_REGEXP: '^https://github\.com/TensorGreed/ai-orchestrator/\.github/workflows/release-images\.yml@refs/tags/v.+$'
+  RELEASE_IDENTITY_REGEXP: '^https://github\.com/TensorGreed/l2m/\.github/workflows/release-images\.yml@refs/tags/v.+$'
   OIDC_ISSUER: https://token.actions.githubusercontent.com
 
 jobs:
@@ -155,17 +158,17 @@ jobs:
       matrix:
         image:
           - name: api
-            repository: ai-orchestrator
+            repository: l2m
             dockerfile: apps/api/Dockerfile
             title: l2m-api
             description: L2M Fastify API
           - name: web
-            repository: ai-orchestrator-web
+            repository: l2m-web
             dockerfile: apps/web/Dockerfile
             title: l2m-web
             description: L2M Studio web UI (Nginx)
           - name: ner
-            repository: ai-orchestrator-ner
+            repository: l2m-ner
             dockerfile: apps/ner/Dockerfile
             title: l2m-ner
             description: L2M entity service for content rules (model weights not included)
@@ -326,15 +329,15 @@ jobs:
       matrix:
         image:
           - name: api
-            repository: ai-orchestrator
+            repository: l2m
             title: l2m-api
             description: L2M Fastify API
           - name: web
-            repository: ai-orchestrator-web
+            repository: l2m-web
             title: l2m-web
             description: L2M Studio web UI (Nginx)
           - name: ner
-            repository: ai-orchestrator-ner
+            repository: l2m-ner
             title: l2m-ner
             description: L2M entity service for content rules (model weights not included)
     env:
@@ -423,7 +426,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           "$SYFT" scan dir:. \
-            --source-name ai-orchestrator --source-version "$VERSION" \
+            --source-name l2m --source-version "$VERSION" \
             -o "cyclonedx-json=dist/l2m-source-$VERSION.cdx.json"
 
       - name: Upload the source SBOM
@@ -520,7 +523,7 @@ jobs:
             done < "dist/l2m-$name-$VERSION.platforms.txt"
           done
 
-      # Lets anyone check a downloaded SBOM file with `gh attestation verify <file> -R TensorGreed/ai-orchestrator`.
+      # Lets anyone check a downloaded SBOM file with `gh attestation verify <file> -R TensorGreed/l2m`.
       - name: Build provenance for the SBOM files
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
@@ -535,7 +538,7 @@ jobs:
           set -euo pipefail
           identity="$RELEASE_IDENTITY_REGEXP"
           if [ "$MODE" = "staging" ]; then
-            identity='^https://github\.com/TensorGreed/ai-orchestrator/\.github/workflows/release-images\.yml@refs/heads/.+$'
+            identity='^https://github\.com/TensorGreed/l2m/\.github/workflows/release-images\.yml@refs/heads/.+$'
           fi
           for name in api web ner; do
             ref=$(cat "dist/l2m-$name.image.txt")
@@ -653,3 +656,115 @@ jobs:
             echo
             echo "Verify: https://lsquarem.com/docs/operations/verify-a-release"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Docker Hub mirror: the same signed multi-arch indexes (same digests) under docker.io/lsquarem/l2m{,-web,-ner}.
+  # Runs only for a release, after GHCR has the tags. Skipped (not failed) when the DOCKERHUB_TOKEN secret is unset.
+  # The index is copied as is, so the buildx provenance and SPDX SBOM attestations inside it come along and the
+  # SLSA provenance stored in GitHub (keyed by digest) verifies for it too; the cosign signature and the CycloneDX
+  # SBOM attestations are made again in the Docker Hub repository, with the same keyless release identity.
+  dockerhub:
+    name: Mirror to Docker Hub
+    needs: [prepare, publish]
+    if: needs.prepare.outputs.mode == 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      DOCKERHUB_NAMESPACE: lsquarem
+    steps:
+      - name: Check for Docker Hub credentials
+        id: hub
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "$DOCKERHUB_TOKEN" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::DOCKERHUB_TOKEN is not set; the Docker Hub mirror is skipped."
+          fi
+
+      - name: Download the index digests
+        if: steps.hub.outputs.enabled == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: "{image-*,index-*}"
+          path: dist
+          merge-multiple: true
+
+      - name: Install cosign
+        if: steps.hub.outputs.enabled == 'true'
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      - name: Log in to GHCR
+        if: steps.hub.outputs.enabled == 'true'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: steps.hub.outputs.enabled == 'true'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME || 'lsquarem' }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # A single-source imagetools create is a carbon copy: the index digest is the one GHCR has and signed.
+      - name: Copy the indexes under the version tag
+        if: steps.hub.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          for name in api web ner; do
+            ref=$(cat "dist/l2m-$name.image.txt")
+            digest=${ref#*@}
+            source_repo=${ref%@*}
+            repo="docker.io/$DOCKERHUB_NAMESPACE/${source_repo##*/}"
+            docker buildx imagetools create --tag "$repo:$VERSION" "$ref"
+            copied=$(docker buildx imagetools inspect "$repo:$VERSION" --format '{{json .Manifest.Digest}}' | tr -d '"')
+            if [ "$copied" != "$digest" ]; then
+              echo "::error::$repo:$VERSION resolves to $copied, expected $digest"
+              exit 1
+            fi
+            echo "$repo@$digest" > "dist/l2m-$name.dockerhub.txt"
+          done
+
+      - name: Sign and attest in Docker Hub (keyless)
+        if: steps.hub.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          for name in api web ner; do
+            ref=$(cat "dist/l2m-$name.dockerhub.txt")
+            cosign sign --yes "$ref"
+            while read -r platform digest; do
+              cosign attest --yes --type cyclonedx \
+                --predicate "dist/l2m-$name-$VERSION-${platform//\//-}.cdx.json" \
+                "${ref%@*}@$digest"
+            done < "dist/l2m-$name-$VERSION.platforms.txt"
+          done
+
+      - name: Verify, then add the latest tag
+        if: steps.hub.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for name in api web ner; do
+            ref=$(cat "dist/l2m-$name.dockerhub.txt")
+            cosign verify "$ref" \
+              --certificate-identity-regexp "$RELEASE_IDENTITY_REGEXP" \
+              --certificate-oidc-issuer "$OIDC_ISSUER" > /dev/null
+            gh attestation verify "oci://$ref" --repo "$GH_REPO" \
+              --signer-workflow "$GH_REPO/.github/workflows/release-images.yml" \
+              --source-ref "$GITHUB_REF" --deny-self-hosted-runners > /dev/null
+            docker buildx imagetools create --tag "${ref%@*}:latest" "$ref"
+            echo "${ref%@*}:$VERSION@${ref#*@}" | tee -a "$GITHUB_STEP_SUMMARY"
+          done

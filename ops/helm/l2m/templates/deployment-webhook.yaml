@@ -2,15 +2,15 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "ai-orchestrator.fullname" . }}-webhook
+  name: {{ include "l2m.fullname" . }}-webhook
   labels:
-    {{- include "ai-orchestrator.labels" . | nindent 4 }}
+    {{- include "l2m.labels" . | nindent 4 }}
     app.kubernetes.io/component: webhook
 spec:
   replicas: {{ .Values.webhook.replicaCount }}
   selector:
     matchLabels:
-      {{- include "ai-orchestrator.selectorLabels" . | nindent 6 }}
+      {{- include "l2m.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: webhook
   strategy:
     type: RollingUpdate
@@ -20,15 +20,15 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "ai-orchestrator.selectorLabels" . | nindent 8 }}
+        {{- include "l2m.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: webhook
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "4000"
         prometheus.io/path: "/metrics"
     spec:
-      serviceAccountName: {{ include "ai-orchestrator.serviceAccountName" . }}
-      {{- with include "ai-orchestrator.terminationGracePeriod" (dict "root" $ "explicit" "") }}
+      serviceAccountName: {{ include "l2m.serviceAccountName" . }}
+      {{- with include "l2m.terminationGracePeriod" (dict "root" $ "explicit" "") }}
       terminationGracePeriodSeconds: {{ . }}
       {{- end }}
       {{- with .Values.imagePullSecrets }}
@@ -52,9 +52,9 @@ spec:
               value: "false"
           envFrom:
             - configMapRef:
-                name: {{ include "ai-orchestrator.configMapName" . }}
+                name: {{ include "l2m.configMapName" . }}
             - secretRef:
-                name: {{ include "ai-orchestrator.secretName" . }}
+                name: {{ include "l2m.secretName" . }}
           livenessProbe:
             httpGet:
               path: /health
@@ -73,9 +73,9 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "ai-orchestrator.fullname" . }}-webhook
+  name: {{ include "l2m.fullname" . }}-webhook
   labels:
-    {{- include "ai-orchestrator.labels" . | nindent 4 }}
+    {{- include "l2m.labels" . | nindent 4 }}
     app.kubernetes.io/component: webhook
 spec:
   type: {{ .Values.webhook.service.type }}
@@ -85,6 +85,6 @@ spec:
       protocol: TCP
       name: http
   selector:
-    {{- include "ai-orchestrator.selectorLabels" . | nindent 4 }}
+    {{- include "l2m.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: webhook
 {{- end -}}

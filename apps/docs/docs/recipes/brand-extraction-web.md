@@ -28,7 +28,7 @@ A **Text Input** holds the URL (`https://example.com` as shipped). **Web Browse*
 
 ## Steps
 
-1. Download <a href="/docs/recipes/files/branding-extract-flow.json" download>branding-extract-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/branding-extract-flow.json).
+1. Download <a href="/docs/recipes/files/branding-extract-flow.json" download>branding-extract-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/branding-extract-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
 3. Install Chromium for Playwright on the API host once: `pnpm exec playwright install chromium` from the repo root (Playwright itself comes with the workflow engine). Or point `PDF_CHROMIUM_EXECUTABLE_PATH` at a Chromium you already have.
 4. Open the **LLM** node and pick a stored secret with your OpenAI API key under **API Key Secret** (or set `OPENAI_API_KEY` on the API server), or switch the provider. Save. Without a key the **LLM** node fails with `Provider openai requires an API key via secretRef or OPENAI_API_KEY`.
