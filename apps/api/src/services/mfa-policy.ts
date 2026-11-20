@@ -81,7 +81,6 @@ export const STEP_UP_ACTIONS = {
   "user.enable": "Enable a user that SCIM disabled",
   "user.password_reset": "Set a temporary password for another user",
   "mfa.disable": "Turn your own MFA off",
-  "password.change": "Change your own password",
   "api_key.create": "Create an API key",
   "api_key.rotate": "Rotate an API key",
   "mcp_client.create": "Create a gateway client",

@@ -1081,7 +1081,6 @@ set one up in **Settings > Security** first. Break-glass sessions are not asked.
 | Enable a user that SCIM disabled | `POST /api/users/:id/enable` |
 | Set a temporary password for another user | `POST /api/users/:id/password/reset` |
 | Turn your own MFA off | `POST /api/auth/mfa/disable` |
-| Change your own password | `POST /api/auth/password` |
 | Create an API key | `POST /api/auth/api-keys`, `POST /api/service-accounts/:id/keys` |
 | Rotate an API key | `POST /api/auth/api-keys/:id/rotate`, `POST /api/service-accounts/:id/keys/:keyId/rotate` |
 | Create a gateway client | `POST /api/mcp/clients` |
@@ -1128,19 +1127,27 @@ sets up a new authenticator.
 **Change your own.** In **Settings > Security > Password**, enter your current password and a new one (8 to 1024
 characters, the same rule as registration and the bootstrap admin), or call `POST /api/auth/password` with
 `{ currentPassword, newPassword }` from a signed-in session (an API key is refused). Your other sessions end (reason
-`policy`); the one you used stays. MFA is unchanged: the next sign-in still asks for a code. With step-up on, the change
-needs a recent MFA check. A wrong current password answers `403 current_password_invalid`; attempts count against the
-sign-in rate limit (`RATE_LIMIT_AUTH_MAX`).
+`policy`); the one you used stays. MFA is unchanged: the next sign-in still asks for a code. The current password is
+the re-check, so step-up does not ask for a code here (a user without an authenticator can still change it). A wrong
+current password answers `403 current_password_invalid`; requests count against the sign-in rate limit
+(`RATE_LIMIT_AUTH_MAX`), and five wrong ones in 15 minutes lock the change for that person (`429
+password_change_locked`; counted from the audit log, so this lock needs `AUDIT_LOG_ENABLED`, the default).
 
 **Set a temporary password for someone else.** An admin opens **Settings > Users > Set password** for a person who forgot
 theirs, or calls `POST /api/users/:id/password/reset`. L2M makes a random 24-character password and shows it once, in
 that answer only; send it to the person privately. Their old password stops working and all their sessions end (reason
 `admin`); they sign in with the temporary one (and their MFA code, if they have one) and change it under **Settings >
-Security**. It needs step-up when step-up is on and is refused on your own account, on an invite not yet accepted
-(send the invite again) and on a service account.
+Security**. The temporary password does not expire and is not forced to change, so tell them to change it. It needs
+step-up when step-up is on, and is refused with an API key, on your own account, on a disabled user, on an invite not
+yet accepted (send the invite again) and on a service account.
 
-**SSO accounts.** An account linked to an OIDC, SAML or LDAP identity changes its password at the identity provider:
-both routes answer `409 sso_account` for it and change nothing.
+Both routes take only a signed-in session and only from the studio's own page (the `Origin` or `Referer` must be the
+studio's), so another site cannot fire them with your cookie.
+
+**SSO accounts.** An account linked to an OIDC, SAML or LDAP identity changes its password at the identity provider.
+An admin cannot set a password on it (`409 sso_account`). Someone who signs in only with SSO has no password they know,
+so they cannot change one either; a local account that was later linked to SSO can still change the local password it
+holds.
 
 Both are audited, without the password: `user.password.change` (success, or failure with `reason: current_password`)
 and `user.password.reset` (with the user's email and how many sessions ended). There is no email reset flow; L2M does
@@ -1186,7 +1193,7 @@ If the only admin loses their authenticator and backup codes:
 - `POST /api/auth/step-up` (`{ code }`, TOTP or backup code; refreshes the session's MFA check)
 - `POST /api/auth/mfa/enroll` (`{ password? }`; the password is needed more than 10 minutes after signing in)
 - `POST /api/users/:id/mfa/reset` (admin, step-up)
-- `POST /api/auth/password` (`{ currentPassword, newPassword }`; signed-in session, step-up; see [Passwords](#passwords))
+- `POST /api/auth/password` (`{ currentPassword, newPassword }`; signed-in session; see [Passwords](#passwords))
 - `POST /api/users/:id/password/reset` (admin, step-up; answers `{ temporaryPassword, sessionsEnded }` once)
 - `POST /api/auth/api-keys/:id/rotate` (your own key; `{ graceHours? }`, step-up; see
   [Rotating keys](./service-accounts.md#rotating-keys))

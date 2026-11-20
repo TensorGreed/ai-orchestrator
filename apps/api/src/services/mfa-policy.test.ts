@@ -174,7 +174,6 @@ describe("decideStepUp", () => {
       "user.enable",
       "user.password_reset",
       "mfa.disable",
-      "password.change",
       "api_key.create",
       "api_key.rotate",
       "mcp_client.create",

@@ -1,6 +1,6 @@
 /**
  * Settings > Security: change your own password (current + new, at least 8 characters). Your other sessions end; this
- * one stays. An account that signs in with SSO changes its password at the identity provider (the API says so).
+ * one stays. Someone who signs in only with SSO has no password they know; they change it at the identity provider.
  */
 import { useState, type FormEvent } from "react";
 import { ApiError, changeMyPassword } from "../lib/api";

@@ -9198,7 +9198,9 @@ export async function createApp(
     sessions: sessionService,
     requireRole: async (request, reply, roles) => await requireRole(request, reply, roles),
     audit: async (request, user, event) => await audit(request, user, event),
-    requireStepUp: async (request, reply, action, targetUserId) => await requireStepUp(request, reply, action, targetUserId ? { targetUserId } : {})
+    requireStepUp: async (request, reply, action, targetUserId) => await requireStepUp(request, reply, action, targetUserId ? { targetUserId } : {}),
+    // Declared further down; only called while a request is handled.
+    calledFromStudio: (request) => sessionCallFromStudio(request)
   });
 
   // ---------------------------------------------------------------------------

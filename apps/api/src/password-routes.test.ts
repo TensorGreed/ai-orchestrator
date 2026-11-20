@@ -140,6 +140,7 @@ describe("POST /api/auth/password", () => {
       headers: { authorization: `Bearer ${(key.json() as { key: string }).key}` }
     });
     expect(byKey.statusCode).toBe(400);
+    expect(byKey.json()).toMatchObject({ code: "session_required" });
     expect(typeof (await signIn(booted, "ben@example.com"))).toBe("string");
   });
 
@@ -154,23 +155,48 @@ describe("POST /api/auth/password", () => {
     expect(login.json()).toHaveProperty("mfaChallenge");
   });
 
-  it("asks for a recent MFA check when step-up is on", async () => {
+  it("needs no MFA check with step-up on (the current password re-authenticates), so a user without an authenticator can change it", async () => {
     const booted = await boot({ STEP_UP_MAX_AGE_MINUTES: "10" });
     await register(booted, "di@example.com", "viewer");
     const cookie = await session(booted, "di@example.com");
-    const refused = await change(booted, cookie, { currentPassword: PASSWORD, newPassword: "New-pass-word-456" });
-    expect(refused.statusCode).toBe(403);
-    expect(refused.json()).toMatchObject({ code: "step_up_required", stepUp: { action: "password.change" } });
+    expect((await change(booted, cookie, { currentPassword: PASSWORD, newPassword: "New-pass-word-456" })).statusCode).toBe(200);
   });
 
-  it("leaves an account that signs in with SSO alone", async () => {
+  it("lets a local account later linked to SSO change the local password it still holds", async () => {
     const booted = await boot();
     const eve = await register(booted, "eve@example.com", "viewer");
     const cookie = await session(booted, "eve@example.com");
     await booted.store.upsertSsoIdentity({ id: "sso_eve", userId: eve.id, provider: "oidc", subject: "eve", email: eve.email });
-    const refused = await change(booted, cookie, { currentPassword: PASSWORD, newPassword: "New-pass-word-456" });
-    expect(refused.statusCode).toBe(409);
-    expect(refused.json()).toMatchObject({ code: "sso_account" });
+    expect((await change(booted, cookie, { currentPassword: PASSWORD, newPassword: "New-pass-word-456" })).statusCode).toBe(200);
+    expect(await signIn(booted, "eve@example.com")).toBe(401);
+  });
+
+  it("locks the change after five wrong current passwords in 15 minutes", async () => {
+    const booted = await boot();
+    await register(booted, "lou@example.com", "viewer");
+    const cookie = await session(booted, "lou@example.com");
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      expect((await change(booted, cookie, { currentPassword: `wrong-${attempt}-pass`, newPassword: "New-pass-word-456" })).statusCode).toBe(403);
+    }
+    const locked = await change(booted, cookie, { currentPassword: PASSWORD, newPassword: "New-pass-word-456" });
+    expect(locked.statusCode).toBe(429);
+    expect(locked.json()).toMatchObject({ code: "password_change_locked" });
+    expect(typeof (await signIn(booted, "lou@example.com"))).toBe("string");
+  });
+
+  it("refuses a call from another site's page", async () => {
+    const booted = await boot();
+    await register(booted, "mo@example.com", "viewer");
+    const cookie = await session(booted, "mo@example.com");
+    const refused = await booted.app.inject({
+      method: "POST",
+      url: "/api/auth/password",
+      payload: { currentPassword: PASSWORD, newPassword: "New-pass-word-456" },
+      headers: { origin: "https://evil.example" },
+      ...as(cookie)
+    });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json()).toMatchObject({ code: "cross_site_refused" });
   });
 });
 
@@ -221,6 +247,25 @@ describe("POST /api/users/:id/password/reset", () => {
     expect(invited.statusCode).toBe(201);
     const pending = await booted.store.getUserByEmail("new@example.com");
     expect((await reset(admin, pending!.id)).json()).toMatchObject({ code: "invite_pending" });
+
+    // An admin's API key cannot do it (the answer would hand a working password to whoever holds the key).
+    const key = await booted.app.inject({ method: "POST", url: "/api/auth/api-keys", payload: { name: "ops" }, ...as(admin) });
+    const byKey = await booted.app.inject({
+      method: "POST",
+      url: `/api/users/${gil.id}/password/reset`,
+      headers: { authorization: `Bearer ${(key.json() as { key: string }).key}` }
+    });
+    expect(byKey.statusCode).toBe(400);
+    expect(byKey.json()).toMatchObject({ code: "session_required" });
+    // Nor a page on another site with the admin's cookie.
+    const crossSite = await booted.app.inject({
+      method: "POST",
+      url: `/api/users/${gil.id}/password/reset`,
+      headers: { origin: "https://evil.example", "content-type": "text/plain" },
+      payload: "x",
+      ...as(admin)
+    });
+    expect(crossSite.json()).toMatchObject({ code: "cross_site_refused" });
 
     const account = (await booted.store.createServiceAccount({ id: "svc_ci", email: "ci@service.invalid", role: "viewer", description: null, createdBy: root.id }))!;
     expect((await reset(admin, account.id)).statusCode).toBe(404);

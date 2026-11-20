@@ -6,9 +6,14 @@
  *   POST /api/users/:id/password/reset   an admin sets a new temporary password for another person (generated, shown
  *                                        once in the answer); all of that person's sessions end
  *
- * Both are audited (`user.password.change`, `user.password.reset`) without the password. A new password follows the
- * rules of registration and the bootstrap admin (8 to 1024 characters). A person who signs in through SSO (an OIDC,
- * SAML or LDAP identity is linked) changes their password at the identity provider, so neither route touches them.
+ * Both need a signed-in browser session called from the studio's own page (no API key; Origin/Referer checked, so
+ * another site cannot fire them with the admin's cookie). Both are audited (`user.password.change`,
+ * `user.password.reset`) without the password. A new password follows the rules of registration and the bootstrap
+ * admin (8 to 1024 characters). Five wrong current passwords in 15 minutes lock the change for that person (429).
+ *
+ * SSO: an admin cannot set a password on an account linked to an OIDC, SAML or LDAP identity (it would give an SSO-only
+ * person a password they never had). Changing your own needs the current password, which an SSO-only person does not
+ * know (theirs was random), so the self-change touches only a local password someone actually holds.
  * There is no email reset: an admin's reset is the way back for someone who forgot their password.
  */
 import crypto from "node:crypto";
@@ -28,7 +33,13 @@ export interface PasswordRoutesDeps {
   audit: (request: FastifyRequest, user: SafeUser, event: AuditEventInput) => Promise<void>;
   /** Step-up (STEP_UP_MAX_AGE_MINUTES); false means it has answered. */
   requireStepUp: (request: FastifyRequest, reply: FastifyReply, action: StepUpAction, targetUserId?: string) => Promise<boolean>;
+  /** Whether a cookie-authenticated call comes from the studio's own page (Origin/Referer, Sec-Fetch-Site). */
+  calledFromStudio: (request: FastifyRequest) => boolean;
 }
+
+/** Wrong current passwords allowed per person in the window before the change is locked. */
+export const CHANGE_FAILURE_LIMIT = 5;
+export const CHANGE_FAILURE_WINDOW_MS = 15 * 60_000;
 
 /** The password rules of registration and the bootstrap admin. */
 export const newPasswordSchema = z.string().min(8, "Use at least 8 characters").max(1024);
@@ -43,16 +54,27 @@ export function temporaryPassword(): string {
 }
 
 export function registerPasswordRoutes(deps: PasswordRoutesDeps): void {
-  const { app, store, sessions, requireRole, audit, requireStepUp } = deps;
+  const { app, store, sessions, requireRole, audit, requireStepUp, calledFromStudio } = deps;
+
+  /** A signed-in session from the studio's page; otherwise answers and returns null. */
+  const studioSession = (request: FastifyRequest, reply: FastifyReply) => {
+    const context = sessions.getRequestAuth(request);
+    if (context?.credential !== "session") {
+      reply.code(400).send({ error: "Use a signed-in browser session for passwords, not an API key", code: "session_required" });
+      return null;
+    }
+    if (!calledFromStudio(request)) {
+      reply.code(403).send({ error: "This request must come from the studio", code: "cross_site_refused" });
+      return null;
+    }
+    return context;
+  };
 
   app.post<{ Body: unknown }>("/api/auth/password", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return reply;
-    const context = sessions.getRequestAuth(request);
-    if (context?.credential !== "session") {
-      reply.code(400);
-      return { error: "Change your password from a signed-in browser session, not with an API key" };
-    }
+    const context = studioSession(request, reply);
+    if (!context) return reply;
     const parsed = changeBodySchema.safeParse(request.body ?? {});
     if (!parsed.success) {
       reply.code(400);
@@ -63,11 +85,17 @@ export function registerPasswordRoutes(deps: PasswordRoutesDeps): void {
       reply.code(404);
       return { error: "User not found" };
     }
-    if (await store.userHasSsoIdentity(user.id)) {
-      reply.code(409);
-      return { error: SSO_ONLY_MESSAGE, code: "sso_account" };
+    const recentFailures = await store.listAuditLogs({
+      eventType: "user.password.change",
+      outcome: "failure",
+      resourceId: user.id,
+      from: new Date(Date.now() - CHANGE_FAILURE_WINDOW_MS).toISOString(),
+      pageSize: CHANGE_FAILURE_LIMIT
+    });
+    if (recentFailures.items.length >= CHANGE_FAILURE_LIMIT) {
+      reply.code(429);
+      return { error: "Too many wrong passwords. Try again in 15 minutes.", code: "password_change_locked" };
     }
-    if (!await requireStepUp(request, reply, "password.change")) return reply;
     if (!verifyPassword(parsed.data.currentPassword, stored.passwordHash)) {
       await audit(request, user, {
         category: "auth",
@@ -112,6 +140,7 @@ export function registerPasswordRoutes(deps: PasswordRoutesDeps): void {
   app.post<{ Params: { id: string } }>("/api/users/:id/password/reset", async (request, reply) => {
     const admin = await requireRole(request, reply, ["admin"]);
     if (!admin) return reply;
+    if (!studioSession(request, reply)) return reply;
     if (!await requireStepUp(request, reply, "user.password_reset", request.params.id)) return reply;
     if (admin.id === request.params.id) {
       reply.code(400);
@@ -121,6 +150,10 @@ export function registerPasswordRoutes(deps: PasswordRoutesDeps): void {
     if (!target || target.kind !== "human") {
       reply.code(404);
       return { error: "User not found" };
+    }
+    if (target.disabledAt) {
+      reply.code(409);
+      return { error: "This user is disabled. Enable them first.", code: "user_disabled" };
     }
     if ((await store.listOpenUserInvites()).some((invite) => invite.userId === target.id)) {
       reply.code(409);
