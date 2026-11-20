@@ -558,6 +558,10 @@ describe.each(["strict", "role"] as const)("a person who has a workflow only thr
     const key = minted.json<{ key: string }>().key;
     const viaKey = await context.app.inject({ method: "POST", url: "/api/projects/team/members", headers: { authorization: `Bearer ${key}` }, payload: { userId: pia.id, role: "viewer" } });
     expect(viaKey.statusCode, viaKey.body).toBe(403);
+    // Nor transfers workflows between projects (keys limited to projects cannot call that route at all).
+    const transfer = await context.app.inject({ method: "POST", url: "/api/workflows/wf-team/transfer", headers: { authorization: `Bearer ${key}` }, payload: { targetProjectId: "default" } });
+    expect(transfer.statusCode, transfer.body).toBe(403);
+    expect((await context.store.getWorkflow("wf-team"))?.projectId).toBe("team");
     // An admin removes anyone, themselves included.
     expect((await call(context, "DELETE", `/api/projects/team/members/${member.id}`, admin.cookie)).statusCode).toBe(200);
   });
@@ -579,6 +583,12 @@ describe.each(["strict", "role"] as const)("a person who has a workflow only thr
       if (url === "/api/mcp/tools") expect(theirs.body).toContain("team-mcp");
     }
     expect((await call(context, "GET", "/api/mcp/servers/team-mcp/oauth", owner.cookie)).statusCode).toBe(200);
+    // An import plan matches duplicates only among servers Gus may see.
+    await context.store.createMcpServer({ id: "team-http", name: "Team HTTP", adapterId: "http_mcp", projectId: "team", connection: { endpoint: "https://mcp.example.com/team" } } as never);
+    const content = JSON.stringify({ mcpServers: { remote: { url: "https://mcp.example.com/team" } } });
+    const planFor = async (person: Person) => (await call(context, "POST", "/api/mcp/servers/import", person.cookie, { content, dryRun: true })).body;
+    expect(await planFor(owner)).toContain("team-http");
+    expect(await planFor(gus)).not.toContain("team-http");
   });
 });
 

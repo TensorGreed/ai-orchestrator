@@ -159,7 +159,9 @@ export function registerMcpOnboardingRoutes(deps: McpOnboardingDeps): void {
       return { error: error instanceof McpConfigImportError ? error.message : "The file could not be read as an MCP client config." };
     }
 
-    const existing = await store.listMcpServers();
+    // Duplicates are matched only among servers the caller may see, so a plan never names another project's server.
+    const existing: McpServerRecord[] = [];
+    for (const server of await store.listMcpServers()) if (await deps.mayReadServer(user, server)) existing.push(server);
     const plan = planMcpConfigImport(config, {
       existing,
       entries: parsed.data.entries,
