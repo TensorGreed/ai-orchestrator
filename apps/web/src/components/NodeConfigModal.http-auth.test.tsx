@@ -102,6 +102,15 @@ describe("HTTP Request Auth", () => {
     ]);
   });
 
+  it("says plainly when the token URL is not https off loopback", () => {
+    const auth = (tokenUrl: string) => ({ secretRef: { secretId: "sec_key" }, secretAuth: { type: "oauth2_client_credentials", tokenUrl, clientId: "app" } });
+    const { unmount } = render(<NodeInspector {...props("http_request", { method: "GET", urlTemplate: "https://x.test", ...auth("http://id.example.com/token") })} />);
+    expect(screen.getByRole("alert")).toHaveTextContent(/must use https/);
+    unmount();
+    render(<NodeInspector {...props("http_request", { method: "GET", urlTemplate: "https://x.test", ...auth("http://localhost:9000/token") })} />);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("offers Reconnect for a picked account that needs it", () => {
     render(<NodeInspector {...props("http_request", { method: "GET", urlTemplate: "https://x.test", secretRef: { secretId: "sec_acct" }, secretAuth: { type: "connected" } })} />);
     expect(screen.getByRole("alert")).toHaveTextContent(/needs to be reconnected/);

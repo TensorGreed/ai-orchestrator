@@ -143,6 +143,18 @@ describe("HTTP Request OAuth2 client credentials", () => {
     expect(tokenRequests).toBe(4);
   });
 
+  it("refuses a plain-http token URL off loopback before sending anything, with a clear message", async () => {
+    const before = seen.length;
+    const result = await executeWorkflow(
+      { workflow: workflow(ccAuth({ tokenUrl: "http://id.example.test/oauth/token" })), executionId: "cc-http", webhookPayload: {} },
+      deps()
+    );
+    expect(result.status).toBe("error");
+    expect(JSON.stringify(result)).toMatch(/must use https/);
+    expect(seen.length).toBe(before);
+    expect(JSON.stringify(result)).not.toContain("cs-secret");
+  });
+
   it("never follows a redirect from the token endpoint, so the client secret goes nowhere else", async () => {
     const result = await executeWorkflow(
       { workflow: workflow(ccAuth({ tokenUrl: `${base}/oauth/moved` })), executionId: "cc-moved", webhookPayload: {} },

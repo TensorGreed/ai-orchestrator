@@ -4843,6 +4843,11 @@ async function executeNodeHandler(
         }
         // Unset or malformed (validation reports it): a bearer token, as before secretAuth existed.
         const secretAuth = readHttpSecretAuth(config.secretAuth);
+        // An OAuth2 client credentials choice that is not usable (a plain-http token URL, a missing client id) never
+        // falls back to sending the client secret as a bearer token: the node fails with the reason.
+        if (typeof secretAuth === "string" && toRecord(config.secretAuth).type === "oauth2_client_credentials") {
+          throw new WorkflowError(`HTTP Request Auth: ${secretAuth}.`, ErrorCategory.NODE_CONFIG, false);
+        }
         const auth = secretAuth && typeof secretAuth !== "string" ? secretAuth : { type: "bearer" as const };
         if (auth.type === "oauth2_client_credentials") {
           // The secret is the client secret; the request carries the access token the token URL hands out for it.

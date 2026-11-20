@@ -822,6 +822,8 @@ export function readHttpSecretAuth(value: unknown): HttpSecretAuth | null | stri
       return "secretAuth.tokenUrl is not a valid URL";
     }
     if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return "secretAuth.tokenUrl must be an http(s) URL";
+    // The client secret goes to this URL: https only, except a loopback host for local testing.
+    if (parsed.protocol === "http:" && !isLoopbackHostname(parsed.hostname)) return "secretAuth.tokenUrl must use https (http only for localhost, 127.0.0.1 or ::1)";
     if (parsed.username || parsed.password) return "secretAuth.tokenUrl may not carry a user name or password";
     if (tokenUrl.length > 2048) return "secretAuth.tokenUrl is too long";
     const clientId = text(value.clientId);
@@ -842,6 +844,12 @@ export function readHttpSecretAuth(value: unknown): HttpSecretAuth | null | stri
     return { type, name };
   }
   return "secretAuth.type must be bearer, basic, header, query, connected or oauth2_client_credentials";
+}
+
+/** localhost, 127.0.0.1 (any 127.x) or ::1, as URL.hostname gives them. */
+function isLoopbackHostname(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return host === "localhost" || host === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
 }
 
 /** One line saying how a node sends its secret. */

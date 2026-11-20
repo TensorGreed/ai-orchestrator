@@ -137,7 +137,9 @@ The HTTP Request node has one **Auth** choice:
 | OAuth2 client credentials   | An access token from the token URL, using the client id and the secret as the client secret.    |
 | Connected account           | The connected account's access token as a bearer token, renewed as above.                       |
 
-For **OAuth2 client credentials**, enter the token URL, the client id and an optional scope. L2M keeps the token
+For **OAuth2 client credentials**, enter the token URL, the client id and an optional scope. The token URL must use
+`https:` (the client secret is sent to it); `http:` is accepted only for `localhost`, `127.0.0.1` and `::1`, for
+local testing. L2M keeps the token
 until shortly before it expires and asks again after a 401. The client credentials go in the request body; under
 **More**, *Send client credentials* switches to a basic auth header for services that want that. The token request
 follows the same [outbound URL checks](./outbound-url-checks.md) as the node, never follows a redirect, and gives

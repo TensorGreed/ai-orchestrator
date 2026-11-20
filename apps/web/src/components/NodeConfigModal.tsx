@@ -7163,7 +7163,7 @@ export function NodeInspector({
                   })}
               {typeof secretAuth === "string" && (
                 <div className="cfg-tip" role="alert">
-                  {secretAuth}
+                  {secretAuth.replace(/^secretAuth\.tokenUrl\b/, "The token URL").replace(/^secretAuth\.clientId\b/, "The client ID")}
                 </div>
               )}
             </>

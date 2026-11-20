@@ -21,6 +21,16 @@ describe("HTTP Request auth presets", () => {
     );
   });
 
+  it("needs an https token URL, except on loopback hosts for local testing", () => {
+    const cc = (tokenUrl: string) => readHttpSecretAuth({ type: "oauth2_client_credentials", tokenUrl, clientId: "a" });
+    expect(cc("http://id.example.com/oauth/token")).toBe("secretAuth.tokenUrl must use https (http only for localhost, 127.0.0.1 or ::1)");
+    expect(cc("http://10.0.0.5/token")).toMatch(/must use https/);
+    expect(cc("http://localhost:8080/token")).toMatchObject({ tokenUrl: "http://localhost:8080/token" });
+    expect(cc("http://127.0.0.1:9000/token")).toMatchObject({ tokenUrl: "http://127.0.0.1:9000/token" });
+    expect(cc("http://[::1]:9000/token")).toMatchObject({ tokenUrl: "http://[::1]:9000/token" });
+    expect(cc("https://id.example.com/token")).toMatchObject({ type: "oauth2_client_credentials" });
+  });
+
   it("refuses an OAuth2 preset without a usable token URL or client id", () => {
     expect(readHttpSecretAuth({ type: "oauth2_client_credentials", clientId: "a" })).toMatch(/tokenUrl/);
     expect(readHttpSecretAuth({ type: "oauth2_client_credentials", tokenUrl: "ftp://x", clientId: "a" })).toMatch(/http/);
