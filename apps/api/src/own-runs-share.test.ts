@@ -504,6 +504,82 @@ describe.each(["strict", "role"] as const)("a person who has a workflow only thr
     await context.store.removeWorkflowUserShare("wf-gated", olivia.id);
     expect((await call(context, "GET", `/api/executions/${ownerRun}`, olivia.cookie)).statusCode).toBe(mode === "role" ? 200 : 404);
   });
+
+  it("nobody but an admin, or a project admin of both projects, moves a workflow shared with people to another project", async () => {
+    const { context, admin, owner, gus } = await seed();
+    await context.store.upsertProject({ id: "elsewhere", name: "Elsewhere" });
+    const bea = await login(context, "builder", "bea");
+    // Bea edits in both projects but hands out no person shares (no project:invite): she cannot carry the share along.
+    await context.store.upsertProjectRole({ userId: bea.id, projectId: "team", role: "editor" });
+    await context.store.upsertProjectRole({ userId: bea.id, projectId: "elsewhere", role: "editor" });
+    const moved = await call(context, "POST", "/api/workflows/wf-team/move", bea.cookie, { projectId: "elsewhere" });
+    expect(moved.statusCode, moved.body).toBe(403);
+    const saved = (await call(context, "GET", "/api/workflows/wf-team", bea.cookie)).json<Workflow>();
+    const resaved = await call(context, "PUT", "/api/workflows/wf-team", bea.cookie, { ...saved, projectId: "elsewhere" });
+    expect(resaved.statusCode, resaved.body).toBe(403);
+    expect((await context.store.getWorkflow("wf-team"))?.projectId).toBe("team");
+    // Within its project she still saves it; a workflow shared with nobody she moves.
+    expect((await call(context, "PUT", "/api/workflows/wf-team", bea.cookie, { ...saved, name: "Kept here" })).statusCode).toBe(200);
+    await context.store.upsertWorkflow({ ...echoWorkflow("wf-plain"), name: "Plain" });
+    expect((await call(context, "POST", "/api/workflows/wf-plain/move", bea.cookie, { projectId: "elsewhere" })).statusCode).toBe(200);
+    // Owen administers only "team": refused. A project admin of both projects, and an admin, move it.
+    // (strict: "elsewhere" is not his at all, so it answers as missing.)
+    expect((await call(context, "POST", "/api/workflows/wf-team/move", owner.cookie, { projectId: "elsewhere" })).statusCode).toBe(mode === "role" ? 403 : 404);
+    await context.store.upsertProjectRole({ userId: owner.id, projectId: "elsewhere", role: "project_admin" });
+    expect((await call(context, "POST", "/api/workflows/wf-team/move", owner.cookie, { projectId: "elsewhere" })).statusCode).toBe(200);
+    expect((await call(context, "POST", "/api/workflows/wf-team/move", admin.cookie, { projectId: "team" })).statusCode).toBe(200);
+    expect((await call(context, "GET", "/api/workflows/wf-team", gus.cookie)).statusCode).toBe(200);
+  });
+
+  it("members: nobody but an admin removes their own membership, or changes or removes one with more than their own", async () => {
+    const { context, admin, owner, member, gus } = await seed();
+    const pia = await login(context, "builder", "pia");
+    await context.store.upsertProjectRole({ userId: pia.id, projectId: "team", role: "project_admin" });
+    // A viewer member cannot step out of the project (role isolation would lend a wider role there).
+    expect((await call(context, "DELETE", `/api/projects/team/members/${member.id}`, member.cookie)).statusCode).toBe(403);
+    expect((await call(context, "DELETE", `/api/projects/team/members/${owner.id}`, owner.cookie)).statusCode).toBe(403);
+    expect(await context.store.getProjectRole(member.id, "team")).toBeTruthy();
+    // A project admin changes and removes members within their own permissions.
+    expect((await call(context, "POST", "/api/projects/team/members", owner.cookie, { userId: member.id, role: "editor" })).statusCode).toBe(200);
+    expect((await call(context, "DELETE", `/api/projects/team/members/${pia.id}`, owner.cookie)).statusCode).toBe(200);
+    // An editor with project:invite through a custom role cannot touch a project admin.
+    const role = await call(context, "POST", "/api/custom-roles", admin.cookie, { name: "Inviter", permissions: ["workflow:read", "project:invite"] });
+    expect(role.statusCode, role.body).toBeLessThan(300);
+    const roleId = role.json<{ id: string }>().id;
+    await context.store.upsertProjectRole({ userId: pia.id, projectId: "team", role: "custom", customRoleId: roleId });
+    expect((await call(context, "DELETE", `/api/projects/team/members/${owner.id}`, pia.cookie)).statusCode).toBe(403);
+    expect((await call(context, "POST", "/api/projects/team/members", pia.cookie, { userId: owner.id, role: "custom", customRoleId: roleId })).statusCode).toBe(403);
+    expect((await context.store.getProjectRole(owner.id, "team"))?.role).toBe("project_admin");
+    // Within her own permissions she still adds a member.
+    expect((await call(context, "POST", "/api/projects/team/members", pia.cookie, { userId: gus.id, role: "custom", customRoleId: roleId })).statusCode).toBe(200);
+    // An admin key limited to another project manages no members here.
+    const minted = await call(context, "POST", "/api/auth/api-keys", admin.cookie, { name: "scoped", projects: ["default"] });
+    expect(minted.statusCode, minted.body).toBe(200);
+    const key = minted.json<{ key: string }>().key;
+    const viaKey = await context.app.inject({ method: "POST", url: "/api/projects/team/members", headers: { authorization: `Bearer ${key}` }, payload: { userId: pia.id, role: "viewer" } });
+    expect(viaKey.statusCode, viaKey.body).toBe(403);
+    // An admin removes anyone, themselves included.
+    expect((await call(context, "DELETE", `/api/projects/team/members/${member.id}`, admin.cookie)).statusCode).toBe(200);
+  });
+
+  it("MCP servers of the project stay hidden on every server route: resources, prompts, OAuth, tools, changes and overview", async () => {
+    const { context, owner, gus } = await seed();
+    await context.store.createMcpServer({ id: "team-mcp", name: "Team MCP", adapterId: "mock-mcp", projectId: "team" });
+    await context.store.createMcpServer({ id: "everyone-mcp", name: "Everyone MCP", adapterId: "mock-mcp" });
+    for (const suffix of ["/resources", "/prompts", "/oauth"]) {
+      expect((await call(context, "GET", `/api/mcp/servers/team-mcp${suffix}`, gus.cookie)).statusCode, suffix).toBe(404);
+    }
+    expect((await call(context, "POST", "/api/mcp/servers/team-mcp/playground/call", gus.cookie, { toolName: "echo", args: {} })).statusCode).toBe(404);
+    for (const url of ["/api/mcp/tools", "/api/mcp/changes", "/api/mcp/overview"]) {
+      const response = await call(context, "GET", url, gus.cookie);
+      expect(response.statusCode, `${url} ${response.body}`).toBe(200);
+      expect(response.body, url).not.toContain("team-mcp");
+      expect(response.body, url).not.toContain("Team MCP");
+      const theirs = await call(context, "GET", url, owner.cookie);
+      if (url === "/api/mcp/tools") expect(theirs.body).toContain("team-mcp");
+    }
+    expect((await call(context, "GET", "/api/mcp/servers/team-mcp/oauth", owner.cookie)).statusCode).toBe(200);
+  });
 });
 
 describe("own runs only meets approvals around a Loop that routes branches", () => {

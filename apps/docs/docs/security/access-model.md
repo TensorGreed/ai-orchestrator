@@ -129,8 +129,11 @@ the released version (under `role` isolation an operator with a **Can view** sha
 save, publish, delete, duplicate or re-share it (the API answers `403`, and the
 editor and Home hide those controls), and they see none of what is built from other people's runs: golden sets,
 evals, release-gate reasons and replay captures. Add them to the project to give them more. Only the project's own
-members with `project:invite` (and admins) add members, never with more permissions than their own membership, and
-nobody but an admin changes their own membership, so the cap cannot be lifted that way.
+members with `project:invite` (and admins) add, change or remove members, never beyond the permissions of their own
+membership, and nobody but an admin changes or removes their own membership, so the cap cannot be lifted that way. A
+workflow shared with people moves to another project only by an admin, or by a member with `project:invite` in both
+projects, so its shares never land somewhere else by accident. MCP servers assigned to the project stay hidden from
+them on every server route (tools, resources, prompts, OAuth status, changes, overview and the playground).
 
 Details: [Own runs only](./auth-rbac.md#own-runs-only).
 

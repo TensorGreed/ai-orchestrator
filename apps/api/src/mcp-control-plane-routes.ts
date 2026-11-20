@@ -44,6 +44,15 @@ export interface McpControlPlaneDeps {
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   /** Project scope: recent calls name their workflow only to users who can read it. */
   runAccess: RunAccess;
+  /** Whether the caller may see the server at all (its project's workflows, or a server without a project). */
+  mayReadServer: (user: SafeUser, server: McpServerRecord) => Promise<boolean>;
+}
+
+/** The servers the caller may see, in their order. */
+async function readableServers(deps: McpControlPlaneDeps, user: SafeUser, servers: McpServerRecord[]): Promise<McpServerRecord[]> {
+  const visible: McpServerRecord[] = [];
+  for (const server of servers) if (await deps.mayReadServer(user, server)) visible.push(server);
+  return visible;
 }
 
 export type McpChangeKind =
@@ -289,7 +298,7 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
 
   const buildChanges = async (user: SafeUser, filter: { serverId?: string | null; kinds?: Set<McpChangeKind> | null; limit: number }) => {
     const isAdmin = user.role === "admin";
-    const servers = await store.listMcpServers();
+    const servers = await readableServers(deps, user, await store.listMcpServers());
     const serverNames = new Map(servers.map((server) => [server.id, server.name]));
     const items: McpChangeItem[] = [];
     const wants = (kind: McpChangeKind) => !filter.kinds || filter.kinds.has(kind);
@@ -422,9 +431,11 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
     const since = new Date(Date.now() - MCP_TELEMETRY_WINDOWS[window]).toISOString();
     const rules = await store.listMcpToolPolicies();
     const usages = detail ? await collectRegistryUsages(store) : new Map<string, Array<McpToolUsage & { toolNames: string[] | null }>>();
-    const servers = (await store
-      .listMcpServers(requestedProject ? { projectId: requestedProject } : {}))
-      .filter((server) => !onlyIds || onlyIds.has(server.id));
+    const servers = await readableServers(
+      deps,
+      user,
+      (await store.listMcpServers(requestedProject ? { projectId: requestedProject } : {})).filter((server) => !onlyIds || onlyIds.has(server.id))
+    );
 
     const tools: unknown[] = [];
     const serverViews: unknown[] = [];
@@ -550,7 +561,7 @@ export function registerMcpControlPlaneRoutes(deps: McpControlPlaneDeps): void {
     const isAdmin = user.role === "admin";
     const now = Date.now();
     const since = new Date(now - MCP_TELEMETRY_WINDOWS[window]).toISOString();
-    const servers = await store.listMcpServers();
+    const servers = await readableServers(deps, user, await store.listMcpServers());
     const byStatus: Record<McpServerStatus, number> = { healthy: 0, degraded: 0, down: 0, unknown: 0 };
     const tools: Array<{ serverId: string; serverName: string; toolName: string; calls: number; errors: number; errorRate: number; p95Ms: number | null; costUsd: number | null }> = [];
     const pendingBreaking: unknown[] = [];

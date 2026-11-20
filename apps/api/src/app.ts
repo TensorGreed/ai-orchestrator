@@ -4999,6 +4999,21 @@ export async function createApp(
     }
     const target = await runAccess.project(user, workflow.projectId ?? existing?.projectId, "workflow:write");
     if (!target.ok) return target;
+    // A person share decides what its person has in the workflow's project: a workflow shared with people changes
+    // project only by an admin, or by someone who manages person shares in both projects (as a member).
+    const fromProject = existing?.projectId ?? DEFAULT_PROJECT_ID;
+    const toProject = workflow.projectId ?? existing?.projectId ?? DEFAULT_PROJECT_ID;
+    if (existing && fromProject !== toProject && user.role !== "admin" && (await store.listWorkflowUserShares(existing.id)).length > 0) {
+      const managesBoth =
+        (await rbacService.canAsMember(user, fromProject, "project:invite")) && (await rbacService.canAsMember(user, toProject, "project:invite"));
+      if (!managesBoth) {
+        return {
+          ok: false,
+          status: 403,
+          error: "This workflow is shared with people, so only an admin or a project admin of both projects moves it to another project."
+        };
+      }
+    }
     const placement = await workflowPlacementError(workflow, existing);
     if (placement) return { ok: false, status: 400, error: placement };
     // Phase 15.4 — a production path of a published or gated workflow cannot be taken over by another one.
@@ -10798,6 +10813,15 @@ export async function createApp(
     return { members: await mapAsync(members, async (member) => ({ ...member, email: (await store.getUserById(member.userId))?.email ?? null })) };
   });
 
+  /**
+   * Who adds, changes and removes a project's members: a membership that grants project:invite, or an admin (an
+   * admin's API key only inside its projects). Never the role `role` isolation lends a non-member.
+   */
+  const mayManageMembers = async (user: SafeUser, projectId: string): Promise<boolean> => {
+    if (user.projectScope && !user.projectScope.includes(projectId)) return false;
+    return user.role === "admin" || (await rbacService.canAsMember(user, projectId, "project:invite"));
+  };
+
   app.post<{ Params: { id: string }; Body: unknown }>("/api/projects/:id/members", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
@@ -10808,7 +10832,7 @@ export async function createApp(
     }
     // A membership that grants project:invite (or an admin): the role `role` isolation lends a non-member does not
     // add people to a project, since a membership lifts what a person share limits someone to there.
-    if (!await rbacService.canAsMember(user, project.id, "project:invite") && user.role !== "admin") {
+    if (!(await mayManageMembers(user, project.id))) {
       reply.code(403);
       return { error: "Insufficient permissions to manage members" };
     }
@@ -10835,10 +10859,15 @@ export async function createApp(
       reply.code(400);
       return { error: "role must be project_admin, editor, viewer, or custom" };
     }
-    // Nobody but an admin gives a role with a permission their own membership does not have.
+    // Nobody but an admin gives a role with a permission their own membership does not have, or changes the role of a
+    // member whose permissions their own membership lacks.
     if (user.role !== "admin" && !(await rbacService.roleWithin(user, project.id, role as ProjectRole | "custom", parsed.data.customRoleId ?? null))) {
       reply.code(403);
       return { error: "You can only give a role whose permissions your own membership has." };
+    }
+    if (user.role !== "admin" && !(await rbacService.membershipWithin(user, project.id, memberUserId))) {
+      reply.code(403);
+      return { error: "You can only change a member whose permissions your own membership has." };
     }
     // 13.3 — a role that grants a deployment-wide permission (legal holds, data-subject requests) is an admin's to hand out.
     if (role === "custom" && parsed.data.customRoleId && user.role !== "admin" && (await rbacService.grantsDeploymentPermission(parsed.data.customRoleId))) {
@@ -10889,9 +10918,19 @@ export async function createApp(
         reply.code(404);
         return { error: "Project not found" };
       }
-      if (!await rbacService.canAsMember(user, project.id, "project:invite") && user.role !== "admin") {
+      if (!(await mayManageMembers(user, project.id))) {
         reply.code(403);
         return { error: "Insufficient permissions to remove members" };
+      }
+      // Nobody but an admin removes their own membership (it may be narrower than what their role would lend), or a
+      // membership with permissions their own lacks.
+      if (user.role !== "admin" && request.params.userId === user.id) {
+        reply.code(403);
+        return { error: "You cannot remove your own membership. Ask a project admin or an admin." };
+      }
+      if (user.role !== "admin" && !(await rbacService.membershipWithin(user, project.id, request.params.userId))) {
+        reply.code(403);
+        return { error: "You can only remove a member whose permissions your own membership has." };
       }
       if (!await requireStepUp(request, reply, "project_member.change")) return;
       // 13.3 — a membership that grants a deployment-wide permission (legal holds) is an admin's to take away.
@@ -15636,9 +15675,9 @@ const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and meth
   // Phase 10.5 — OAuth 2.1 connections for remote MCP servers. Status is
   // readable by builders; connecting, refreshing and disconnecting are
   // admin-only. No route ever returns a token.
-  const findOAuthServer = async (serverId: string, reply: FastifyReply) => {
+  const findOAuthServer = async (serverId: string, reply: FastifyReply, user?: SafeUser) => {
     const server = await store.getMcpServer(serverId);
-    if (!server) {
+    if (!server || (user && !(await mayReadMcpServer(user, server)))) {
       reply.code(404);
       return null;
     }
@@ -15648,7 +15687,7 @@ const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and meth
   app.get<{ Params: { id: string } }>("/api/mcp/servers/:id/oauth", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const server = await findOAuthServer(request.params.id, reply);
+    const server = await findOAuthServer(request.params.id, reply, user);
     if (!server) return { error: "MCP server not found" };
     return { status: await mcpOAuthService.status(server.id), usesOAuth: McpOAuthService.usesOAuth(server) };
   });
@@ -16332,6 +16371,7 @@ const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and meth
     withScopedMcpContext,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     canExecuteInProject: async (user, projectId) => await rbacService.can(user, projectId, "workflow:execute"),
+    mayReadServer: async (user, server) => await mayReadMcpServer(user, server),
     auditUser: async (request, user, event) => await audit(request, user, event),
     probeInBackground,
     sandboxSaveProblem,
@@ -16353,6 +16393,7 @@ const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and meth
     withScopedMcpContext,
     requireRole: (request, reply, roles) => requireRole(request, reply, roles),
     canExecuteInProject: async (user, projectId) => await rbacService.can(user, projectId, "workflow:execute"),
+    mayReadServer: async (user, server) => await mayReadMcpServer(user, server),
     auditUser: async (request, user, event) => await audit(request, user, event)
   });
 
@@ -16365,7 +16406,8 @@ const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and meth
     usesOAuth: (server) => McpOAuthService.usesOAuth(server),
     latency: async (serverId) => await mcpProbeService.latency(serverId),
     runtime: (serverId, user) => runtimeStateView(serverId, user),
-    requireRole: (request, reply, roles) => requireRole(request, reply, roles)
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    mayReadServer: async (user, server) => await mayReadMcpServer(user, server)
   });
 
   // Phase 11.1 — signed run manifests, audit bundles and the signing key.

@@ -185,7 +185,10 @@ in `MFA_REQUIRED_ROLES`, see [MFA required per role](#mfa-required-per-role)).
   users). `POST /api/projects/:id/members` takes `{ "email": "..." }` in place of `userId`, and the member list carries
   each member's `email`. Adding and removing members takes a membership with `project:invite` (or an admin); the
   role `role` isolation lends a non-member does not count. A non-admin gives only roles whose permissions their own
-  membership has, and nobody but an admin adds or changes their own membership (`403`).
+  membership has, changes or removes only members whose permissions their own membership has, and nobody but an admin
+  adds, changes or removes their own membership (`403`). An admin's API key limited to some projects manages members
+  only in those projects. A workflow shared with people moves to another project only by an admin, or by someone with
+  `project:invite` as a member of both projects (`403`).
 - **What the editor shows.** Viewers and operators open workflows read-only: Save, Add node and Clear are disabled, and
   their tooltip says why; viewers cannot run. Operators run the released version where they have `workflow:execute`
   (Run and Webhook run). A builder sees the same for a workflow they may only view (one shared with them, or in a

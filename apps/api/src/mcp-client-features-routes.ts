@@ -45,6 +45,8 @@ export interface McpClientFeatureDeps {
   withScopedMcpContext: <T>(run: (context: MCPExecutionContext) => Promise<T>) => Promise<T>;
   requireRole: (request: FastifyRequest, reply: FastifyReply, roles: UserRole[]) => Promise<SafeUser | null>;
   canExecuteInProject: (user: SafeUser, projectId: string) => Promise<boolean>;
+  /** Whether the caller may see the server at all (its project's workflows, or a server without a project). */
+  mayReadServer: (user: SafeUser, server: McpServerRecord) => Promise<boolean>;
   /** Project scope: an elicitation follows the workflow whose run asked it. */
   runAccess: RunAccess;
   auditUser: (request: FastifyRequest, user: SafeUser, event: Omit<AuditEventInput, "actor">) => void | Promise<void>;
@@ -93,7 +95,7 @@ export function registerMcpClientFeatureRoutes(deps: McpClientFeatureDeps): void
     needsExecute: boolean
   ): Promise<{ server: McpServerRecord; projectId: string } | null> => {
     const server = await store.getMcpServer(request.params.id);
-    if (!server) {
+    if (!server || !(await deps.mayReadServer(user, server))) {
       reply.code(404);
       reply.send({ error: "MCP server not found" });
       return null;

@@ -159,15 +159,25 @@ export class RbacService {
   async roleWithin(user: SafeUser, projectId: string, role: ProjectRole | "custom", customRoleId: string | null): Promise<boolean> {
     const membership = await this.getMembership(user.id, projectId);
     if (!membership) return false;
-    let granted: readonly Permission[];
+    let granted: readonly string[];
     if (role === "custom") {
       const custom = customRoleId ? await this.store.getCustomRole(customRoleId) : null;
-      if (!custom) return true; // addMember refuses an unknown custom role with its own message.
-      granted = custom.permissions as Permission[];
+      if (!custom) return false;
+      granted = custom.permissions;
     } else {
       granted = PROJECT_ROLE_PERMISSIONS[role];
     }
-    return granted.every((permission) => membership.permissions.includes(permission));
+    // Permissions the deployment no longer knows grant nothing, as when a membership is built (hydrateMembership).
+    const known = new Set<string>(ALL_PERMISSIONS);
+    return granted.filter((permission) => known.has(permission)).every((permission) => membership.permissions.includes(permission as Permission));
+  }
+
+  /** Whether another user's current membership of the project (none counts as within) has only permissions the user's own has. */
+  async membershipWithin(user: SafeUser, projectId: string, memberUserId: string): Promise<boolean> {
+    const own = await this.getMembership(user.id, projectId);
+    if (!own) return false;
+    const theirs = await this.getMembership(memberUserId, projectId);
+    return !theirs || theirs.permissions.every((permission) => own.permissions.includes(permission));
   }
 
   async removeMember(userId: string, projectId: string): Promise<boolean> {
