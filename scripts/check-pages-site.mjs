@@ -176,7 +176,8 @@ console.log("Hero call to action");
   await context.close();
 }
 
-// 1b. The page counter loads on the landing and the docs (and only its two hosts), never in the demo.
+// 1b. The page counter loads on the landing and the docs (and only its two hosts), never in the demo; no Google
+// Analytics or consent bar anywhere.
 console.log("Page counter");
 for (const pathname of ["/", "/docs/", "/demo/"]) {
   const { context, page } = await openPage({ width: 1440, height: 900 }, `${pathname} (counter)`);
@@ -184,6 +185,18 @@ for (const pathname of ["/", "/docs/", "/demo/"]) {
   await page.goto(`${origin}${pathname}`, { waitUntil: "networkidle" });
   const loaded = counterRequests.slice(before).some((request) => request.url === COUNTER_SCRIPT);
   const endpoint = await page.evaluate(() => document.querySelector("script[data-goatcounter]")?.getAttribute("data-goatcounter") ?? null);
+  // GoatCounter only: no Google Analytics, no consent bar, and the privacy note says what the site does.
+  const site = await page.evaluate(() => ({
+    gtag: "gtag" in window || Boolean(document.querySelector('script[src*="googletagmanager"]')),
+    consentBar: Boolean(document.querySelector(".site-consent, [data-cookie-settings]")),
+    note: document.querySelector(".site-privacy-note, .footer-note")?.textContent ?? ""
+  }));
+  !site.gtag && !site.consentBar ? pass(`${pathname}: no Google Analytics or consent bar`) : fail(`${pathname}: Google Analytics or a consent bar is on the page`);
+  if (pathname !== "/demo/") {
+    /GoatCounter, without cookies/.test(site.note) && !/Google|accept cookies/i.test(site.note)
+      ? pass(`${pathname}: privacy note names the cookieless counter only`)
+      : fail(`${pathname}: privacy note is not accurate: ${site.note.trim()}`);
+  }
   if (pathname === "/demo/") {
     !loaded && endpoint === null ? pass("/demo/: no page counter") : fail("/demo/: the page counter loaded in the demo");
   } else {

@@ -62,12 +62,3 @@
     display: block !important;
   }
 }
-
-/* The privacy note's GoatCounter sentence shows only while the counter is on (docs/site-consent.js). */
-.site-counter-note {
-  display: none;
-}
-
-.site-counter-on .site-counter-note {
-  display: inline;
-}

@@ -13,7 +13,7 @@ import { LEVEL_LABELS, trackById, TRACKS } from "./site/tracks.js";
 
 const BLOG_IS_EMPTY = blogPosts().length === 0;
 
-// One consent script serves the landing and the docs. It lives with the landing (repo-root
+// One page-counter script serves the landing and the docs. It lives with the landing (repo-root
 // docs/site-consent.js); copy it into public/ so VitePress serves it in dev and ships it in the
 // build at /docs/site-consent.js (public/site-consent.js is generated and git-ignored).
 copyFileSync(
