@@ -7,7 +7,8 @@ description: "Run L2M on your own machine with Docker in two commands: published
 
 L2M runs as two containers: the API and the studio (the web UI, which also forwards the API's routes). You need
 Docker with Compose v2 (Docker Desktop, or Docker Engine with the compose plugin) on Linux, macOS or Windows,
-amd64 or arm64. You do not need Node.js.
+amd64 or arm64. You do not need Node.js. On Windows, run the commands below in WSL or Git Bash (in PowerShell,
+`curl` is a different command; use `curl.exe` for the two-command install).
 
 ## The installer
 
@@ -31,7 +32,7 @@ same data. Optional settings, as environment variables before `sh`:
 
 | Variable | Default | |
 |---|---|---|
-| `L2M_VERSION` | `v0.1.0` | Release to install; `latest` follows new releases. |
+| `L2M_VERSION` | the release installed before, else `v0.1.0` | Release tag to install, such as `v0.1.0`. A re-run never moves an install back to an older release unless you name one. |
 | `L2M_DIR` | `./l2m` | Folder for the compose file. |
 | `L2M_PORT` | `8080` | Port of the studio on this machine. |
 | `L2M_PULL` | `always` | `missing` uses images you already have. |
@@ -57,11 +58,14 @@ docker compose logs api
 
 - **Master key.** Stored secrets are encrypted with `SECRET_MASTER_KEY_BASE64`. If you do not set it, the first
   start makes a random 32-byte key and keeps it in the data volume (`quickstart/master-key`, readable only inside the
-  container). It is never printed. **Back up the volume**: without that key, saved secrets cannot be read.
+  container). It is never printed. **Back up the volume**: without that key, saved secrets cannot be read. The key
+  then sits next to the secrets it protects, so a copy of the volume opens them; for production, set your own
+  `SECRET_MASTER_KEY_BASE64` and keep it apart from the data. If the volume holds a database but the key file is
+  gone and no key is set, the API refuses to start rather than make a new key.
 - **Admin account.** The first user is `admin@l2m.local` (or `BOOTSTRAP_ADMIN_EMAIL`). Without
   `BOOTSTRAP_ADMIN_PASSWORD`, a random password is made, printed once in the log and kept in
   `quickstart/initial-admin-password`. To read it again: `docker compose exec api cat /app/apps/api/data/quickstart/initial-admin-password`.
-- **Database.** SQLite, in the `l2m_l2m-data` volume. Public sign-up is off; invite people under **Settings → Users**.
+- **Database.** SQLite, in the `l2m-quickstart_l2m-data` volume. Public sign-up is off; invite people under **Settings → Users**.
 
 To choose your own values, put them in a `.env` file next to `docker-compose.yml` before the first start:
 

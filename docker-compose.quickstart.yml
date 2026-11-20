@@ -24,7 +24,7 @@
 ## Remove everything, data included: `docker compose down -v`.
 ## Postgres, several replicas, Helm: see https://lsquarem.com/docs/getting-started/install
 
-name: l2m
+name: l2m-quickstart
 
 services:
   api:

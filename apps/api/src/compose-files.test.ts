@@ -3,6 +3,7 @@
  * `docker compose -f <file> config` (and `up`) can read it. An unquoted value containing ": " (for example in a
  * `${VAR:?message}` hint) is a YAML error that only shows up when someone follows the deployment docs.
  */
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -51,7 +52,7 @@ describe("docker-compose.quickstart.yml", () => {
     expect(workflow).toContain("IMAGE_REGISTRY: ghcr.io/tensorgreed");
     expect(quickstart.services.api.image).toBe(`ghcr.io/tensorgreed/l2m:\${L2M_VERSION:-${release}}`);
     expect(quickstart.services.web.image).toBe(`ghcr.io/tensorgreed/l2m-web:\${L2M_VERSION:-${release}}`);
-    expect(quickstart.name).toBe("l2m");
+    expect(quickstart.name).toBe("l2m-quickstart");
   });
 
   it("keeps the API behind the studio, on this machine only by default, with its data in a volume", () => {
@@ -72,9 +73,15 @@ describe("docker-compose.quickstart.yml", () => {
   });
 
   it("is what docs/install.sh downloads, at the same default release", () => {
-    expect(installer).toContain(`version=\${L2M_VERSION:-${release}}`);
-    expect(installer).toContain("https://raw.githubusercontent.com/TensorGreed/l2m/$version/docker-compose.quickstart.yml");
+    expect(installer).toContain(`default_version=${release}\n`);
+    expect(installer).toContain("https://raw.githubusercontent.com/TensorGreed/l2m/$compose_tag/docker-compose.quickstart.yml");
+    expect(installer).toContain("${COMPOSE_PROJECT_NAME:-l2m-quickstart}_l2m-data");
     expect(installer).not.toMatch(/\bsudo\s/);
   });
-});
 
+  it("ships shell scripts that a POSIX sh can parse", () => {
+    for (const script of [path.join(root, "docs/install.sh"), startScript]) {
+      expect(() => execFileSync("sh", ["-n", script])).not.toThrow();
+    }
+  });
+});

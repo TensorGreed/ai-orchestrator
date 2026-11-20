@@ -11,6 +11,8 @@
 #   - run progress streams through the studio's proxy without being buffered; a 2 MB request reaches the API
 #   - the generated password is printed to the log once, the master key never; both files are mode 0600
 #   - after a restart the key and the password are the same and sign-in still works
+#   - with the key file gone (and a database present) the API refuses to start, and starts once it is back
+#   - the studio listens on 127.0.0.1 only and the container configuration holds no key
 #   - running the installer again changes nothing and does not print the password
 #
 # Then `docker compose down -v` and the test tags are removed. Prints the time of each step.
@@ -25,6 +27,10 @@ here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
 port=${QUICKSTART_PORT:-4561}
 tag=${QUICKSTART_TAG:-v0.0.0-quickstart-test}
+case $tag in
+  *quickstart-test*) ;;
+  *) echo "QUICKSTART_TAG must contain 'quickstart-test' (the test retags and removes these images)" >&2; exit 64 ;;
+esac
 project="l2m-quickstart-test-$$"
 work=$(mktemp -d)
 studio="http://127.0.0.1:$port"
@@ -91,8 +97,14 @@ password=$(sed -n 's/^  password: *//p' "$install_log")
 [ "${#password}" -ge 20 ] || fail "the installer printed no generated password"
 pass "installer printed the address, $email and a generated password"
 
-[ -z "$(docker port "$(compose ps -q api)")" ] || fail "the API port is published on the host"
-pass "the API port is not published; the studio forwards to it"
+api_container=$(compose ps -q api)
+web_container=$(compose ps -q web)
+if [ -z "$api_container" ] || [ -z "$web_container" ]; then fail "the api and web containers are not running"; fi
+[ -z "$(docker port "$api_container")" ] || fail "the API port is published on the host"
+[ "$(docker port "$web_container" 80/tcp)" = "127.0.0.1:$port" ] || fail "the studio is not bound to 127.0.0.1:$port only: $(docker port "$web_container")"
+docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$api_container" | grep -qx 'SECRET_MASTER_KEY_BASE64=' \
+  || fail "the container configuration holds a master key"
+pass "the API port is not published; the studio listens on 127.0.0.1 only; no key in the container configuration"
 
 jar="$work/jar"
 login() {
@@ -165,6 +177,27 @@ done
 [ "$(compose logs api 2>&1 | grep -c -F -- "$password")" = 1 ] || fail "the password was printed again after a restart"
 [ "$(login)" = "$email" ] || fail "sign-in failed after a restart"
 pass "after a restart: same key, password not printed again, sign-in works"
+
+# A database without its key: the API must refuse to start rather than make a new key, and start again once the
+# key is back.
+compose exec -T api rm "$key_file"
+compose restart api > /dev/null 2>&1
+refused=no
+for _ in $(seq 1 30); do
+  if compose logs api 2>&1 | grep -q "has a database but no master key"; then refused=yes; break; fi
+  sleep 1
+done
+[ "$refused" = yes ] || fail "the API did not refuse to start without the master key of its database"
+compose stop api > /dev/null 2>&1
+printf '%s' "$key" | docker run --rm -i --entrypoint sh -v "${project}_l2m-data:/app/apps/api/data" "$api_image" \
+  -c "umask 077; cat > $key_file"
+compose up -d > /dev/null 2>&1
+for _ in $(seq 1 90); do
+  if curl -fsS "$studio/health" > /dev/null 2>&1; then break; fi
+  sleep 2
+done
+[ "$(login)" = "$email" ] || fail "sign-in failed after the key was restored"
+pass "without its master key the API refuses to start; with the key back it starts"
 timing "restart"
 
 L2M_VERSION=$tag L2M_DIR="$work/l2m" L2M_PULL=missing L2M_COMPOSE_URL="file://$repo/docker-compose.quickstart.yml" \

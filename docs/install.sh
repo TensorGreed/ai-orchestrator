@@ -8,11 +8,11 @@
 #   2. downloads docker-compose.quickstart.yml of the L2M release into ./l2m/docker-compose.yml
 #   3. pulls the images and starts them (docker compose up -d)
 #   4. waits until the studio answers, then prints its address and how to sign in
-# Run it again to update the compose file and restart; your data stays in the l2m_l2m-data volume.
+# Run it again to update the compose file and restart; your data stays in the l2m-quickstart_l2m-data volume.
 # It sends nothing anywhere except the downloads from GitHub and the image registry.
 #
 # Settings (environment variables, all optional):
-#   L2M_VERSION  release to install (default v0.1.0; `latest` for the newest release)
+#   L2M_VERSION  release to install, a tag such as v0.1.0 (default: the one installed before, else v0.1.0)
 #   L2M_DIR      folder for the compose file (default ./l2m)
 #   L2M_PORT     port of the studio on this machine (default 8080)
 #   L2M_PULL     when to pull the images: always (default) or missing
@@ -50,7 +50,12 @@ answers() {
   fi
 }
 
-# Sets <key>=<value> in ./.env, keeping its other lines.
+# Prints the value of <key> in ./.env, if any.
+get_env() {
+  if [ -f .env ]; then sed -n "s/^$1=//p" .env | tail -n 1; fi
+}
+
+# Sets <key>=<value> in ./.env, keeping its other lines (and, with umask 077, private to you).
 set_env() {
   if [ -f .env ]; then
     grep -v "^$1=" .env > .env.tmp || true
@@ -61,18 +66,21 @@ set_env() {
   mv -f .env.tmp .env
 }
 
+# Exits 0 when <value> is a release tag: v<major>.<minor>.<patch>, optionally -<letters, digits, dots, dashes>.
+is_release_tag() {
+  printf '%s\n' "$1" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' && [ "$(printf '%s\n' "$1" | wc -l)" -eq 1 ]
+}
+
 main() {
-  version=${L2M_VERSION:-v0.1.0}
+  umask 077
+  default_version=v0.1.0
+  version=${L2M_VERSION:-}
   dir=${L2M_DIR:-./l2m}
   port=${L2M_PORT:-}
   pull=${L2M_PULL:-always}
-  compose_url=${L2M_COMPOSE_URL:-https://raw.githubusercontent.com/TensorGreed/l2m/$version/docker-compose.quickstart.yml}
 
-  case $version in
-    latest) compose_url=${L2M_COMPOSE_URL:-https://raw.githubusercontent.com/TensorGreed/l2m/main/docker-compose.quickstart.yml} ;;
-    v[0-9]*) ;;
-    *) fail "L2M_VERSION must be a release tag such as v0.1.0, or latest (got '$version')." ;;
-  esac
+  [ -z "$version" ] || is_release_tag "$version" \
+    || fail "L2M_VERSION must be a release tag such as $default_version (got '$version')."
   case $pull in
     always | missing) ;;
     *) fail "L2M_PULL must be always or missing (got '$pull')." ;;
@@ -88,29 +96,44 @@ main() {
   docker compose version > /dev/null 2>&1 \
     || fail "Docker Compose v2 (the 'docker compose' command) is needed: https://docs.docker.com/compose/install/"
 
-  mkdir -p "$dir"
-  cd "$dir"
-  say "L2M install: downloading the $version compose file into $(pwd)/docker-compose.yml"
+  mkdir -p -- "$dir"
+  cd -- "$dir"
+  # Keep the release installed before unless one is asked for: never move an install back by accident.
+  if [ -n "$version" ]; then
+    set_env L2M_VERSION "$version"
+  else
+    version=$(get_env L2M_VERSION)
+    [ -n "$version" ] || {
+      version=$default_version
+      set_env L2M_VERSION "$version"
+    }
+  fi
+  # The compose file comes from a release tag; with L2M_VERSION=latest (set by hand in .env) the images follow
+  # the newest release and the file stays this script's release.
+  compose_tag=$version
+  is_release_tag "$compose_tag" || compose_tag=$default_version
+  compose_url=${L2M_COMPOSE_URL:-https://raw.githubusercontent.com/TensorGreed/l2m/$compose_tag/docker-compose.quickstart.yml}
+  say "L2M install: downloading the $compose_tag compose file into $(pwd)/docker-compose.yml"
   download "$compose_url" docker-compose.yml.tmp || fail "could not download $compose_url"
   grep -q 'ghcr.io/tensorgreed/l2m' docker-compose.yml.tmp || {
     rm -f docker-compose.yml.tmp
     fail "$compose_url is not the L2M quickstart compose file."
   }
   mv -f docker-compose.yml.tmp docker-compose.yml
-  set_env L2M_VERSION "$version"
   [ -z "$port" ] || set_env L2M_PORT "$port"
-  if [ -z "$port" ] && [ -f .env ]; then
-    port=$(sed -n 's/^L2M_PORT=//p' .env | tail -n 1)
-  fi
+  [ -n "$port" ] || port=$(get_env L2M_PORT)
   port=${port:-8080}
 
   first_install=yes
-  if docker volume inspect "${COMPOSE_PROJECT_NAME:-l2m}_l2m-data" > /dev/null 2>&1; then
+  if docker volume inspect "${COMPOSE_PROJECT_NAME:-l2m-quickstart}_l2m-data" > /dev/null 2>&1; then
     first_install=no
   fi
 
   say "L2M install: starting L2M (the first download of the images takes a minute or two)"
-  docker compose up -d --pull "$pull" --remove-orphans
+  if [ "$pull" = always ]; then
+    docker compose pull --quiet
+  fi
+  docker compose up -d
 
   url="http://localhost:$port"
   say "L2M install: waiting for $url"
