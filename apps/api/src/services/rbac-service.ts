@@ -302,15 +302,7 @@ export class RbacService {
     const membership = await this.getMembership(user.id, projectId);
     if (membership) return membership.permissions;
     if (this.isolation === "strict") return [];
-    // A person share decides what a non-member has in its workflow's project, in every isolation mode: the shared
-    // workflow (canAccessWorkflow) and nothing else there (no other workflows, secrets, variables or project settings).
-    if (await this.hasPersonShareIn(user.id, projectId)) return [];
     return [...GLOBAL_ROLE_PERMISSIONS[user.role]];
-  }
-
-  /** Whether a workflow of `projectId` is shared with this person (a person share, not a share to a project). */
-  private async hasPersonShareIn(userId: string, projectId: string): Promise<boolean> {
-    return await this.store.hasWorkflowUserShareInProject(userId, projectId);
   }
 
   async can(user: SafeUser, projectId: string, permission: Permission): Promise<boolean> {
@@ -403,8 +395,8 @@ export class RbacService {
 
   /**
    * Who may share a workflow with a person, list its person shares and remove them: mayManageWorkflowShares, through a
-   * membership that grants project:invite (or as an admin), never the role `role` isolation lends a non-member. A person
-   * share is all a non-member has in the workflow's project, so only the project's own people hand one out.
+   * membership that grants project:invite (or as an admin), never the role `role` isolation lends a non-member: only the
+   * project's own people decide who outside it gets one of its workflows.
    */
   async mayManagePersonShares(user: SafeUser, workflow: { id?: string; projectId?: string | null }): Promise<boolean> {
     if (!await this.mayManageWorkflowShares(user, workflow)) return false;
@@ -417,9 +409,17 @@ export class RbacService {
    * does not, whatever its role.
    */
   async mayManageWorkflowShares(user: SafeUser, workflow: { id?: string; projectId?: string | null }): Promise<boolean> {
-    if (!await this.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite")) return false;
-    // Someone who has the workflow only through a share with them does not share it on (see canAccessWorkflow).
-    return !(workflow.id && await this.onlyThroughUserShare(user, { id: workflow.id, projectId: workflow.projectId }, "workflow:read"));
+    return this.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite");
+  }
+
+  /**
+   * Whether a share with the person is their only way to the workflow: no membership or share to a project of theirs
+   * gives it (onlyThroughUserShare), they are not an admin, and no role reaches its project under the isolation mode.
+   * Only then are they held to the share's level (read, or run); a person share never takes away what someone has.
+   */
+  async shareIsOnlyWay(user: SafeUser, workflow: { id: string; projectId?: string | null }): Promise<boolean> {
+    if (!(await this.onlyThroughUserShare(user, workflow, "workflow:read"))) return false;
+    return !(await this.can(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "workflow:read"));
   }
 
   /**
@@ -460,12 +460,6 @@ export class RbacService {
 
   async canAccessWorkflow(user: SafeUser, workflow: { id: string; projectId?: string }, permission: Permission): Promise<boolean> {
     const owningProject = workflow.projectId ?? DEFAULT_PROJECT_ID;
-    // Someone who has the workflow only through a share with them gets what the share gives (read, or run), in every
-    // isolation mode: the global role `role` isolation lends a non-member does not add edit, delete, publish or
-    // anything else on it. Project members (also through a share to their project) and admins are not capped.
-    if (permission !== "workflow:read" && await this.onlyThroughUserShare(user, workflow, "workflow:read")) {
-      return permission === "workflow:execute" && (await this.userShareAccess(user, workflow)) === "execute";
-    }
     if (await this.can(user, owningProject, permission)) return true;
 
     // v78 — shared with this person: read, or run when the share and their role allow it. Never write.

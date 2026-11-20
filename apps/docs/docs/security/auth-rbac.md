@@ -281,10 +281,10 @@ their inputs, outputs and node data, stay hidden. This applies when the share is
 workflow's project with a role that reads it, not a member of a project the workflow is shared to, and not an admin. A
 project member keeps the full view, and so does anyone who also has the workflow through their project.
 It holds in both isolation modes: under `role` isolation the global role a person gets in a project they are not a
-member of does not count, so a person share keeps them to their own runs there too, and caps them at the share's
-level: a builder cannot save, publish, delete or re-share a workflow they have only through a person share (`403`).
-Nothing else of the workflow's project is theirs through the role (no other workflow, secret, variable or project
-setting); other projects keep the view and the rights their role gives.
+member of does not count, so a person share keeps them to their own runs there too. Workflows not shared with them
+keep the view their role gives. Beyond that a person share never takes away what someone has: it caps someone at its
+level (a builder cannot save, publish, delete or re-share the workflow, `403`) only when it is their only way to the
+workflow, with no membership, no role that reaches the project under the isolation mode, and not an admin.
 
 - **Whose run it is.** A run records the user id of the person who started it: from the app, with their API key, or
   by a signed-in form submission or chat (a signed-in form also keeps the submitter's session memory to them, as a

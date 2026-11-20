@@ -854,15 +854,6 @@ export async function getWorkflowUserShare(ctx: PgContext, workflowId: string, u
   return row ? { accessLevel: shareLevel(row.access_level) } : null;
 }
 
-export async function hasWorkflowUserShareInProject(ctx: PgContext, userId: string, projectId: string): Promise<boolean> {
-  const rows = await ctx.query<{ found: number }>(
-    `SELECT 1 AS found FROM workflow_user_shares s JOIN workflows w ON w.id = s.workflow_id
-      WHERE s.user_id = $1 AND COALESCE(w.project_id, $2) = $3 LIMIT 1`,
-    [userId, DEFAULT_PROJECT_ID, projectId]
-  );
-  return rows.length > 0;
-}
-
 export async function listWorkflowsSharedToUser(ctx: PgContext, userId: string): ReturnType<Store["listWorkflowsSharedToUser"]> {
   const rows = await ctx.query<{ workflow_id: string; access_level: string; name: string; project_id: string | null; updated_at: string | null }>(
     `SELECT s.workflow_id, s.access_level, w.name, w.project_id, w.updated_at

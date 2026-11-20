@@ -11198,8 +11198,8 @@ export async function createApp(
         updatedAt: share.updatedAt,
         accessLevel: share.accessLevel,
         effectiveAccess: share.accessLevel === "execute" && roleMayRunWorkflows(user.role) ? ("execute" as const) : ("read" as const),
-        // The share is all they have: read (or run), never change, delete, publish or share it (rbacService.canAccessWorkflow).
-        shareOnly: await rbacService.onlyThroughUserShare(user, { id: share.workflowId, projectId: share.projectId }, "workflow:read")
+        // The share is their only way in: read (or run), never change, delete, publish or share it (rbacService.shareIsOnlyWay).
+        shareOnly: await rbacService.shareIsOnlyWay(user, { id: share.workflowId, projectId: share.projectId })
       }))
     ).sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
     return { workflows: items };

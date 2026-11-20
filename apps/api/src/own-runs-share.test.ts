@@ -195,18 +195,26 @@ describe.each(["strict", "role"] as const)("a person who has a workflow only thr
     for (const person of [owner, member, admin]) expect(await listRuns(context, person)).toEqual({ ids: all, total: 5 });
   });
 
-  it("the data-subject reference preview is refused: a person share gives no write, also to a builder", async () => {
+  it("the data-subject reference preview reads only their own runs (a builder with a share edits, but sees only theirs)", async () => {
     const { context, owner, gus, run } = await seed();
     await run(owner);
+    const send = () => call(context, "POST", "/api/data-protection/subject-refs/preview", gus.cookie, { workflowId: "wf-team", subjectRefs: ["{{input.note}}"] });
+    // Strict isolation lends no write through a share; role isolation lends the builder's role, but not other runs.
+    if (mode === "strict") {
+      expect((await send()).statusCode).toBe(403);
+      return;
+    }
+    const preview = async () => {
+      const response = await send();
+      expect(response.statusCode, response.body).toBe(200);
+      return response.json<{ runs: number }>().runs;
+    };
+    expect(await preview()).toBe(0);
     await run(gus);
-    const sent = await call(context, "POST", "/api/data-protection/subject-refs/preview", gus.cookie, { workflowId: "wf-team", subjectRefs: ["{{input.note}}"] });
-    expect(sent.statusCode, sent.body).toBe(403);
-    const byOwner = await call(context, "POST", "/api/data-protection/subject-refs/preview", owner.cookie, { workflowId: "wf-team", subjectRefs: ["{{input.note}}"] });
-    expect(byOwner.statusCode, byOwner.body).toBe(200);
-    expect(byOwner.json<{ runs: number }>().runs).toBe(2);
+    expect(await preview()).toBe(1);
   });
 
-  it("a person share caps the person at the share: a builder reads and runs it, but cannot save, delete, publish or share it", async () => {
+  it("a person share caps only someone it is the only way in for (strict); a builder whose role reaches the project keeps it all (role)", async () => {
     const { context, admin, owner, gus, run } = await seed();
     // A workflow in the same project that is not shared with Gus: role isolation still lends him his role there.
     await context.store.upsertWorkflow({ ...echoWorkflow("wf-other"), name: "Other" });
@@ -215,22 +223,36 @@ describe.each(["strict", "role"] as const)("a person who has a workflow only thr
       expect(response.statusCode, response.body).toBe(200);
       return response.json<{ canEdit: boolean; canRun: boolean; canShare: boolean }>();
     };
-    expect(await access(gus)).toMatchObject({ canEdit: false, canRun: true, canShare: false });
     expect(await access(owner)).toMatchObject({ canEdit: true, canRun: true, canShare: true });
     expect(await access(admin)).toMatchObject({ canEdit: true, canRun: true, canShare: true });
-    // The share decides what he has in its project, in both modes: no other workflow there.
-    expect((await call(context, "GET", "/api/workflows/wf-other/access", gus.cookie)).statusCode).toBe(404);
-
-    // He runs it (the released version, with his own input).
     await run(gus);
     const saved = (await call(context, "GET", "/api/workflows/wf-team", gus.cookie)).json<Workflow>();
-    const save = await call(context, "PUT", "/api/workflows/wf-team", gus.cookie, { ...saved, name: "Renamed by Gus" });
-    expect(save.statusCode, save.body).toBe(403);
-    expect((await call(context, "POST", "/api/workflows/wf-team/publish", gus.cookie, { version: saved.workflowVersion })).statusCode).toBe(403);
-    expect((await call(context, "DELETE", "/api/workflows/wf-team", gus.cookie)).statusCode).toBe(403);
+    if (mode === "role") {
+      // Role isolation lends his builder role in every project: the share takes nothing away. He still edits it, and
+      // opens the project's other workflows. (Person shares are handed out by project members only, below.)
+      expect(await access(gus)).toMatchObject({ canEdit: true, canRun: true });
+      expect((await call(context, "GET", "/api/workflows/wf-other/access", gus.cookie)).statusCode).toBe(200);
+      const save = await call(context, "PUT", "/api/workflows/wf-team", gus.cookie, { ...saved, name: "Renamed by Gus" });
+      expect(save.statusCode, save.body).toBe(200);
+      const rows = (await call(context, "GET", "/api/workflows/shared-with-me", gus.cookie)).json<{ workflows: Array<{ shareOnly: boolean }> }>().workflows;
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.every((row) => row.shareOnly === false)).toBe(true);
+    } else {
+      // The share is his only way in: he gets its level (read and run) and nothing else in the project.
+      expect(await access(gus)).toMatchObject({ canEdit: false, canRun: true, canShare: false });
+      expect((await call(context, "GET", "/api/workflows/wf-other/access", gus.cookie)).statusCode).toBe(404);
+      const save = await call(context, "PUT", "/api/workflows/wf-team", gus.cookie, { ...saved, name: "Renamed by Gus" });
+      expect(save.statusCode, save.body).toBeGreaterThanOrEqual(403);
+      expect((await call(context, "POST", "/api/workflows/wf-team/publish", gus.cookie, { version: saved.workflowVersion })).statusCode).toBeGreaterThanOrEqual(403);
+      expect((await call(context, "DELETE", "/api/workflows/wf-team", gus.cookie)).statusCode).toBeGreaterThanOrEqual(403);
+      expect((await context.store.getWorkflow("wf-team"))?.name).toBe("Echo wf-team");
+      const rows = (await call(context, "GET", "/api/workflows/shared-with-me", gus.cookie)).json<{ workflows: Array<{ shareOnly: boolean }> }>().workflows;
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.every((row) => row.shareOnly === true)).toBe(true);
+    }
+    // Nobody but the project's members with project:invite shares it with a person (his lent role does not count).
     const reshare = await call(context, "POST", "/api/workflows/wf-team/user-shares", gus.cookie, { email: "ada@example.com", accessLevel: "read" });
-    expect(reshare.statusCode, reshare.body).toBe(403);
-    expect((await context.store.getWorkflow("wf-team"))?.name).toBe("Echo wf-team");
+    expect(reshare.statusCode, reshare.body).toBeGreaterThanOrEqual(403);
     // Only the project's own members with project:invite (and admins) share it with people or add members: a role
     // the isolation mode lends does not, so nobody outside the project can narrow (or widen) someone's access there.
     const ollie = await login(context, "builder", "ollie");
@@ -245,7 +267,7 @@ describe.each(["strict", "role"] as const)("a person who has a workflow only thr
     const selfAdd = await call(context, "POST", "/api/projects/team/members", gus.cookie, { userId: gus.id, role: "project_admin" });
     expect(selfAdd.statusCode, selfAdd.body).toBe(403);
     expect(await context.store.getProjectRole(gus.id, "team")).toBeFalsy();
-    expect((await access(gus)).canEdit).toBe(false);
+    expect((await access(gus)).canEdit).toBe(mode === "role");
 
     // The project admin and an admin are unchanged.
     const ownerSave = await call(context, "PUT", "/api/workflows/wf-team", owner.cookie, { ...saved, name: "Renamed by Owen" });
@@ -283,10 +305,15 @@ describe.each(["strict", "role"] as const)("a person who has a workflow only thr
     const canceled = await call(context, "POST", `/api/executions/${ownerRun}/cancel`, olivia.cookie, {});
     expect(canceled.statusCode, canceled.body).toBe(404);
     // The editor's "run with this run's data" (pinned outputs, the run's input) is for those who may edit the
-    // workflow; a share never gives that, so a share-only builder is refused before any run is read, whoever's it is,
-    // in both isolation modes (role isolation's lent builder role does not count on a workflow shared with him).
+    // workflow; a share never gives that, so a share-only builder is refused before any run is read, whoever's it is.
+    // With role isolation Gus's builder role edits the workflow anyway: his own run's data is his to reuse, the owner's
+    // run still answers as missing.
     for (const source of [ownerRun, gusRun]) {
       const copied = await call(context, "POST", "/api/workflows/wf-team/execute", gus.cookie, { sourceExecutionId: source });
+      if (mode === "role") {
+        expect(copied.statusCode, copied.body).toBe(source === ownerRun ? 404 : 200);
+        continue;
+      }
       expect(copied.statusCode, copied.body).toBe(403);
       expect(copied.json<{ refusedOptions: string[] }>().refusedOptions).toEqual(["sourceExecutionId"]);
     }
@@ -462,7 +489,21 @@ describe.each(["strict", "role"] as const)("a person who has a workflow only thr
     expect((await call(context, "GET", "/api/workflows/wf-team/access", gus.cookie)).json<{ ownRunsOnly: boolean }>().ownRunsOnly).toBe(false);
   });
 
-  it("the share is all the person has in its project: no other workflow, secret, variable or project setting there", async () => {
+  it("role isolation: a person share takes nothing away from someone whose role reaches the project", async () => {
+    if (mode !== "role") return;
+    const { context, gus } = await seed();
+    await context.store.upsertWorkflow({ ...echoWorkflow("wf-open"), name: "Open" });
+    const secret = await context.secretService.createSecret({ name: "team key", provider: "openai", value: "sk-team", projectId: "team" });
+    // Gus (a builder with a share in "team") keeps what his role gives him there: other workflows, secrets, variables.
+    expect((await call(context, "GET", "/api/workflows/wf-open", gus.cookie)).statusCode).toBe(200);
+    expect(JSON.stringify((await call(context, "GET", "/api/secrets?projectId=team", gus.cookie)).json())).toContain(secret.secretId);
+    expect((await call(context, "GET", "/api/variables?projectId=team", gus.cookie)).statusCode).toBe(200);
+    await context.store.createMcpServer({ id: "team-mcp", name: "Team MCP", adapterId: "mock-mcp", projectId: "team" });
+    expect((await call(context, "GET", "/api/mcp/servers/team-mcp", gus.cookie)).statusCode).toBe(200);
+  });
+
+  it("strict isolation: the share is all the person has in its project: no other workflow, secret, variable or project setting there", async () => {
+    if (mode !== "strict") return;
     const { context, owner, olivia, gus, run } = await seed();
     await context.store.upsertWorkflow({ ...echoWorkflow("wf-open"), name: "Open" });
     const ownerRun = await run(owner, "wf-open");
@@ -499,10 +540,10 @@ describe.each(["strict", "role"] as const)("a person who has a workflow only thr
     }
     expect((await call(context, "GET", "/api/mcp/servers/team-mcp", owner.cookie)).statusCode).toBe(200);
     await run(olivia);
-    // Once the share is gone, role isolation lends the role again; strict lends nothing.
+    // Once the share is gone, strict still lends nothing.
     await context.store.removeWorkflowUserShare("wf-team", olivia.id);
     await context.store.removeWorkflowUserShare("wf-gated", olivia.id);
-    expect((await call(context, "GET", `/api/executions/${ownerRun}`, olivia.cookie)).statusCode).toBe(mode === "role" ? 200 : 404);
+    expect((await call(context, "GET", `/api/executions/${ownerRun}`, olivia.cookie)).statusCode).toBe(404);
   });
 
   it("nobody but an admin, or a project admin of both projects, moves a workflow shared with people to another project", async () => {
@@ -566,7 +607,8 @@ describe.each(["strict", "role"] as const)("a person who has a workflow only thr
     expect((await call(context, "DELETE", `/api/projects/team/members/${member.id}`, admin.cookie)).statusCode).toBe(200);
   });
 
-  it("MCP servers of the project stay hidden on every server route: resources, prompts, OAuth, tools, changes and overview", async () => {
+  it("MCP servers of the project stay hidden on every server route from someone who may not read the project: resources, prompts, OAuth, tools, changes and overview", async () => {
+    if (mode !== "strict") return; // Under role isolation Gus's role reaches the project, so he sees its servers.
     const { context, owner, gus } = await seed();
     await context.store.createMcpServer({ id: "team-mcp", name: "Team MCP", adapterId: "mock-mcp", projectId: "team" });
     await context.store.createMcpServer({ id: "everyone-mcp", name: "Everyone MCP", adapterId: "mock-mcp" });

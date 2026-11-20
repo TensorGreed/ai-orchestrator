@@ -5834,7 +5834,7 @@ function StudioApp() {
                       void loadWorkflowById(workflow.id);
                       setActiveMode(mode);
                     };
-                    // A workflow you have only through a share with you is the share's: read or run, nothing more.
+                    // A workflow the share is your only way to is the share's: read or run, nothing more.
                     const mayManageThis = canManageWorkflows && !shareOnlyWorkflowIds.has(workflow.id);
                     const menuActions = [
                       { id: "chat", label: "Chat", onSelect: () => openIn("chat") },

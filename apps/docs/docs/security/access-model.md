@@ -15,8 +15,8 @@ This page puts L2M's access model on one page. The details are in [Authenticatio
 2. **The workflow's project.** Then the route checks a permission (such as `workflow:execute`) in the workflow's
    project. It comes from the person's project membership. Without one, it depends on `PROJECT_ISOLATION` (below).
 3. **Shares.** A share can add read or run on one workflow. A share never gives edit, delete, publish or re-sharing.
-   For someone who is not a member of the workflow's project, a person share is all they have in that project, in
-   both isolation modes.
+   A person share never takes away what someone already has. Only when it is their only way to the workflow (no
+   membership, no role that reaches the project under the isolation mode, not an admin) does it hold them to its level.
 4. **API keys.** A key acts as its owner. Its scope can narrow that, never widen it.
 
 Both checks must pass. A membership cannot let a viewer call a builder route, and a role cannot reach a project the
@@ -46,8 +46,8 @@ workflow. It decides who runs the draft (on `/execute`, the manual trigger route
 run options, who may replay a run with its recorded MCP calls, who may replay golden runs, start replay jobs and eval runs (they
 run the draft or a candidate), whose runs use the workflow's session memory, and who sees the editor's edit controls
 (and, on the Runs page, Replay from here, Replay with the recorded MCP calls and the golden run controls). An operator with an editor membership may not edit: the role caps it.
-A builder who may only run a workflow (through an execute share to their project, or a person share that is all they
-have on it) is treated like an operator for it.
+A builder who may only run a workflow (through an execute share to their project, or a person share that is their
+only way to it) is treated like an operator for it.
 
 ## Roles
 
@@ -119,21 +119,23 @@ are not a member of a project it is shared to, and are not an admin.
 - `GET /api/workflows/:id/access` answers `ownRunsOnly: true`.
 
 It holds under both `PROJECT_ISOLATION` settings. Under `role`, the global role that opens every project to a
-non-member does not count in a project where a workflow is shared with them: the person share decides. They see the
-shared workflow and their own runs of it, and nothing else of that project: no other workflow, secret, variable,
-member list or project setting. Other projects keep the view their role gives. Removing the share gives the role back.
+non-member does not count for a workflow shared with them: the person share decides, and they see their own runs.
+Workflows that are not shared with them keep the view their role gives. A builder in that position can still edit and
+publish the shared workflow through their role, but sees none of what is built from other people's runs: golden sets,
+evals, release-gate reasons and replay captures. Add them to the project to give them those.
 
-The share also caps what they may do with it, under both settings: a builder whose access to a workflow comes only
-from a person share gets the share's level, as anyone else would. **Can view** reads it; **Can view and run** also runs
-the released version (under `role` isolation an operator with a **Can view** share no longer runs it). They cannot
-save, publish, delete, duplicate or re-share it (the API answers `403`, and the
-editor and Home hide those controls), and they see none of what is built from other people's runs: golden sets,
-evals, release-gate reasons and replay captures. Add them to the project to give them more. Only the project's own
-members with `project:invite` (and admins) add, change or remove members, never beyond the permissions of their own
-membership, and nobody but an admin changes or removes their own membership, so the cap cannot be lifted that way. A
-workflow shared with people moves to another project only by an admin, or by a member with `project:invite` in both
-projects, so its shares never land somewhere else by accident. MCP servers assigned to the project stay hidden from
-them on every server route (tools, resources, prompts, OAuth status, changes, overview and the playground).
+A person share never takes away anything else someone already has. Only when it is their only way to the workflow (no
+project membership, no role that reaches the project under the isolation mode, not an admin: under `strict`, a
+non-member) does it cap them: they read it with **Can view**, also run the released version with **Can view and run**,
+and cannot save, publish, delete, duplicate or re-share it (the API answers `403`, and the editor and Home hide those
+controls). Nothing else of that project is theirs. Under `role` isolation someone's role reaches every project, so the
+share adds what it gives and takes nothing away.
+
+Only the project's own members with `project:invite` (and admins) share its workflows with people and add, change or
+remove members, never beyond the permissions of their own membership, and nobody but an admin changes or removes their
+own membership. A workflow shared with people moves to another project only by an admin, or by a member with
+`project:invite` in both projects. MCP servers assigned to a project are hidden on every server route (tools,
+resources, prompts, OAuth status, changes, overview and the playground) from anyone who may not read that project.
 
 Details: [Own runs only](./auth-rbac.md#own-runs-only).
 
