@@ -465,6 +465,32 @@ section {
   vertical-align: 1px;
 }
 
+/* The install command beside the demo button: one line, scrolls on a narrow screen instead of the page. */
+.install-cmd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  width: fit-content;
+  margin: 18px auto 0;
+  padding: 6px 6px 6px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--bg-elev);
+}
+
+.install-cmd code {
+  overflow-x: auto;
+  white-space: nowrap;
+  font-size: 0.92rem;
+  color: var(--fg);
+}
+
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 0.85rem;
+}
+
 .pill-row {
   display: flex;
   flex-wrap: wrap;
@@ -1090,4 +1116,13 @@ section {
 
 .footer-note a:hover {
   color: var(--fg);
+}
+
+/* The privacy note's GoatCounter sentence shows only while the counter is on (docs/site-consent.js). */
+.site-counter-note {
+  display: none;
+}
+
+.site-counter-on .site-counter-note {
+  display: inline;
 }

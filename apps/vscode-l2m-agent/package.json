@@ -1,11 +1,16 @@
 {
   "name": "vscode-l2m-agent",
   "displayName": "L2M Agent",
-  "description": "Interactive VS Code coding and data analytics agent backed by L2M webhook workflows.",
+  "description": "A coding and data agent in VS Code, backed by workflows on your own self-hosted L2M server.",
   "version": "0.1.0",
   "private": true,
   "publisher": "l2m",
-  "license": "UNLICENSED",
+  "license": "MIT",
+  "icon": "resources/l2m-icon.png",
+  "galleryBanner": {
+    "color": "#07090f",
+    "theme": "dark"
+  },
   "type": "commonjs",
   "main": "./dist/extension.js",
   "repository": {
@@ -13,7 +18,7 @@
     "url": "https://github.com/TensorGreed/l2m.git",
     "directory": "apps/vscode-l2m-agent"
   },
-  "homepage": "https://github.com/TensorGreed/l2m#readme",
+  "homepage": "https://lsquarem.com/docs/getting-started/vscode-extension",
   "bugs": {
     "url": "https://github.com/TensorGreed/l2m/issues"
   },
@@ -35,8 +40,9 @@
     "vscode": "^1.93.0"
   },
   "categories": [
-    "Other",
-    "Education"
+    "AI",
+    "Chat",
+    "Other"
   ],
   "activationEvents": [
     "onView:l2mAgent.chatView",

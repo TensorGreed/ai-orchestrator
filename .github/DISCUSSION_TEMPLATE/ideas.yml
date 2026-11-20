@@ -1,0 +1,22 @@
+title: "[Idea] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Suggest a feature, a node, an integration or a change. Ideas with a clear problem behind them are the easiest to act on; once one is agreed, it becomes an issue on the [roadmap](https://github.com/TensorGreed/l2m/blob/main/ROADMAP.md).
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that L2M makes hard or impossible today?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Your idea
+      description: What would help? Rough is fine.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do today instead (optional)
