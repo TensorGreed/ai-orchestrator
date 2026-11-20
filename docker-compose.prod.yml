@@ -32,7 +32,8 @@ x-api-env: &api-env
   DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:-ai_orchestrator}
   DB_POSTGRESDB_USER: ${POSTGRES_USER:-ao}
   DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
-  SECRET_MASTER_KEY_BASE64: ${SECRET_MASTER_KEY_BASE64:?required — generate with: node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"}
+  # Quoted: the hint contains ": ", which YAML would otherwise read as a nested mapping.
+  SECRET_MASTER_KEY_BASE64: "${SECRET_MASTER_KEY_BASE64:?required — generate with: node -e \"console.log(require('crypto').randomBytes(32).toString('base64'))\"}"
   BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
   BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
   AUTH_ALLOW_PUBLIC_REGISTER: "false"
