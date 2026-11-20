@@ -85,3 +85,23 @@ describe("docker-compose.quickstart.yml", () => {
     }
   });
 });
+
+describe("Helm chart image tags", () => {
+  const chart = path.join(root, "ops/helm/l2m");
+  const read = (name: string) => fs.readFileSync(path.join(chart, name), "utf8");
+
+  it("runs the release the chart belongs to unless a tag is set: no `latest` by default", () => {
+    const values = parseDocument(read("values.yaml")).toJS() as { image: { tag: string }; web: { image: { tag: string } } };
+    expect(values.image.tag).toBe("");
+    expect(values.web.image.tag).toBe("");
+    const appVersion = (parseDocument(read("Chart.yaml")).toJS() as { appVersion: string }).appVersion;
+    // The release workflow tags images "v" + the version (v0.1.0), which is what the chart falls back to.
+    expect(appVersion).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(read("templates/_helpers.tpl")).toContain('{{- .tag | default (printf "v%s" .root.Chart.AppVersion) -}}');
+    for (const name of ["deployment-api.yaml", "deployment-webhook.yaml", "deployment-worker.yaml", "deployment-web.yaml"]) {
+      const template = read(`templates/${name}`);
+      expect(template).toContain('include "l2m.imageTag"');
+      expect(template).not.toMatch(/:\{\{ \.Values\.(web\.)?image\.tag \}\}/);
+    }
+  });
+});

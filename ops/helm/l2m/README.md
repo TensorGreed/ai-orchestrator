@@ -11,7 +11,7 @@ The chart's default `image.repository` values point at GHCR images published by 
 
 The same images (same digests) are on Docker Hub as `lsquarem/l2m` and `lsquarem/l2m-web`: `--set image.repository=docker.io/lsquarem/l2m --set web.image.repository=docker.io/lsquarem/l2m-web`.
 
-Both images are multi-arch (`linux/amd64` + `linux/arm64`), so M-series Macs and AWS Graviton nodes get the right architecture without emulation. Pin a specific tag in production via `--set image.tag=v0.1.0 --set web.image.tag=v0.1.0` instead of `latest`.
+Both images are multi-arch (`linux/amd64` + `linux/arm64`), so M-series Macs and AWS Graviton nodes get the right architecture without emulation. By default both run the release the chart belongs to (`v` + the chart's `appVersion`, so `v0.1.0`); set `image.tag` and `web.image.tag` to another release tag, or to `latest` only if you want to follow new releases.
 
 Each release image is signed (keyless cosign) and carries SLSA build provenance and CycloneDX SBOMs. To deploy exactly the image you verified, append its digest to the tag, e.g. `--set image.tag=v0.1.0@sha256:<api digest> --set web.image.tag=v0.1.0@sha256:<web digest>`. The verification commands are on the docs page [Verify a release](https://lsquarem.com/docs/operations/verify-a-release).
 
@@ -23,7 +23,6 @@ MASTER_KEY=$(node -e "console.log(require('crypto').randomBytes(32).toString('ba
 
 helm install ao ./ops/helm/l2m \
   --set image.repository=ghcr.io/your-org/l2m \
-  --set image.tag=latest \
   --set secrets.secretMasterKeyBase64="$MASTER_KEY" \
   --set secrets.databaseUrl="postgresql://ao:pass@postgres:5432/ai_orchestrator" \
   --set api.replicaCount=3 \
