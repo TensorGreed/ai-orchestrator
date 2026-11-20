@@ -1,10 +1,15 @@
-// Cookie consent for the lsquarem.com website (landing and docs) with Google Consent Mode v2.
+// Cookie consent for the lsquarem.com website (landing and docs) with Google Consent Mode v2, and an optional
+// cookieless page-view counter (GoatCounter).
 // The L2M product and the live demo do not load this file and send no analytics.
 // Nothing is requested from Google until the visitor accepts: gtag.js is injected on Accept
 // (or on a later visit when Accept was stored). Only analytics_storage is ever granted.
 (function () {
   "use strict";
   var GA_ID = "G-J3CBSHR723";
+  // GoatCounter site code (the <code> of https://<code>.goatcounter.com). Empty: nothing is loaded or counted.
+  // GoatCounter sets no cookies and stores no personal data, so it needs no consent; when it is on, the
+  // privacy notes on the landing and the docs say so (.site-counter-note, shown by the site-counter-on class).
+  var GOATCOUNTER_CODE = "";
   var KEY = "l2m-site-consent";
   var bar = null;
   var loaded = false;
@@ -138,6 +143,32 @@
     e.preventDefault();
     show(true);
   });
+
+  // Counts page views without cookies; the docs are a single-page app, so its in-page navigations count too.
+  function startCounter() {
+    if (!/^[a-z0-9-]{1,63}$/.test(GOATCOUNTER_CODE)) return;
+    document.documentElement.classList.add("site-counter-on");
+    var s = document.createElement("script");
+    s.async = true;
+    s.src = "https://gc.zgo.at/count.js";
+    s.setAttribute("data-goatcounter", "https://" + GOATCOUNTER_CODE + ".goatcounter.com/count");
+    document.head.appendChild(s);
+    var last = location.pathname + location.search;
+    function count() {
+      var path = location.pathname + location.search;
+      if (path === last || !window.goatcounter || !window.goatcounter.count) return;
+      last = path;
+      window.goatcounter.count({ path: path });
+    }
+    var push = history.pushState;
+    history.pushState = function () {
+      push.apply(this, arguments);
+      setTimeout(count, 0);
+    };
+    window.addEventListener("popstate", count);
+  }
+
+  startCounter();
 
   var saved = read();
   if (saved === "granted") grant();

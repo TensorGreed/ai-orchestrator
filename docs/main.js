@@ -70,3 +70,21 @@ if (!("IntersectionObserver" in window) || reduceMotion) {
   );
   revealTargets.forEach((item) => observer.observe(item));
 }
+
+// "Copy" next to a command copies the text of the element its data-copy-target names.
+document.querySelectorAll("[data-copy-target]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const target = document.getElementById(button.getAttribute("data-copy-target"));
+    if (!target || !navigator.clipboard) return;
+    navigator.clipboard.writeText(target.textContent.trim()).then(
+      () => {
+        button.textContent = "Copied";
+        setTimeout(() => (button.textContent = "Copy"), 1500);
+      },
+      () => {
+        // Clipboard refused (insecure context or permission): the command stays visible to copy by hand.
+      }
+    );
+  });
+});
+
