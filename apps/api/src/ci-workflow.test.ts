@@ -53,17 +53,34 @@ describe("CI workflow required checks", () => {
     expect(needsOf(job).sort()).toEqual(["api-postgres-shard", "changes"]);
     const body = script(job);
     expect(body).toContain('[ "$SHARDS" = success ]');
-    expect(body).toMatch(/\[ "\$NEEDED" != true \] && \[ "\$SHARDS" = skipped \]/);
+    expect(body).toMatch(/\[ "\$NEEDED" = false \] && \[ "\$SHARDS" = skipped \]/);
+    expect(jobs["api-postgres-shard"]!.if).toBe("needs.changes.outputs.api_postgres != 'false'");
   });
 
-  it("Web E2E runs both end-to-end suites when the change needs them", () => {
+  it("Web E2E waits for both end-to-end suites and passes a skip only when the change does not need them", () => {
     const [, job] = jobNamed("Web E2E");
-    const runs = (job.steps ?? []).filter((step) => step.run?.includes("pnpm --filter @ai-orchestrator/web e2e"));
-    expect(runs.map((step) => step.if)).toEqual([
-      "needs.changes.outputs.web_e2e == 'true'",
-      "needs.changes.outputs.web_e2e == 'true'"
-    ]);
-    expect(script(job)).toContain("e2e:demo");
+    expect(needsOf(job).sort()).toEqual(["changes", "e2e-run"]);
+    const body = script(job);
+    expect(body).toContain('[ "$SUITES" = success ]');
+    expect(body).toMatch(/\[ "\$NEEDED" = false \] && \[ "\$SUITES" = skipped \]/);
+    const run = jobs["e2e-run"]!;
+    expect(run.if).toBe("needs.changes.outputs.web_e2e != 'false'");
+    expect(script(run)).toContain("pnpm --filter @ai-orchestrator/web e2e\n");
+    expect(script(run)).toContain("pnpm --filter @ai-orchestrator/web e2e:demo");
+  });
+
+  it("each required check's step runs even when the run was cancelled", () => {
+    for (const name of ["Lint Test Build", "API on Postgres", "Web E2E"]) {
+      const [, job] = jobNamed(name);
+      expect(job.steps?.every((step) => step.if === "always()"), name).toBe(true);
+    }
+  });
+
+  it("checks every change-detection output and reads renamed files under their old path", () => {
+    const detect = script(jobs.changes!);
+    expect(detect).toContain("set -euo pipefail");
+    expect(detect).toContain("for key in docs_only api_postgres web_e2e");
+    expect(detect).toContain(".previous_filename // empty");
   });
 
   it("shards the API suites with vitest, reading the shard total from the matrix", () => {
@@ -100,7 +117,7 @@ describe("CI workflow required checks", () => {
   });
 
   it("no suite job waits for another suite", () => {
-    for (const id of ["lint-build", "unit", "api-unit", "api-postgres-shard", "e2e", "vscode-extension", "mcp-conformance"]) {
+    for (const id of ["lint-build", "unit", "api-unit", "api-postgres-shard", "e2e-run", "vscode-extension", "mcp-conformance"]) {
       expect(needsOf(jobs[id]!), id).toEqual(["changes"]);
     }
   });

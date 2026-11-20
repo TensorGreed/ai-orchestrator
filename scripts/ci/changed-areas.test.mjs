@@ -97,3 +97,9 @@ test("the command line prints key=value lines for GITHUB_OUTPUT", () => {
   assert.equal(run.status, 0, run.stderr);
   assert.equal(run.stdout, "docs_only=false\napi_postgres=false\nweb_e2e=true\n");
 });
+
+test("docs files that tests read are not docs-only", () => {
+  assert.deepEqual(classify(["docs/install.sh"]), { docs_only: false, api_postgres: true, web_e2e: true });
+  assert.deepEqual(classify(["apps/docs/docs/getting-started/quickstart.md"]), { docs_only: false, api_postgres: true, web_e2e: true });
+  assert.equal(classify(["apps/web/e2e-demo/helpers.test.ts"]).web_e2e, true);
+});

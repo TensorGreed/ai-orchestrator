@@ -44,19 +44,28 @@ jobs:
 
       - name: Detect
         id: detect
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
+          areas="$RUNNER_TEMP/changed-areas.txt"
           if [ "$EVENT" != "pull_request" ]; then
-            printf 'docs_only=false\napi_postgres=true\nweb_e2e=true\n' | tee -a "$GITHUB_OUTPUT"
-            exit 0
+            printf 'docs_only=false\napi_postgres=true\nweb_e2e=true\n' > "$areas"
+          else
+            # A renamed file counts under its old path too (moving API code into the web app still changes the API).
+            gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/changed-files.txt"
+            echo "Changed paths: $(grep -c . "$RUNNER_TEMP/changed-files.txt" || true)"
+            node scripts/ci/changed-areas.mjs < "$RUNNER_TEMP/changed-files.txt" > "$areas"
           fi
-          gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" --jq '.[].filename' > "$RUNNER_TEMP/changed-files.txt"
-          echo "Changed files: $(grep -c . "$RUNNER_TEMP/changed-files.txt" || true)"
-          node scripts/ci/changed-areas.mjs < "$RUNNER_TEMP/changed-files.txt" | tee -a "$GITHUB_OUTPUT"
+          cat "$areas"
+          for key in docs_only api_postgres web_e2e; do
+            grep -Eqx "$key=(true|false)" "$areas" || { echo "::error::No $key decision."; exit 1; }
+          done
+          cat "$areas" >> "$GITHUB_OUTPUT"
 
   lint-build:
     name: Lint and build
@@ -152,6 +161,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Check the parts
+        if: always()
         env:
           DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
           CHANGES: ${{ needs.changes.result }}
@@ -175,7 +185,7 @@ jobs:
     name: API on Postgres (${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.api_postgres == 'true'
+    if: needs.changes.outputs.api_postgres != 'false'
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -227,6 +237,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Check the shards
+        if: always()
         env:
           NEEDED: ${{ needs.changes.outputs.api_postgres }}
           CHANGES: ${{ needs.changes.result }}
@@ -234,45 +245,34 @@ jobs:
         run: |
           echo "Detect changed areas: $CHANGES; API on Postgres shards: $SHARDS"
           [ "$CHANGES" = success ] || { echo "::error::Detecting the changed areas did not succeed."; exit 1; }
-          if [ "$NEEDED" != true ] && [ "$SHARDS" = skipped ]; then
+          if [ "$NEEDED" = false ] && [ "$SHARDS" = skipped ]; then
             echo "Nothing the API suite covers changed; the API suite on Postgres is not needed."
             exit 0
           fi
           [ "$SHARDS" = success ] || { echo "::error::A shard of the API suite on Postgres did not succeed."; exit 1; }
 
-  e2e:
-    name: Web E2E
+  e2e-run:
+    name: Web E2E suites
     runs-on: ubuntu-latest
     needs: changes
-    if: always()
+    if: needs.changes.outputs.web_e2e != 'false'
     timeout-minutes: 30
     steps:
-      - name: Check the change detection
-        env:
-          CHANGES: ${{ needs.changes.result }}
-        run: |
-          [ "$CHANGES" = success ] || { echo "::error::Detecting the changed areas did not succeed."; exit 1; }
-
       - name: Checkout
-        if: needs.changes.outputs.web_e2e == 'true'
         uses: actions/checkout@v7
 
       - name: Set up Node.js and dependencies
-        if: needs.changes.outputs.web_e2e == 'true'
         uses: ./.github/actions/setup
 
       - name: Install Playwright Chromium
-        if: needs.changes.outputs.web_e2e == 'true'
         uses: ./.github/actions/playwright
 
       - name: Run web E2E tests
-        if: needs.changes.outputs.web_e2e == 'true'
         run: pnpm --filter @ai-orchestrator/web e2e
 
       # The static demo (lsquarem.com/demo/): built with --mode demo and served
       # by vite preview on its own port; no API or database involved.
       - name: Run static demo E2E
-        if: needs.changes.outputs.web_e2e == 'true'
         env:
           DEMO_SCREENSHOT_DIR: ${{ github.workspace }}/apps/web/demo-screenshots
         run: |
@@ -281,7 +281,7 @@ jobs:
 
       # One screenshot per step of the demo journey, for reviewers.
       - name: Upload demo screenshots
-        if: always() && needs.changes.outputs.web_e2e == 'true'
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: demo-screenshots
@@ -289,7 +289,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload Playwright report
-        if: always() && needs.changes.outputs.web_e2e == 'true'
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: playwright-report
@@ -298,9 +298,28 @@ jobs:
             apps/web/playwright-report-demo
           if-no-files-found: ignore
 
-      - name: Not needed for this change
-        if: needs.changes.outputs.web_e2e != 'true'
-        run: echo "Nothing the web E2E suites cover changed; they are not needed."
+  # Required check: both end-to-end suites passed, or the change does not touch anything they cover.
+  e2e:
+    name: Web E2E
+    runs-on: ubuntu-latest
+    needs: [changes, e2e-run]
+    if: always()
+    timeout-minutes: 5
+    steps:
+      - name: Check the suites
+        if: always()
+        env:
+          NEEDED: ${{ needs.changes.outputs.web_e2e }}
+          CHANGES: ${{ needs.changes.result }}
+          SUITES: ${{ needs.e2e-run.result }}
+        run: |
+          echo "Detect changed areas: $CHANGES; Web E2E suites: $SUITES"
+          [ "$CHANGES" = success ] || { echo "::error::Detecting the changed areas did not succeed."; exit 1; }
+          if [ "$NEEDED" = false ] && [ "$SUITES" = skipped ]; then
+            echo "Nothing the web E2E suites cover changed; they are not needed."
+            exit 0
+          fi
+          [ "$SUITES" = success ] || { echo "::error::The web E2E suites did not succeed."; exit 1; }
 
   vscode-extension:
     name: VS Code Extension Package
