@@ -196,6 +196,7 @@ import { ImportConflictDialog, type ImportConflictChoice } from "./components/Im
 import { editorAccess, mayUseEditorRunOptions, type WorkflowAccessView } from "./lib/editor-access";
 import { useEditableWorkflows } from "./lib/editable-workflows";
 import { SecretSaveWarnings } from "./components/SecretSaveWarnings";
+import { ConnectedAccountsPanel } from "./components/ConnectedAccountsPanel";
 import { DraftWarnings } from "./components/DraftWarnings";
 import { WebhookTestPayloadDialog } from "./components/WebhookTestPayloadDialog";
 import { WorkflowBuilderDialog } from "./components/WorkflowBuilderDialog";
@@ -1206,6 +1207,8 @@ function StudioApp() {
   const [workflowBuilderEnabled, setWorkflowBuilderEnabled] = useState(false);
   const [workflowBuilderOpen, setWorkflowBuilderOpen] = useState(false);
   const [secrets, setSecrets] = useState<SecretListItem[]>([]);
+  // Connected accounts have their own card on the Secrets page.
+  const typedSecrets = useMemo(() => secrets.filter((secret) => secret.provider !== "oauth_account"), [secrets]);
 
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -6658,11 +6661,11 @@ function StudioApp() {
                 <article className="secrets-card pg-card">
                   <div className="secrets-card-header">
                     <h3 className="pg-card-title">Saved secrets</h3>
-                    <span className="pg-count">{secrets.length}</span>
+                    <span className="pg-count">{typedSecrets.length}</span>
                   </div>
-                  {secrets.length === 0 && <div className="page-empty compact">No secrets yet.</div>}
+                  {typedSecrets.length === 0 && <div className="page-empty compact">No secrets yet.</div>}
                   <div className="secret-list">
-                    {secrets.map((secret) => (
+                    {typedSecrets.map((secret) => (
                       <div key={secret.id} className="secret-item">
                         <div className="secret-item-copy">
                           <strong>{secret.name}</strong>
@@ -6704,6 +6707,10 @@ function StudioApp() {
                   </div>
                 </article>
               </div>
+
+              {authUser?.role !== "operator" && authUser?.role !== "viewer" && (
+                <ConnectedAccountsPanel projectId={activeProjectId} secrets={secrets} onChanged={async () => void (await refreshSecrets())} />
+              )}
 
               <p className="page-hint secrets-hint">
                 To attach a secret to an LLM or agent node: open the Editor, select the node and choose the secret in the

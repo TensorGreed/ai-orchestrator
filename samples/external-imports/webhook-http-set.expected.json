@@ -40,6 +40,10 @@
           "secretRef": {
             "secretId": "import-httpheaderauth-enrichment_api_key"
           },
+          "secretAuth": {
+            "type": "header",
+            "name": "X-API-Key"
+          },
           "retryCount": 0
         }
       },
@@ -145,7 +149,7 @@
         "targetNodeId": "http_request",
         "targetType": "http_request",
         "status": "approximated",
-        "reason": "Query parameters were appended to the URL template. Authentication 'genericCredentialType' was mapped to a secretRef placeholder; verify how the secret is applied."
+        "reason": "Query parameters were appended to the URL template. Header authentication: set the header name under Auth (the source kept it in the credential)."
       },
       {
         "sourceName": "Edit Fields",

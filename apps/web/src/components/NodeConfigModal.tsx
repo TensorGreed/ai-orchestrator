@@ -1,4 +1,4 @@
-import { LIVE_ENTRY_NODE_TYPES, describeHttpSecretAuth, readHttpSecretAuth, resolveRagSearchMode } from "@ai-orchestrator/shared";
+import { CONNECTED_ACCOUNT_PROVIDER_IDS, LIVE_ENTRY_NODE_TYPES, NODE_CONNECTED_ACCOUNT_PROVIDERS, describeHttpSecretAuth, readHttpSecretAuth, resolveRagSearchMode, type ConnectedAccountProviderId } from "@ai-orchestrator/shared";
 import { McpToolArgsForm, McpUseFormButton, OpenApiOperationForm, usesMcpArgsForm, usesOpenApiOperation } from "./IntegrationForms";
 import { buildSchemaForm } from "../lib/mcp-schema-form";
 import { createContext, useCallback, useContext, useEffect, useId, useImperativeHandle, useMemo, useRef, useState, type Ref } from "react";
@@ -71,6 +71,16 @@ import { McpAnnotationChips, McpOutputSchema } from "./McpToolMeta";
 import { SecretSaveWarnings } from "./SecretSaveWarnings";
 import { ModelAllowlistWarning, useModelAllowlistWarning } from "./ModelAllowlistWarning";
 import { directApiBaseUrl } from "../lib/direct-api-url";
+import {
+  HTTP_AUTH_OPTIONS,
+  applyHttpAuthMode,
+  connectAccountInPopup,
+  httpAuthMode,
+  isConnectedAccount,
+  providerLabel,
+  secretOptionLabel,
+  type HttpAuthMode
+} from "../lib/connect-account";
 import { withMcpToolChoice } from "../lib/integration-catalog";
 import {
   TRIGGER_TRUST_OPTIONS,
@@ -483,6 +493,7 @@ export function buildNodeTrace(
 }
 
 const ADD_NEW_CREDENTIAL_VALUE = "__add_new_credential__";
+const CONNECT_ACCOUNT_PREFIX = "__connect_account__:";
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
@@ -1764,6 +1775,7 @@ export function NodeInspector({
   const [inlineGoogleServiceAccountJson, setInlineGoogleServiceAccountJson] = useState("");
   const [inlineSecretBusy, setInlineSecretBusy] = useState(false);
   const [inlineSecretError, setInlineSecretError] = useState<string | null>(null);
+  const [connectState, setConnectState] = useState<{ fieldKey: string; busy: boolean; message: string | null } | null>(null);
   const [inlineSecretWarnings, setInlineSecretWarnings] = useState<{ fieldKey: string; warnings: string[] } | null>(null);
   const provider = useMemo(() => asRecord(config.provider), [config.provider]);
   const directSecretId = getSecretId(config.secretRef);
@@ -2286,16 +2298,52 @@ export function NodeInspector({
       /** Visible note under the picker, e.g. what the secret must contain. */
       hint?: string;
       required?: boolean;
+      /**
+       * Offer connected accounts for these providers, with "Connect <provider>…" to sign in from here. `only` lists
+       * just connected accounts (the HTTP Request node's Connected account choice).
+       */
+      connect?: { providers: ConnectedAccountProviderId[]; only?: boolean };
     }) => {
-      const filteredSecrets = input.filter ? availableSecrets.filter(input.filter) : availableSecrets;
+      const connectProviders = input.connect?.providers ?? [];
+      const filteredSecrets = (input.filter ? availableSecrets.filter(input.filter) : availableSecrets).filter((secret) => {
+        if (!isConnectedAccount(secret)) return !input.connect?.only;
+        // A connected account shows where its provider is offered; elsewhere it is still listed when already picked.
+        const providerId = secret.connection?.providerId;
+        return secret.id === input.value || !providerId || connectProviders.includes(providerId) || !input.connect;
+      });
       const options = [
         { value: "", label: input.noneLabel },
         ...filteredSecrets.map((secret) => ({
           value: secret.id,
-          label: `${secret.name} (${secret.provider})`
+          label: secretOptionLabel(secret)
         })),
-        { value: ADD_NEW_CREDENTIAL_VALUE, label: "+ Add New Credential..." }
+        ...connectProviders.map((providerId) => ({ value: `${CONNECT_ACCOUNT_PREFIX}${providerId}`, label: `+ Connect ${providerLabel(providerId)}…` })),
+        ...(input.connect?.only ? [] : [{ value: ADD_NEW_CREDENTIAL_VALUE, label: "+ Add New Credential..." }])
       ];
+      const picked = availableSecrets.find((secret) => secret.id === input.value);
+      const connecting = connectState?.fieldKey === input.fieldKey ? connectState : null;
+
+      const handleConnect = async (providerId: string) => {
+        setConnectState({ fieldKey: input.fieldKey, busy: true, message: `Waiting for ${providerLabel(providerId)} sign-in…` });
+        try {
+          const result = await connectAccountInPopup({ providerId, ...(workflowContext?.projectId ? { projectId: workflowContext.projectId } : {}) });
+          if (result.ok && result.secretId) {
+            if (onRefreshSecrets) {
+              try {
+                await onRefreshSecrets();
+              } catch {
+                // The pick below still works; the list catches up on the next refresh.
+              }
+            }
+            input.onSelect(result.secretId);
+            setConnectState(null);
+          } else {
+            setConnectState({ fieldKey: input.fieldKey, busy: false, message: result.error ?? "The account was not connected." });
+          }
+        } catch (error) {
+          setConnectState({ fieldKey: input.fieldKey, busy: false, message: error instanceof Error ? error.message : "Could not start the sign-in." });
+        }
+      };
       const isActiveCreator = activeSecretFieldKey === input.fieldKey;
       const isGoogleDriveProvider = inlineSecretProvider.trim() === "google_drive";
 
@@ -2369,6 +2417,10 @@ export function NodeInspector({
                 openInlineSecretCreator(input.fieldKey, input.preferredProvider);
                 return;
               }
+              if (next.startsWith(CONNECT_ACCOUNT_PREFIX)) {
+                void handleConnect(next.slice(CONNECT_ACCOUNT_PREFIX.length));
+                return;
+              }
               closeInlineSecretCreator();
               setInlineSecretWarnings(null);
               input.onSelect(next);
@@ -2376,6 +2428,34 @@ export function NodeInspector({
             options={options}
           />
           {input.hint && <div className="cfg-tip">{input.hint}</div>}
+          {picked?.connection?.status === "needs_reconnect" && (
+            <div className="cfg-tip" role="alert">
+              {picked.name} needs to be reconnected.{" "}
+              <button
+                type="button"
+                className="pg-btn small"
+                disabled={connecting?.busy}
+                onClick={() => {
+                  setConnectState({ fieldKey: input.fieldKey, busy: true, message: "Waiting for sign-in…" });
+                  void connectAccountInPopup({ providerId: picked.connection!.providerId, reconnectSecretId: picked.id }).then(
+                    async (result) => {
+                      if (onRefreshSecrets) await onRefreshSecrets().catch(() => undefined);
+                      setConnectState(result.ok ? null : { fieldKey: input.fieldKey, busy: false, message: result.error ?? "Not reconnected." });
+                    },
+                    (error: unknown) =>
+                      setConnectState({ fieldKey: input.fieldKey, busy: false, message: error instanceof Error ? error.message : "Could not start the sign-in." })
+                  );
+                }}
+              >
+                Reconnect
+              </button>
+            </div>
+          )}
+          {connecting?.message && (
+            <div className="cfg-tip" role="status">
+              {connecting.message}
+            </div>
+          )}
           {inlineSecretWarnings?.fieldKey === input.fieldKey && <SecretSaveWarnings warnings={inlineSecretWarnings.warnings} />}
           {input.required && !input.value && (
             <div className="cfg-tip" role="alert">
@@ -2436,6 +2516,7 @@ export function NodeInspector({
       activeSecretFieldKey,
       availableSecrets,
       buildInlineSecretPayload,
+      connectState,
       closeInlineSecretCreator,
       inlineGoogleAccessToken,
       inlineGoogleAuthMode,
@@ -2447,7 +2528,8 @@ export function NodeInspector({
       inlineSecretProvider,
       inlineSecretValue,
       onRefreshSecrets,
-      openInlineSecretCreator
+      openInlineSecretCreator,
+      workflowContext?.projectId
     ]
   );
 
@@ -6484,7 +6566,8 @@ export function NodeInspector({
     const credentialKeys = new Set(credentials.map((spec) => spec.key));
     const fieldKeys = Object.keys(properties).filter((key) => !credentialKeys.has(key) && !/secretref$/i.test(key));
 
-    const credentialFields = credentials.map((spec) =>
+    const connectProvider = NODE_CONNECTED_ACCOUNT_PROVIDERS[node.data.nodeType];
+    const credentialFields = credentials.map((spec, index) =>
       renderCredentialSecretField({
         fieldKey: `schema_${spec.key}`,
         label: spec.required ? `${spec.label} (required)` : spec.label,
@@ -6493,6 +6576,7 @@ export function NodeInspector({
         preferredProvider: spec.provider,
         hint: spec.hint,
         required: spec.required,
+        ...(connectProvider && index === 0 && spec.key === "secretRef" ? { connect: { providers: [connectProvider] } } : {}),
         onSelect: (next) =>
           setConfig((current) => ({
             ...current,
@@ -6991,19 +7075,101 @@ export function NodeInspector({
           />
         );
         const secretAuth = readHttpSecretAuth(config.secretAuth);
-        const secretField = renderCredentialSecretField({
-          fieldKey: "http_request_secret",
-          label: secretAuth && typeof secretAuth !== "string" ? "Secret" : "Authorization Secret (Bearer)",
-          value: toStringValue(asRecord(config.secretRef).secretId),
-          noneLabel: "None",
-          preferredProvider: "custom",
-          ...(secretAuth && typeof secretAuth !== "string" ? { hint: `Sent ${describeHttpSecretAuth(secretAuth)}.` } : {}),
-          onSelect: (next) =>
-            setConfig((current) => ({
-              ...current,
-              secretRef: next ? { secretId: next } : undefined
-            }))
-        });
+        const authMode = httpAuthMode(config);
+        const parsedAuth = secretAuth && typeof secretAuth !== "string" ? secretAuth : null;
+        const rawAuth = asRecord(config.secretAuth);
+        const setAuthField = (key: string, value: string) =>
+          setConfig((current) => ({ ...current, secretAuth: { ...asRecord(current.secretAuth), [key]: value } }));
+        const pickSecret = (next: string) =>
+          setConfig((current) => ({
+            ...current,
+            secretRef: next ? { secretId: next } : undefined
+          }));
+        const secretLabel: Record<HttpAuthMode, string> = {
+          none: "Secret",
+          bearer: "Token secret",
+          basic: "Secret (user:password)",
+          header: "Key secret",
+          query: "Key secret",
+          oauth2_client_credentials: "Client secret",
+          connected: "Account"
+        };
+        const authPicker = (
+          <SelectField
+            label="Auth"
+            value={authMode}
+            onChange={(next) => setConfig((current) => applyHttpAuthMode(current, next as HttpAuthMode))}
+            options={HTTP_AUTH_OPTIONS}
+          />
+        );
+        const secretField =
+          authMode === "none" ? (
+            authPicker
+          ) : (
+            <>
+              {authPicker}
+              {(authMode === "header" || authMode === "query") && (
+                <TextField
+                  label={authMode === "header" ? "Header name" : "Query parameter name"}
+                  value={toStringValue(rawAuth.name)}
+                  onChange={(next) => setAuthField("name", next)}
+                  placeholder={authMode === "header" ? "X-API-Key" : "api_key"}
+                />
+              )}
+              {authMode === "oauth2_client_credentials" && (
+                <>
+                  <TextField
+                    label="Token URL"
+                    value={toStringValue(rawAuth.tokenUrl)}
+                    onChange={(next) => setAuthField("tokenUrl", next)}
+                    placeholder="https://auth.example.com/oauth/token"
+                  />
+                  <div className="cfg-grid-2">
+                    <TextField label="Client ID" value={toStringValue(rawAuth.clientId)} onChange={(next) => setAuthField("clientId", next)} />
+                    <TextField label="Scope" value={toStringValue(rawAuth.scope)} onChange={(next) => setAuthField("scope", next)} placeholder="optional" />
+                  </div>
+                </>
+              )}
+              {authMode === "connected"
+                ? renderCredentialSecretField({
+                    fieldKey: "http_request_secret",
+                    label: secretLabel.connected,
+                    value: toStringValue(asRecord(config.secretRef).secretId),
+                    noneLabel: "Select account",
+                    preferredProvider: "custom",
+                    hint: "Sent as a bearer token; L2M renews it before it expires.",
+                    connect: { providers: [...CONNECTED_ACCOUNT_PROVIDER_IDS], only: true },
+                    onSelect: pickSecret
+                  })
+                : renderCredentialSecretField({
+                    fieldKey: "http_request_secret",
+                    label: secretLabel[authMode],
+                    value: toStringValue(asRecord(config.secretRef).secretId),
+                    noneLabel: "Select secret",
+                    preferredProvider: "custom",
+                    ...(parsedAuth && parsedAuth.type !== "connected" ? { hint: `Sent ${describeHttpSecretAuth(parsedAuth)}.` } : {}),
+                    filter: (secret) => !isConnectedAccount(secret),
+                    onSelect: pickSecret
+                  })}
+              {typeof secretAuth === "string" && (
+                <div className="cfg-tip" role="alert">
+                  {secretAuth}
+                </div>
+              )}
+            </>
+          );
+        const clientAuthField =
+          authMode === "oauth2_client_credentials" ? (
+            <SelectField
+              label="Send client credentials"
+              value={rawAuth.clientAuth === "basic" ? "basic" : "body"}
+              onChange={(next) => setAuthField("clientAuth", next)}
+              options={[
+                { value: "body", label: "In the request body" },
+                { value: "basic", label: "As basic auth header" }
+              ]}
+            />
+          ) : null;
         const timingFields = (
           <div className="cfg-grid-2">
             <SelectField
@@ -7037,6 +7203,7 @@ export function NodeInspector({
                 ])}
               >
                 {timingFields}
+                {clientAuthField}
               </AdvancedFields>
               <HttpErrorStatusFields
                 config={config}
@@ -7093,6 +7260,7 @@ export function NodeInspector({
               {!sendsBody && headersField}
               {!sendsBody && bodyField}
               {timingFields}
+              {clientAuthField}
             </AdvancedFields>
             <HttpErrorStatusFields
               config={config}
@@ -9075,7 +9243,7 @@ export function NodeInspector({
               onChange={(next) => setConfig((current) => ({ ...current, authType: next }))}
               options={[
                 { value: "webhook", label: "Incoming Webhook" },
-                { value: "bot", label: "Bot Token" }
+                { value: "bot", label: "Bot Token or Connected Account" }
               ]}
             />
             {authType === "webhook" ? (
@@ -9092,6 +9260,7 @@ export function NodeInspector({
                 value: toStringValue(asRecord(config.secretRef).secretId),
                 noneLabel: "Select token",
                 preferredProvider: "slack",
+                connect: { providers: ["slack"] },
                 onSelect: (next) =>
                   setConfig((current) => ({
                     ...current,
@@ -9315,6 +9484,7 @@ export function NodeInspector({
               value: toStringValue(asRecord(config.secretRef).secretId),
               noneLabel: "Select secret",
               preferredProvider: "google",
+              connect: { providers: ["google"] },
               onSelect: (next) =>
                 setConfig((current) => ({
                   ...current,
@@ -9617,6 +9787,7 @@ export function NodeInspector({
               value: toStringValue(asRecord(config.secretRef).secretId),
               noneLabel: "Select secret",
               preferredProvider: "github",
+              connect: { providers: ["github"] },
               onSelect: (next) =>
                 setConfig((current) => ({
                   ...current,

@@ -1103,13 +1103,55 @@ const httpRequest: NodeHandler = (source, ctx, scope) => {
   if (secretRef) {
     config.secretRef = secretRef;
     if (authentication !== "none") {
-      reasons.push(`Authentication '${authentication}' was mapped to a secretRef placeholder; verify how the secret is applied.`);
+      const preset = httpAuthPreset(authentication, params);
+      config.secretAuth = preset.auth;
+      reasons.push(preset.reason);
     }
   }
 
   const node = baseNode(source, scope, "http_request", config);
   return reasons.length ? approximated(node, reasons) : mapped(node);
 };
+
+/** Services whose OAuth credentials become a connected account (Secrets → Connected accounts). */
+const CONNECTED_ACCOUNT_CREDENTIALS: Array<[RegExp, string, string]> = [
+  [/^slackOAuth2Api$/, "slack", "Slack"],
+  [/^(google\w*|gmail|youTube)OAuth2(Api)?$/i, "google", "Google"],
+  [/^githubOAuth2Api$/, "github", "GitHub"],
+  [/^microsoft\w*OAuth2Api$/, "microsoft", "Microsoft"],
+  [/^notionOAuth2Api$/, "notion", "Notion"]
+];
+
+/** The source HTTP node's authentication as one of the HTTP Request node's Auth choices, with what to check. */
+function httpAuthPreset(authentication: string, params: Record<string, unknown>): { auth: Record<string, unknown>; reason: string } {
+  const credentialType =
+    authentication === "genericCredentialType"
+      ? asString(params.genericAuthType)
+      : authentication === "predefinedCredentialType"
+        ? asString(params.nodeCredentialType)
+        : authentication;
+  switch (credentialType) {
+    case "httpBasicAuth":
+      return { auth: { type: "basic" }, reason: "Basic authentication: the secret must hold user:password." };
+    case "httpHeaderAuth":
+      return { auth: { type: "header", name: "X-API-Key" }, reason: "Header authentication: set the header name under Auth (the source kept it in the credential)." };
+    case "httpQueryAuth":
+      return { auth: { type: "query", name: "api_key" }, reason: "Query authentication: set the query parameter name under Auth (the source kept it in the credential)." };
+    case "httpBearerAuth":
+      return { auth: { type: "bearer" }, reason: "Bearer authentication: the secret is sent as the bearer token." };
+    case "oAuth2Api":
+      return {
+        auth: { type: "bearer" },
+        reason:
+          "OAuth2 credential: the secret is sent as a bearer token for now. For an app that signs in with its own client id and secret, choose OAuth2 client credentials under Auth; for Slack, Google, GitHub, Microsoft or Notion, choose Connected account."
+      };
+  }
+  const connected = CONNECTED_ACCOUNT_CREDENTIALS.find(([pattern]) => pattern.test(credentialType));
+  if (connected) {
+    return { auth: { type: "connected" }, reason: `${connected[2]} OAuth credential: Connect a ${connected[2]} account under Secrets and pick it under Auth.` };
+  }
+  return { auth: { type: "bearer" }, reason: `Authentication '${credentialType || authentication}' was mapped to a bearer token secret; verify how the secret is applied.` };
+}
 
 function buildJavaScriptShim(ctx: ConversionContext): string {
   const nodeIds: Record<string, string> = {};

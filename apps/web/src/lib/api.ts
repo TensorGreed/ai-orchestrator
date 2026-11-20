@@ -1,3 +1,4 @@
+import type { ConnectedAccountProviderView, ConnectedAccountView } from "@ai-orchestrator/shared";
 import type {
   McpPolicyShadowHits,
   McpPolicySimulationRequest,
@@ -1227,6 +1228,40 @@ export interface SecretListItem {
   externalKey?: string | null;
   /** 12.2 — nodes that use this secret produce sensitive output. */
   sensitiveOutput?: boolean;
+  /** A connected account (provider `oauth_account`): what may be shown about it. Never a token. */
+  connection?: ConnectedAccountView;
+}
+
+export async function fetchConnectProviders(projectId?: string) {
+  const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+  return apiRequest<{ redirectUrl: string; providers: ConnectedAccountProviderView[] }>(`/api/connect/providers${query}`);
+}
+
+export async function saveConnectApp(providerId: string, payload: { projectId: string | null; clientId: string; clientSecret?: string; tenant?: string }) {
+  return apiRequest<{ id: string; providerId: string; projectId: string | null; clientId: string }>(`/api/connect/providers/${encodeURIComponent(providerId)}/app`, {
+    method: "PUT",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function deleteConnectApp(providerId: string, projectId: string | null) {
+  const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+  return apiRequest<{ ok: true }>(`/api/connect/providers/${encodeURIComponent(providerId)}/app${query}`, { method: "DELETE" });
+}
+
+export async function startConnect(providerId: string, payload: { projectId?: string; scopeSets?: string[]; reconnectSecretId?: string }) {
+  return apiRequest<{ authorizationUrl: string; expiresAt: string; redirectUri: string }>(`/api/connect/${encodeURIComponent(providerId)}/start`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function refreshConnectedAccount(secretId: string) {
+  return apiRequest<{ id: string; connection: ConnectedAccountView }>(`/api/connect/accounts/${encodeURIComponent(secretId)}/refresh`, { method: "POST" });
+}
+
+export async function disconnectConnectedAccount(secretId: string) {
+  return apiRequest<{ ok: true; revoked: boolean }>(`/api/connect/accounts/${encodeURIComponent(secretId)}`, { method: "DELETE" });
 }
 
 export async function fetchSecrets(options: { projectId?: string } = {}) {

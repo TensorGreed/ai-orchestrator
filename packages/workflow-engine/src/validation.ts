@@ -170,6 +170,16 @@ function validateNodeConfig(workflow: Workflow): WorkflowValidationIssue[] {
           message: `HTTP Request secret sending is invalid: ${auth}.`,
           nodeId: node.id
         });
+      } else if (auth && auth.type !== "bearer" && !hasPickedSecret(config.secretRef)) {
+        issues.push({
+          code: "http_auth_secret_missing",
+          message:
+            auth.type === "connected"
+              ? "HTTP Request Auth is set to Connected account but no account is picked, so the request goes without one."
+              : "HTTP Request Auth needs a secret but none is picked, so the request goes without one.",
+          nodeId: node.id,
+          severity: "warning"
+        });
       }
     }
 
@@ -1437,6 +1447,10 @@ function validateGuardPlacement(workflow: Workflow): WorkflowValidationIssue[] {
     }
   }
   return issues;
+}
+
+function hasPickedSecret(value: unknown): boolean {
+  return typeof value === "object" && value !== null && typeof (value as { secretId?: unknown }).secretId === "string" && (value as { secretId: string }).secretId.length > 0;
 }
 
 export function validateWorkflowGraph(rawWorkflow: unknown): WorkflowValidationResult {

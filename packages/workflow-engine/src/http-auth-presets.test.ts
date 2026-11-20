@@ -8,6 +8,7 @@ import { ProviderRegistry } from "@ai-orchestrator/provider-sdk";
 import type { Workflow, WorkflowNode } from "@ai-orchestrator/shared";
 import { IN_PROCESS_CODE_SANDBOX } from "./code-sandbox";
 import { executeWorkflow, type WorkflowExecutionDependencies } from "./executor";
+import { validateWorkflowGraph as validateWorkflow } from "./validation";
 import { DEFAULT_OUTBOUND_GUARD } from "./outbound-url-guard";
 import { clearClientCredentialsTokenCache } from "./http-auth";
 import { executeTier1Node } from "./connectors/tier1-dispatch";
@@ -218,5 +219,17 @@ describe("Teams with a Microsoft account", () => {
     const { executeTier2Node } = await import("./connectors/tier2-dispatch");
     const config = { teamId: "team-1", secretRef: { secretId: "sec_ms" } };
     await expect(executeTier2Node(node("t", "teams_send_message", config), config, { templateData: {}, resolveSecret: async () => "x" })).rejects.toThrow(/both Team ID and Channel ID/);
+  });
+});
+
+describe("validation of the Auth choice", () => {
+  it("warns when a choice that needs a secret has none picked; a bare bearer choice stays quiet", () => {
+    const codes = (config: Record<string, unknown>) =>
+      validateWorkflow(workflow(config)).issues.filter((issue) => issue.code === "http_auth_secret_missing").map((issue) => issue.severity);
+    expect(codes({ secretAuth: { type: "connected" } })).toEqual(["warning"]);
+    expect(codes({ secretAuth: { type: "basic" } })).toEqual(["warning"]);
+    expect(codes({ secretAuth: { type: "bearer" } })).toEqual([]);
+    expect(codes({ secretAuth: { type: "connected" }, secretRef: { secretId: "sec_conn" } })).toEqual([]);
+    expect(codes({})).toEqual([]);
   });
 });

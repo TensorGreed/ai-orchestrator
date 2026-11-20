@@ -1798,6 +1798,90 @@ button.tag-chip:hover {
   margin-bottom: 12px;
 }
 
+.connected-accounts {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.connected-accounts .secret-item-actions {
+  margin-left: auto;
+}
+
+.connected-message.is-error {
+  color: var(--err);
+}
+
+.connected-provider-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.connected-provider {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.connected-provider-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.connected-scope-sets {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+
+.connected-scope-sets label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+}
+
+.connected-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 560px;
+}
+
+.connected-setup-steps {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.connected-redirect {
+  display: flex;
+  gap: 6px;
+}
+
+.connected-redirect input {
+  flex: 1;
+  min-width: 0;
+}
+
+.connected-account-summary,
+.connected-account-scopes {
+  flex-basis: 100%;
+  overflow-wrap: anywhere;
+}
+
 .secret-list {
   display: flex;
   flex-direction: column;
