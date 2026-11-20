@@ -1572,6 +1572,8 @@ export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentR
   /** v78 — the people a workflow is shared with (email null when the user row is gone), in user id order. */
   listWorkflowUserShares(workflowId: string): Promise<WorkflowUserShareRecord[]>;
   getWorkflowUserShare(workflowId: string, userId: string): Promise<{ accessLevel: WorkflowShareAccessLevel } | null>;
+  /** Whether a workflow of `projectId` (unset project: the default one) is shared with this person (one indexed read). */
+  hasWorkflowUserShareInProject(userId: string, projectId: string): Promise<boolean>;
   /** v78 — the workflows shared with one person (one indexed read). */
   /** The workflows shared with a user, each with its name, project and last save (one query). */
   listWorkflowsSharedToUser(

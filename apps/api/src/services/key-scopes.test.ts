@@ -53,7 +53,7 @@ describe("effective role", () => {
   });
 
   it("project RBAC sees the capped role and the project list", async () => {
-    const store = { getProjectRole: async () => null, listWorkflowShares: async () => [], listWorkflowsSharedToUser: async () => [] } as unknown as Store;
+    const store = { getProjectRole: async () => null, listWorkflowShares: async () => [], hasWorkflowUserShareInProject: async () => false } as unknown as Store;
     const rbac = new RbacService(store, "role");
     const owner: SafeUser = { id: "u", email: "e", role: "admin" };
     const viewerKey = scopedKeyUser(owner, parseKeyScopes(["role:viewer"]));

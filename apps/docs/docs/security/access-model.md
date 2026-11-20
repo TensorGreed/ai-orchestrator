@@ -94,7 +94,7 @@ See [Project access](./auth-rbac.md#project-access) before switching an existing
 | | Project share | Person share |
 |---|---|---|
 | Gives | `read` or `execute` to the members of another project | **Can view** (`read`) or **Can view and run** (`execute`) to one person |
-| Who manages it | `project:invite` in the workflow's project (who may add members), or an admin, with the member-change step-up | The same |
+| Who manages it | `project:invite` in the workflow's project (who may add members), or an admin, with the member-change step-up | A member of the workflow's project with `project:invite` (a project admin), or an admin, with the same step-up. The role `role` isolation lends a non-member does not count |
 | Running through it | Needs `workflow:execute` in the project it is shared to | Needs a role that may run (operator and up). A viewer's run share only reads |
 | Runs they see | All runs | Only their own, when the share is all they have |
 | Not allowed | Sharing to the owning project | Yourself, service accounts, people without an account (invite them first) |
@@ -128,8 +128,9 @@ from a person share gets the share's level, as anyone else would. **Can view** r
 the released version (under `role` isolation an operator with a **Can view** share no longer runs it). They cannot
 save, publish, delete, duplicate or re-share it (the API answers `403`, and the
 editor and Home hide those controls), and they see none of what is built from other people's runs: golden sets,
-evals, release-gate reasons and replay captures. Add them to the project to give them more. Nobody but an admin adds
-or changes their own project membership, so the cap cannot be lifted that way.
+evals, release-gate reasons and replay captures. Add them to the project to give them more. Only the project's own
+members with `project:invite` (and admins) add members, never with more permissions than their own membership, and
+nobody but an admin changes their own membership, so the cap cannot be lifted that way.
 
 Details: [Own runs only](./auth-rbac.md#own-runs-only).
 

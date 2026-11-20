@@ -10806,7 +10806,9 @@ export async function createApp(
       reply.code(404);
       return { error: "Project not found" };
     }
-    if (!await rbacService.can(user, project.id, "project:invite") && user.role !== "admin") {
+    // A membership that grants project:invite (or an admin): the role `role` isolation lends a non-member does not
+    // add people to a project, since a membership lifts what a person share limits someone to there.
+    if (!await rbacService.canAsMember(user, project.id, "project:invite") && user.role !== "admin") {
       reply.code(403);
       return { error: "Insufficient permissions to manage members" };
     }
@@ -10832,6 +10834,11 @@ export async function createApp(
     if (!isProjectRole(role) && role !== "custom") {
       reply.code(400);
       return { error: "role must be project_admin, editor, viewer, or custom" };
+    }
+    // Nobody but an admin gives a role with a permission their own membership does not have.
+    if (user.role !== "admin" && !(await rbacService.roleWithin(user, project.id, role as ProjectRole | "custom", parsed.data.customRoleId ?? null))) {
+      reply.code(403);
+      return { error: "You can only give a role whose permissions your own membership has." };
     }
     // 13.3 — a role that grants a deployment-wide permission (legal holds, data-subject requests) is an admin's to hand out.
     if (role === "custom" && parsed.data.customRoleId && user.role !== "admin" && (await rbacService.grantsDeploymentPermission(parsed.data.customRoleId))) {
@@ -10882,7 +10889,7 @@ export async function createApp(
         reply.code(404);
         return { error: "Project not found" };
       }
-      if (!await rbacService.can(user, project.id, "project:invite") && user.role !== "admin") {
+      if (!await rbacService.canAsMember(user, project.id, "project:invite") && user.role !== "admin") {
         reply.code(403);
         return { error: "Insufficient permissions to remove members" };
       }
@@ -11022,7 +11029,7 @@ export async function createApp(
     if (!access.ok) return denyRunAccess(reply, access);
     const workflow = access.workflow;
     // v78 — the people it is shared with are listed to whoever may manage its shares.
-    const manages = await rbacService.mayManageWorkflowShares(user, workflow);
+    const manages = await rbacService.mayManagePersonShares(user, workflow);
     return {
       shares: await rbacService.listWorkflowShares(workflow.id),
       ...(manages ? { userShares: await workflowUserShareViews(workflow.id) } : {})
@@ -11118,13 +11125,21 @@ export async function createApp(
       effectiveAccess: share.disabled || !share.role ? null : share.accessLevel === "execute" && roleMayRunWorkflows(share.role as UserRole) ? "execute" : "read"
     }));
 
-  const workflowShareManager = async (user: SafeUser, workflowId: string): Promise<{ ok: true; workflow: Workflow } | { ok: false; status: number; error: string }> => {
+  const workflowShareManager = async (
+    user: SafeUser,
+    workflowId: string,
+    people = false
+  ): Promise<{ ok: true; workflow: Workflow } | { ok: false; status: number; error: string }> => {
     // Unreadable reads as missing. A share is a membership for one workflow, so managing them takes what adding a
     // project member takes: project:invite on the owning project (and the same step-up for changes).
     const access = await runAccess.workflow(user, workflowId, "workflow:read");
     if (!access.ok) return access;
     if (!(await rbacService.mayManageWorkflowShares(user, access.workflow))) {
       return { ok: false, status: 403, error: "Only users who may invite members to the workflow's project can share it with people or other projects" };
+    }
+    // A person share decides what a non-member has in the project: only its members with project:invite (and admins).
+    if (people && !(await rbacService.mayManagePersonShares(user, access.workflow))) {
+      return { ok: false, status: 403, error: "Only members of the workflow's project who may invite members (and admins) can share it with people" };
     }
     return { ok: true, workflow: access.workflow };
   };
@@ -11179,7 +11194,7 @@ export async function createApp(
   app.get<{ Params: { id: string } }>("/api/workflows/:id/user-shares", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const managed = await workflowShareManager(user, request.params.id);
+    const managed = await workflowShareManager(user, request.params.id, true);
     if (!managed.ok) return denyRunAccess(reply, managed);
     const workflow = managed.workflow;
     return { userShares: await workflowUserShareViews(workflow.id) };
@@ -11188,7 +11203,7 @@ export async function createApp(
   app.post<{ Params: { id: string }; Body: unknown }>("/api/workflows/:id/user-shares", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const managed = await workflowShareManager(user, request.params.id);
+    const managed = await workflowShareManager(user, request.params.id, true);
     if (!managed.ok) return denyRunAccess(reply, managed);
     if (!await requireStepUp(request, reply, "project_member.change")) return;
     const workflow = managed.workflow;
@@ -11229,7 +11244,7 @@ export async function createApp(
   app.delete<{ Params: { id: string; userId: string } }>("/api/workflows/:id/user-shares/:userId", async (request, reply) => {
     const user = await requireRole(request, reply, ["viewer"]);
     if (!user) return;
-    const managed = await workflowShareManager(user, request.params.id);
+    const managed = await workflowShareManager(user, request.params.id, true);
     if (!managed.ok) return denyRunAccess(reply, managed);
     if (!await requireStepUp(request, reply, "project_member.change")) return;
     const workflow = managed.workflow;
@@ -12970,15 +12985,16 @@ export async function createApp(
       const basestring = `v0:${ts}:${rawBody}`;
       const expected = `v0=${crypto.createHmac("sha256", signingSecret).update(basestring).digest("hex")}`;
       if (!safeEqualSecret(expected, sig)) return appTriggerNotFound(reply);
-      const refused = await appTriggerRefusal(reply, target);
-      if (refused) return refused;
 
-      // URL verification challenge handshake.
+      // URL verification challenge handshake: answered for a signed request even while the trigger is off, so the
+      // Request URL can be set up before it is turned on (it starts no run).
       const body = request.body as Record<string, unknown> | undefined;
       if (body && body.type === "url_verification" && typeof body.challenge === "string") {
         reply.type("text/plain");
         return body.challenge;
       }
+      const refused = await appTriggerRefusal(reply, target);
+      if (refused) return refused;
 
       // A retry of an event already taken: Slack resends the same event_id (with X-Slack-Retry-Num) when the first answer
       // was late. Without an event_id, a retry is still one Slack says it sent before.
@@ -13069,7 +13085,15 @@ export async function createApp(
       const expected = `sha256=${crypto.createHmac("sha256", secret).update(rawBody).digest("hex")}`;
       if (!safeEqualSecret(expected, sig)) return appTriggerNotFound(reply);
       const refused = await appTriggerRefusal(reply, target);
-      if (refused) return refused;
+      if (refused) {
+        // GitHub's ping (sent when the webhook is added) is answered even while production refuses the trigger, so the
+        // webhook can be set up before it is turned on; it starts no run.
+        if (getHeaderValue(request.headers, "x-github-event") === "ping") {
+          reply.code(200);
+          return { ok: true, ping: true };
+        }
+        return refused;
+      }
       // A redelivery (the same X-GitHub-Delivery) of a delivery already taken starts no second run.
       const deliveryId = getHeaderValue(request.headers, "x-github-delivery");
       const deliveryKey = deliveryId ? `${workflow.id}:${deliveryId}` : null;
@@ -13202,16 +13226,22 @@ export async function createApp(
     "/api/webhooks/discord/:workflowId",
     { config: { rawBody: true } },
     async (request, reply) => {
+      // Discord requires 401 for a request whose signature does not check out (it probes the endpoint with bad ones), so
+      // this route answers every unverified call, an unknown workflow id included, with the same plain 401.
+      const unverified = () => {
+        reply.code(401);
+        return { error: DISCORD_UNVERIFIED_MESSAGE };
+      };
       const target = await appTriggerTarget(request.params.workflowId, "discord_trigger");
-      if (!target) return appTriggerNotFound(reply);
+      if (!target) return unverified();
       const { workflow, node: dcNode } = target;
       const rawBody = getRawRequestBody(request);
       const nodeConfig = dcNode.config as Record<string, unknown>;
       const publicKeyHex = typeof nodeConfig.publicKey === "string" ? nodeConfig.publicKey.trim() : "";
-      if (!publicKeyHex) return appTriggerNotFound(reply);
+      if (!publicKeyHex) return unverified();
       const signature = getHeaderValue(request.headers, "x-signature-ed25519");
       const timestamp = getHeaderValue(request.headers, "x-signature-timestamp");
-      if (!signature || !timestamp) return appTriggerNotFound(reply);
+      if (!signature || !timestamp) return unverified();
       let verified = false;
       try {
         const publicKey = Buffer.from(publicKeyHex, "hex");
@@ -13229,15 +13259,15 @@ export async function createApp(
       } catch {
         verified = false;
       }
-      if (!verified) return appTriggerNotFound(reply);
-      const refused = await appTriggerRefusal(reply, target);
-      if (refused) return refused;
+      if (!verified) return unverified();
 
       const body = request.body as Record<string, unknown> | undefined;
-      // Discord interactions ping — must reply with type=1 immediately.
+      // Discord interactions ping — must reply with type=1 immediately (even while the trigger is off: it starts no run).
       if (body && body.type === 1) {
         return { type: 1 };
       }
+      const refused = await appTriggerRefusal(reply, target);
+      if (refused) return refused;
       const executionId = crypto.randomUUID();
       const result = await runDispatcher.run(
         {
@@ -14086,6 +14116,8 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
   /** What an app trigger route answers to anything but a verified call to a live trigger (see appTriggerTarget). */
 const APP_TRIGGER_NOT_FOUND_MESSAGE = "Not found";
+/** The Discord route's answer to every call it could not verify (Discord expects 401 there). */
+const DISCORD_UNVERIFIED_MESSAGE = "Invalid request signature";
 const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and method";
   const WEBHOOK_TEST_DRAFT_MESSAGE =
     "The test URL runs the draft, which needs a builder role and edit access to the workflow. Call the webhook's own URL to run the released version.";
@@ -14114,7 +14146,15 @@ const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and meth
       }
     };
     const pageOrigin = originOf(getHeaderValue(headers, "origin")) ?? originOf(getHeaderValue(headers, "referer"));
-    if (pageOrigin !== null) return pageOrigin === originOf(ownOrigin) || allowedOrigins.has(pageOrigin);
+    if (pageOrigin !== null) {
+      if (allowedOrigins.has(pageOrigin)) return true;
+      // This server's own page: the same host (the scheme may differ behind a proxy that ends TLS).
+      try {
+        return pageOrigin !== "null" && new URL(pageOrigin).host === new URL(ownOrigin).host;
+      } catch {
+        return false;
+      }
+    }
     const site = getHeaderValue(headers, "sec-fetch-site");
     return site === "" || site === "same-origin" || site === "none";
   };
@@ -15045,6 +15085,22 @@ const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and meth
     runtime: runtimeStateView(server.id, user)
   });
 
+  /**
+   * Whether a builder may see a registry MCP server: one with no project is deployment-wide; one assigned to a project
+   * needs `workflow:read` there (a membership, or the role `role` isolation lends; not a person share alone).
+   */
+  const mayReadMcpServer = async (user: SafeUser, server: { projectId: string | null }): Promise<boolean> =>
+    user.role === "admin" || server.projectId === null || (await rbacService.can(user, server.projectId, "workflow:read"));
+  /** The server, or null (answered 404) when it does not exist or the caller may not see it. */
+  const readableMcpServer = async (user: SafeUser, id: string, reply: FastifyReply) => {
+    const server = await store.getMcpServer(id);
+    if (!server || !(await mayReadMcpServer(user, server))) {
+      reply.code(404);
+      return null;
+    }
+    return server;
+  };
+
   app.get("/api/mcp/servers", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
@@ -15059,12 +15115,13 @@ const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and meth
       defaultProbeIntervalMs: mcpProbeService.defaultIntervalMs,
       sandboxPolicy: sandboxPolicyView()
     });
+    const visibleServers = await filterAsync(await store.listMcpServers({ projectId: query?.projectId }), (server) => mayReadMcpServer(user, server));
     if (pageRequest) {
-      const page = pageOfById(await store.listMcpServers({ projectId: query?.projectId }), pageRequest, (server) => server.name);
+      const page = pageOfById(visibleServers, pageRequest, (server) => server.name);
       return { ...page, items: await mapAsync(page.items, (server) => mcpServerSummary(server, user)), ...extras() };
     }
     return {
-      servers: await mapAsync(await store.listMcpServers({ projectId: query?.projectId }), (server) => mcpServerSummary(server, user)),
+      servers: await mapAsync(visibleServers, (server) => mcpServerSummary(server, user)),
       ...extras()
     };
   });
@@ -15072,29 +15129,24 @@ const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and meth
   app.get<{ Params: { id: string } }>("/api/mcp/servers/:id", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const server = await store.getMcpServer(request.params.id);
-    if (!server) {
-      reply.code(404);
-      return { error: "MCP server not found" };
-    }
+    const server = await readableMcpServer(user, request.params.id, reply);
+    if (!server) return { error: "MCP server not found" };
     return {
       server: await mcpServerSummary(server, user),
       sandboxPolicy: sandboxPolicyView(),
       probes: await store.listMcpServerProbes(server.id, 50),
       // Snapshot list without the tool bodies; fetch one snapshot for those.
       snapshots: (await store.listMcpToolSnapshots(server.id, 20)).map(({ tools: _tools, ...snapshot }) => snapshot),
-      usages: await listMcpServerUsages(store, server.id)
+      // Only the workflows the caller may read.
+      usages: await filterAsync(await listMcpServerUsages(store, server.id), async (usage) => (await runAccess.workflow(user, usage.workflowId, "workflow:read")).ok)
     };
   });
 
   app.get<{ Params: { id: string } }>("/api/mcp/servers/:id/tools", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const server = await store.getMcpServer(request.params.id);
-    if (!server) {
-      reply.code(404);
-      return { error: "MCP server not found" };
-    }
+    const server = await readableMcpServer(user, request.params.id, reply);
+    if (!server) return { error: "MCP server not found" };
     const snapshot = server.currentSnapshotId ? await store.getMcpToolSnapshot(server.currentSnapshotId) : null;
     const query = request.query as { projectId?: unknown } | undefined;
     const projectId =
@@ -15124,6 +15176,7 @@ const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and meth
     async (request, reply) => {
       const user = await requireRole(request, reply, ["builder"]);
       if (!user) return;
+      if (!(await readableMcpServer(user, request.params.id, reply))) return { error: "Snapshot not found" };
       const snapshot = await store.getMcpToolSnapshot(request.params.snapshotId);
       if (!snapshot || snapshot.serverId !== request.params.id) {
         reply.code(404);
@@ -15150,11 +15203,8 @@ const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and meth
     if (!user) return;
     const range = resolveTelemetryWindow(request, reply);
     if (!range) return telemetryWindowError;
-    const server = await store.getMcpServer(request.params.id);
-    if (!server) {
-      reply.code(404);
-      return { error: "MCP server not found" };
-    }
+    const server = await readableMcpServer(user, request.params.id, reply);
+    if (!server) return { error: "MCP server not found" };
     const rollup = rollupMcpToolCalls(await store.listMcpToolCalls({ registryServerId: server.id, since: range.since }));
     return { serverId: server.id, window: range.window, since: range.since, ...rollup };
   });
@@ -15471,11 +15521,8 @@ const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and meth
   app.get<{ Params: { id: string } }>("/api/mcp/servers/:id/runtime", async (request, reply) => {
     const user = await requireRole(request, reply, ["builder"]);
     if (!user) return;
-    const server = await store.getMcpServer(request.params.id);
-    if (!server) {
-      reply.code(404);
-      return { error: "MCP server not found" };
-    }
+    const server = await readableMcpServer(user, request.params.id, reply);
+    if (!server) return { error: "MCP server not found" };
     return { runtime: runtimeStateView(server.id, user), limits: server.limits, sandboxStatus: server.sandboxStatus };
   });
 

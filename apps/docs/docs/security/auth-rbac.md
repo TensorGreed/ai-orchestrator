@@ -183,7 +183,9 @@ in `MFA_REQUIRED_ROLES`, see [MFA required per role](#mfa-required-per-role)).
   is emailed; otherwise the dialog shows it once to copy and pass on.
 - **Project members by email.** Settings, Project Members adds a member by email (admins pick from the deployment's
   users). `POST /api/projects/:id/members` takes `{ "email": "..." }` in place of `userId`, and the member list carries
-  each member's `email`. Nobody but an admin adds or changes their own membership (`403`).
+  each member's `email`. Adding and removing members takes a membership with `project:invite` (or an admin); the
+  role `role` isolation lends a non-member does not count. A non-admin gives only roles whose permissions their own
+  membership has, and nobody but an admin adds or changes their own membership (`403`).
 - **What the editor shows.** Viewers and operators open workflows read-only: Save, Add node and Clear are disabled, and
   their tooltip says why; viewers cannot run. Operators run the released version where they have `workflow:execute`
   (Run and Webhook run). A builder sees the same for a workflow they may only view (one shared with them, or in a
@@ -244,8 +246,8 @@ erases them (see [Data-subject requests](./data-subject-requests.md)).
 Besides sharing a workflow with another project, a workflow can be shared with a person, from **Share…** in the editor
 or `POST /api/workflows/:id/user-shares` with `{ "email": "...", "accessLevel": "read" | "execute" }`.
 
-- **Who shares.** Whoever may add members to the workflow's own project (`project:invite`: project admins, builders
-  without a membership there in `role` isolation, and admins), with the same step-up as adding a member
+- **Who shares.** Members of the workflow's own project who may add members (`project:invite`: project admins), and
+  admins, with the same step-up as adding a member
   (`project_member.change`). A project editor may change the workflow but not open it to people. The person must have
   an account (invite them first); service accounts and yourself are refused.
 - **What it gives.** `read`: they find it under **Shared with you** on the Workflows page, open it and read their own
@@ -459,7 +461,9 @@ its own project, whichever trigger started it:
   Admins are exempt from `secret:use`, not from the project rule. Provider,
   connector and MCP test and discovery routes only resolve a secret the caller
   has `secret:use` for in the secret's project or a project it is shared to.
-- **Registry MCP servers.** A server assigned to a project can only be used by
+- **Registry MCP servers.** A server assigned to a project is listed and opened (`GET /api/mcp/servers`, `/:id`,
+  its tools, snapshots, telemetry and runtime) only for people who may read that project; its "used by" list names
+  only workflows the caller may read. A server assigned to a project can only be used by
   that project's workflows ("MCP server 'id' belongs to another project");
   servers with no project are deployment-wide, and default-project servers
   count as shared in `role` isolation only. The server's own `secretRef`

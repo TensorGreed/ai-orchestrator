@@ -12,10 +12,7 @@ const store = {
   getWorkflowUserShare: async (workflowId: string, userId: string) => (shares[`${workflowId}|${userId}`] ? { accessLevel: shares[`${workflowId}|${userId}`] } : null),
   getProjectRole: async () => null,
   listWorkflowShares: async () => [],
-  listWorkflowsSharedToUser: async (userId: string) =>
-    Object.entries(shares)
-      .filter(([key]) => key.endsWith(`|${userId}`))
-      .map(([key, accessLevel]) => ({ workflowId: key.split("|")[0]!, accessLevel, name: "x", projectId: "team", updatedAt: null }))
+  hasWorkflowUserShareInProject: async (userId: string, projectId: string) => projectId === "team" && Object.keys(shares).some((key) => key.endsWith(`|${userId}`))
 } as unknown as Store;
 
 const user = (role: SafeUser["role"], extra: Partial<SafeUser> = {}): SafeUser => ({ id: `u-${role}`, email: `${role}@x`, role, ...extra });
@@ -116,5 +113,32 @@ describe("a person share caps the person at the share under role isolation", () 
 describe("permissions", () => {
   it("lists only permissions something checks (no role:manage)", () => {
     expect(ALL_PERMISSIONS).not.toContain("role:manage");
+  });
+});
+
+describe("who gives project roles", () => {
+  it("a member gives only roles whose permissions their own membership has; a non-member gives none", async () => {
+    const rbac = new RbacService(
+      { ...store, getProjectRole: async (userId: string, projectId: string) => (userId === "u-builder" && projectId === "team" ? { userId, projectId, role: "editor", customRoleId: null } : null) } as unknown as Store,
+      "role"
+    );
+    expect(await rbac.roleWithin(user("builder"), "team", "viewer", null)).toBe(true);
+    expect(await rbac.roleWithin(user("builder"), "team", "editor", null)).toBe(true);
+    expect(await rbac.roleWithin(user("builder"), "team", "project_admin", null)).toBe(false);
+    expect(await rbac.roleWithin(user("operator"), "team", "viewer", null)).toBe(false);
+  });
+
+  it("only a member with project:invite (or an admin) manages person shares", async () => {
+    const rbac = new RbacService(
+      { ...store, hasWorkflowUserShareInProject: async () => false, getProjectRole: async (userId: string, projectId: string) => (userId === "u-builder" && projectId === "team" ? { userId, projectId, role: "project_admin", customRoleId: null } : null) } as unknown as Store,
+      "role"
+    );
+    const other = { id: "other", projectId: "team" };
+    expect(await rbac.mayManagePersonShares(user("builder"), other)).toBe(true);
+    expect(await rbac.mayManagePersonShares(user("admin"), other)).toBe(true);
+    // Role isolation lends another builder project:invite, which still manages project shares but not person shares.
+    const lent = { ...user("builder"), id: "u-lent" };
+    expect(await rbac.mayManageWorkflowShares(lent, other)).toBe(true);
+    expect(await rbac.mayManagePersonShares(lent, other)).toBe(false);
   });
 });

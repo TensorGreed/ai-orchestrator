@@ -155,6 +155,21 @@ export class RbacService {
     });
   }
 
+  /** Whether every permission of a project role (or custom role) is one the user's own membership of the project has. */
+  async roleWithin(user: SafeUser, projectId: string, role: ProjectRole | "custom", customRoleId: string | null): Promise<boolean> {
+    const membership = await this.getMembership(user.id, projectId);
+    if (!membership) return false;
+    let granted: readonly Permission[];
+    if (role === "custom") {
+      const custom = customRoleId ? await this.store.getCustomRole(customRoleId) : null;
+      if (!custom) return true; // addMember refuses an unknown custom role with its own message.
+      granted = custom.permissions as Permission[];
+    } else {
+      granted = PROJECT_ROLE_PERMISSIONS[role];
+    }
+    return granted.every((permission) => membership.permissions.includes(permission));
+  }
+
   async removeMember(userId: string, projectId: string): Promise<boolean> {
     return await this.store.removeProjectRole(userId, projectId);
   }
@@ -285,7 +300,7 @@ export class RbacService {
 
   /** Whether a workflow of `projectId` is shared with this person (a person share, not a share to a project). */
   private async hasPersonShareIn(userId: string, projectId: string): Promise<boolean> {
-    return (await this.store.listWorkflowsSharedToUser(userId)).some((share) => share.projectId === projectId);
+    return await this.store.hasWorkflowUserShareInProject(userId, projectId);
   }
 
   async can(user: SafeUser, projectId: string, permission: Permission): Promise<boolean> {
@@ -374,6 +389,16 @@ export class RbacService {
     const share = await this.store.getWorkflowUserShare(workflow.id, user.id);
     if (!share) return null;
     return share.accessLevel === "execute" && roleMayRunWorkflows(user.role) ? "execute" : "read";
+  }
+
+  /**
+   * Who may share a workflow with a person, list its person shares and remove them: mayManageWorkflowShares, through a
+   * membership that grants project:invite (or as an admin), never the role `role` isolation lends a non-member. A person
+   * share is all a non-member has in the workflow's project, so only the project's own people hand one out.
+   */
+  async mayManagePersonShares(user: SafeUser, workflow: { id?: string; projectId?: string | null }): Promise<boolean> {
+    if (!await this.mayManageWorkflowShares(user, workflow)) return false;
+    return await this.canAsMember(user, workflow.projectId ?? DEFAULT_PROJECT_ID, "project:invite");
   }
 
   /**

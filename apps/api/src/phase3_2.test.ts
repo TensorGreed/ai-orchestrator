@@ -551,7 +551,7 @@ describe("Phase 3.2 — Telegram webhook secret-token validation", () => {
     expect(off.statusCode).toBe(404);
     expect(off.json()).toMatchObject({ code: "trigger_off", error: expect.stringMatching(/trigger is turned off/) });
     // The other app routes answer an unknown id the same way.
-    for (const app of ["slack", "github", "stripe", "discord"]) {
+    for (const app of ["slack", "github", "stripe"]) {
       const response = await ctx.app.inject({ method: "POST", url: `/api/webhooks/${app}/no-such-workflow`, payload: {} });
       expect(response.statusCode, app).toBe(404);
       expect(response.json(), app).toEqual({ error: "Not found" });
@@ -630,7 +630,11 @@ describe("Phase 3.2 — Discord Ed25519 signature validation", () => {
       },
       payload: JSON.stringify({ type: 1, extra: "tampered" })
     });
-    expect(tampered.statusCode).toBe(404);
+    // Discord expects 401 for a signature that does not check out; an unknown workflow id answers the same.
+    expect(tampered.statusCode).toBe(401);
+    const unknown = await ctx.app.inject({ method: "POST", url: "/api/webhooks/discord/no-such-workflow", payload: {} });
+    expect(unknown.statusCode).toBe(401);
+    expect(unknown.json()).toEqual(tampered.json());
   });
 });
 

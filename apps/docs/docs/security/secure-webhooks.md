@@ -46,12 +46,14 @@ Auth Mode in its settings.
 - Each trigger needs its secret (Slack, Stripe: signing secret; GitHub: webhook secret; Telegram: secret token,
   sent in `X-Telegram-Bot-Api-Secret-Token` when you register the webhook with `secret_token`; Discord: public key).
 - An unknown workflow id, a workflow without that trigger, a trigger with no secret set, and a call whose signature,
-  token or timestamp does not check out all get the same plain `404` (`{"error": "Not found"}`). The route never says
+  token or timestamp does not check out all get the same plain `404` (`{"error": "Not found"}`); Discord, which requires
+  `401` for a bad signature, gets the same plain `401` for all of these. The route never says
   which workflow ids exist or which triggers lack a secret. Check the provider's delivery log for a `404` when you set
   one up: it usually means the secret does not match.
 - Once the signature checks out: a trigger switched off (**Live calls** under **More**) answers `404` with
   `"code": "trigger_off"`, a deactivated gated workflow `409`, and a version with unfinished settings `409`
-  `workflow_unfinished`.
+  `workflow_unfinished`. Slack's URL verification, GitHub's ping and Discord's ping are still answered then (they start
+  no run), so you can connect a trigger before turning it on.
 
 ## Production webhook answers
 

@@ -8908,6 +8908,15 @@ export class SqliteStore implements Store {
     return row ? { accessLevel: toString(row.access_level) === "execute" ? "execute" : "read" } : null;
   }
 
+  async hasWorkflowUserShareInProject(userId: string, projectId: string): Promise<boolean> {
+    const row = this.queryOne<{ found: number }>(
+      `SELECT 1 AS found FROM workflow_user_shares s JOIN workflows w ON w.id = s.workflow_id
+        WHERE s.user_id = ? AND COALESCE(w.project_id, ?) = ? LIMIT 1`,
+      [userId, DEFAULT_PROJECT_ID, projectId]
+    );
+    return row !== null && row !== undefined;
+  }
+
   async listWorkflowsSharedToUser(userId: string): ReturnType<Store["listWorkflowsSharedToUser"]> {
     const rows = this.queryAll<{ workflow_id: string; access_level: string; name: string; project_id: string | null; updated_at: string | null }>(
       `SELECT s.workflow_id, s.access_level, w.name, w.project_id, w.updated_at
