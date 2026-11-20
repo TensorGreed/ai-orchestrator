@@ -2,7 +2,7 @@ name: Image vulnerability scan
 
 # Weekly Grype scan of the published images, so findings that appear after a release (new CVEs against packages
 # already shipped) reach code scanning without waiting for the next tag. Scans every platform image of
-# ghcr.io/tensorgreed/ai-orchestrator and ghcr.io/tensorgreed/ai-orchestrator-web at the given tag (latest by
+# ghcr.io/tensorgreed/l2m and ghcr.io/tensorgreed/l2m-web at the given tag (latest by
 # default), uploads SARIF under the same categories as the release scan, and applies the same gate as the release
 # workflow: the run fails on a fixable CRITICAL finding. An image that has not been published yet is skipped.
 
@@ -39,9 +39,9 @@ jobs:
       matrix:
         image:
           - name: api
-            repository: ai-orchestrator
+            repository: l2m
           - name: web
-            repository: ai-orchestrator-web
+            repository: l2m-web
     env:
       IMAGE: ghcr.io/tensorgreed/${{ matrix.image.repository }}
       TAG: ${{ inputs.tag || 'latest' }}

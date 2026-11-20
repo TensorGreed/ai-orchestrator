@@ -1,4 +1,4 @@
-# ai-orchestrator Helm chart
+# L2M Helm chart
 
 Kubernetes deployment for the Fastify API, Studio web UI, and (optionally) dedicated webhook-only replicas.
 
@@ -6,8 +6,8 @@ Kubernetes deployment for the Fastify API, Studio web UI, and (optionally) dedic
 
 The chart's default `image.repository` values point at GHCR images published by [.github/workflows/release-images.yml](../../../.github/workflows/release-images.yml) on every `v*` git tag (e.g. `v0.1.0`):
 
-- `ghcr.io/tensorgreed/ai-orchestrator:<tag>` — the API (Fastify)
-- `ghcr.io/tensorgreed/ai-orchestrator-web:<tag>` — the Studio UI (Nginx)
+- `ghcr.io/tensorgreed/l2m:<tag>` — the API (Fastify)
+- `ghcr.io/tensorgreed/l2m-web:<tag>` — the Studio UI (Nginx)
 
 Both images are multi-arch (`linux/amd64` + `linux/arm64`), so M-series Macs and AWS Graviton nodes get the right architecture without emulation. Pin a specific tag in production via `--set image.tag=v0.1.0 --set web.image.tag=v0.1.0` instead of `latest`.
 
@@ -19,15 +19,15 @@ Each release image is signed (keyless cosign) and carries SLSA build provenance 
 # Generate a master key for secret encryption at rest.
 MASTER_KEY=$(node -e "console.log(require('crypto').randomBytes(32).toString('base64'))")
 
-helm install ao ./ops/helm/ai-orchestrator \
-  --set image.repository=ghcr.io/your-org/ai-orchestrator \
+helm install ao ./ops/helm/l2m \
+  --set image.repository=ghcr.io/your-org/l2m \
   --set image.tag=latest \
   --set secrets.secretMasterKeyBase64="$MASTER_KEY" \
   --set secrets.databaseUrl="postgresql://ao:pass@postgres:5432/ai_orchestrator" \
   --set api.replicaCount=3 \
   --set api.haEnabled=true \
   --set ingress.enabled=true \
-  --set ingress.hosts[0].host=ai-orchestrator.example.com
+  --set ingress.hosts[0].host=l2m.example.com
 ```
 
 ## Architecture
@@ -91,7 +91,7 @@ The chart defaults (`api.replicaCount: 2`, `api.haEnabled: true`) assume Postgre
 Optional `worker` replicas (`WORKER_MODE=worker`) claim and run queued runs and take the leader work; the API replicas then only serve HTTP. Disabled by default: without `worker.enabled` the chart renders as before. Workers need cluster mode (Postgres and `api.haEnabled=true`); the chart refuses `worker.enabled` with HA off or without `config.DB_TYPE=postgres`.
 
 ```bash
-helm upgrade ao ./ops/helm/ai-orchestrator \
+helm upgrade ao ./ops/helm/l2m \
   --set api.workerMode=api \
   --set worker.enabled=true \
   --set worker.replicaCount=4 \
@@ -115,7 +115,7 @@ Readiness probes use `/ready` (503 while an instance drains on SIGTERM); livenes
 Enable dedicated webhook replicas:
 
 ```bash
-helm upgrade ao ./ops/helm/ai-orchestrator \
+helm upgrade ao ./ops/helm/l2m \
   --set webhook.enabled=true \
   --set webhook.replicaCount=3 \
   --set autoscaling.enabled=true \

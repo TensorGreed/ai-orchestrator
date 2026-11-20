@@ -31,7 +31,7 @@ A **Webhook Input** node at `POST /webhook/agent-demo` passes `system_prompt`, `
 
 ## Steps
 
-1. Download <a href="/docs/recipes/files/agentic-mcp-flow.json" download>agentic-mcp-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/agentic-mcp-flow.json).
+1. Download <a href="/docs/recipes/files/agentic-mcp-flow.json" download>agentic-mcp-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/agentic-mcp-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
 3. To try the webhook and memory, keep the built-in Echo model. For real answers and tool calls, open the chat model node, pick a provider in the **Provider** list (OpenAI, Anthropic, Gemini, Azure OpenAI, an OpenAI-compatible server or Ollama), set the model and, for a hosted provider, its key, then save. **Load models** lists the models the provider offers. For Ollama in Docker, `localhost` is the container: use `http://host.docker.internal:11434/v1` for Ollama on the host (on Linux, add `extra_hosts: ["host.docker.internal:host-gateway"]` to the `api` service).
 4. Send a request:

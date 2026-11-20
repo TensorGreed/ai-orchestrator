@@ -2192,7 +2192,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
       authType: "webhook",
       webhookUrl: "https://hooks.slack.com/services/T000/B000/XXX",
       channel: "#general",
-      text: "Hello from ai-orchestrator {{user_prompt}}"
+      text: "Hello from L2M {{user_prompt}}"
     }
   },
   {
@@ -2911,7 +2911,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     },
     sampleConfig: {
       webhookUrl: "https://outlook.office.com/webhook/...",
-      text: "Hello from ai-orchestrator {{user_prompt}}",
+      text: "Hello from L2M {{user_prompt}}",
       title: "Notification",
       themeColor: "0078D4"
     }
@@ -3176,7 +3176,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     },
     sampleConfig: {
       email: "{{user_prompt}}",
-      name: "Customer from ai-orchestrator"
+      name: "Customer from L2M"
     }
   },
   {
@@ -3199,7 +3199,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     sampleConfig: {
       amount: 1000,
       currency: "usd",
-      description: "Charge from ai-orchestrator"
+      description: "Charge from L2M"
     }
   },
   {
@@ -3310,7 +3310,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     },
     sampleConfig: {
       chatId: "@my_channel",
-      text: "Hello from ai-orchestrator {{user_prompt}}",
+      text: "Hello from L2M {{user_prompt}}",
       parseMode: "Markdown"
     }
   },
@@ -3350,7 +3350,7 @@ const baseNodeDefinitions: NodeDefinition[] = [
     },
     sampleConfig: {
       webhookUrl: "https://discord.com/api/webhooks/.../.../",
-      content: "Notification from ai-orchestrator: {{user_prompt}}",
+      content: "Notification from L2M: {{user_prompt}}",
       username: "orchestrator-bot"
     }
   },

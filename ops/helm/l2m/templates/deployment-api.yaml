@@ -1,15 +1,15 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "ai-orchestrator.fullname" . }}-api
+  name: {{ include "l2m.fullname" . }}-api
   labels:
-    {{- include "ai-orchestrator.labels" . | nindent 4 }}
+    {{- include "l2m.labels" . | nindent 4 }}
     app.kubernetes.io/component: api
 spec:
   replicas: {{ .Values.api.replicaCount }}
   selector:
     matchLabels:
-      {{- include "ai-orchestrator.selectorLabels" . | nindent 6 }}
+      {{- include "l2m.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: api
   strategy:
     type: RollingUpdate
@@ -19,15 +19,15 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "ai-orchestrator.selectorLabels" . | nindent 8 }}
+        {{- include "l2m.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: api
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "4000"
         prometheus.io/path: "/metrics"
     spec:
-      serviceAccountName: {{ include "ai-orchestrator.serviceAccountName" . }}
-      {{- with include "ai-orchestrator.terminationGracePeriod" (dict "root" $ "explicit" .Values.api.terminationGracePeriodSeconds) }}
+      serviceAccountName: {{ include "l2m.serviceAccountName" . }}
+      {{- with include "l2m.terminationGracePeriod" (dict "root" $ "explicit" .Values.api.terminationGracePeriodSeconds) }}
       terminationGracePeriodSeconds: {{ . }}
       {{- end }}
       {{- with .Values.imagePullSecrets }}
@@ -57,9 +57,9 @@ spec:
                   fieldPath: metadata.name
           envFrom:
             - configMapRef:
-                name: {{ include "ai-orchestrator.configMapName" . }}
+                name: {{ include "l2m.configMapName" . }}
             - secretRef:
-                name: {{ include "ai-orchestrator.secretName" . }}
+                name: {{ include "l2m.secretName" . }}
           livenessProbe:
             {{- toYaml .Values.api.livenessProbe | nindent 12 }}
           readinessProbe:
@@ -77,7 +77,7 @@ spec:
         - name: data
           {{- if .Values.api.persistence.enabled }}
           persistentVolumeClaim:
-            claimName: {{ default (printf "%s-api-data" (include "ai-orchestrator.fullname" .)) .Values.api.persistence.existingClaim }}
+            claimName: {{ default (printf "%s-api-data" (include "l2m.fullname" .)) .Values.api.persistence.existingClaim }}
           {{- else }}
           emptyDir: {}
           {{- end }}
@@ -85,9 +85,9 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "ai-orchestrator.fullname" . }}-api
+  name: {{ include "l2m.fullname" . }}-api
   labels:
-    {{- include "ai-orchestrator.labels" . | nindent 4 }}
+    {{- include "l2m.labels" . | nindent 4 }}
     app.kubernetes.io/component: api
 spec:
   type: {{ .Values.api.service.type }}
@@ -97,5 +97,5 @@ spec:
       protocol: TCP
       name: http
   selector:
-    {{- include "ai-orchestrator.selectorLabels" . | nindent 4 }}
+    {{- include "l2m.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: api

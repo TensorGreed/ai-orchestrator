@@ -8,8 +8,8 @@ body:
         Thanks for taking the time to report. Please give us enough detail to reproduce — silent "doesn't work" reports rarely move forward.
 
         **Not a bug?**
-        - Question or design discussion → [GitHub Discussions](https://github.com/TensorGreed/ai-orchestrator/discussions)
-        - Security vulnerability → [private advisory](https://github.com/TensorGreed/ai-orchestrator/security/advisories/new) (do not open a public issue)
+        - Question or design discussion → [GitHub Discussions](https://github.com/TensorGreed/l2m/discussions)
+        - Security vulnerability → [private advisory](https://github.com/TensorGreed/l2m/security/advisories/new) (do not open a public issue)
 
   - type: textarea
     id: what-happened
@@ -109,9 +109,9 @@ body:
     attributes:
       label: Pre-flight checklist
       options:
-        - label: I searched [existing issues](https://github.com/TensorGreed/ai-orchestrator/issues?q=is%3Aissue) and didn't find a duplicate.
+        - label: I searched [existing issues](https://github.com/TensorGreed/l2m/issues?q=is%3Aissue) and didn't find a duplicate.
           required: true
         - label: I'm running a recent commit (within the last 30 days) or a tagged release.
           required: true
-        - label: This isn't a security vulnerability (those go through [private advisories](https://github.com/TensorGreed/ai-orchestrator/security/advisories/new)).
+        - label: This isn't a security vulnerability (those go through [private advisories](https://github.com/TensorGreed/l2m/security/advisories/new)).
           required: true

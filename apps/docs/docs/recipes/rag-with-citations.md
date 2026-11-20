@@ -31,7 +31,7 @@ related: ["grounding","rag","hybrid-search","output-checks","misinformation"]
 
 ## Steps
 
-1. Download <a href="/docs/recipes/files/rag-with-citations-flow.json" download>rag-with-citations-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/rag-with-citations-flow.json).
+1. Download <a href="/docs/recipes/files/rag-with-citations-flow.json" download>rag-with-citations-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/rag-with-citations-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
 3. Create a knowledge base and add a document, as in the [knowledge base recipe](/recipes/rag-knowledge-base#create-a-knowledge-base-with-the-api). Create it with the embedder the **Retrieve** node uses: `openai-embedder` as shipped, or `token-embedder` to start with no key.
 4. With no OpenAI key, use echo for the **LLM** node. The **Provider** list has no echo entry, so set the node's `providerId` to `echo` in the JSON file and import it again before you edit the nodes below.

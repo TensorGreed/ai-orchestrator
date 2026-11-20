@@ -51,7 +51,7 @@ x-l2m-env: &l2m-env
 
 services:
   api:
-    image: ghcr.io/tensorgreed/ai-orchestrator:latest
+    image: ghcr.io/tensorgreed/l2m:latest
     environment:
       <<: *l2m-env
       WORKER_MODE: api
@@ -60,7 +60,7 @@ services:
     stop_grace_period: 30s
 
   worker:
-    image: ghcr.io/tensorgreed/ai-orchestrator:latest
+    image: ghcr.io/tensorgreed/l2m:latest
     environment:
       <<: *l2m-env
       WORKER_MODE: worker
@@ -77,7 +77,7 @@ The repository's `docker-compose.scale.yml` is a complete version of this layout
 harness below.
 
 On Kubernetes, the Helm chart has the same layout behind `worker.enabled=true` and `api.workerMode=api`
-(`ops/helm/ai-orchestrator`, see its README). The chart uses `/ready` for readiness and sizes
+(`ops/helm/l2m`, see its README). The chart uses `/ready` for readiness and sizes
 `terminationGracePeriodSeconds` from `SHUTDOWN_DRAIN_MS`.
 
 ## Connection budget

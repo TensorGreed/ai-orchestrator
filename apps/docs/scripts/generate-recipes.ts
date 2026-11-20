@@ -28,7 +28,7 @@ const SAMPLES = path.join(REPO, "samples", "workflows");
 const OUT_DIR = path.join(DOCS_APP, "docs", "recipes");
 const FILES_DIR = path.join(DOCS_APP, "docs", "public", "recipes", "files");
 const DEMO_FIXTURES = path.join(REPO, "apps", "web", "src", "demo", "fixtures");
-const GITHUB_SAMPLES = "https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/";
+const GITHUB_SAMPLES = "https://github.com/TensorGreed/l2m/blob/main/samples/workflows/";
 
 const PORTS = new Set(["chat_model", "memory", "tool", "worker"]);
 const PORT_LABELS: Record<string, string> = { chat_model: "chat model", memory: "memory", tool: "tool", worker: "worker" };

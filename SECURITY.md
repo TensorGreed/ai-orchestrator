@@ -4,7 +4,7 @@
 
 **Please do not open a public issue for security vulnerabilities.**
 
-Use [GitHub's private vulnerability reporting](https://github.com/TensorGreed/ai-orchestrator/security/advisories/new) to report security issues confidentially. The maintainers will:
+Use [GitHub's private vulnerability reporting](https://github.com/TensorGreed/l2m/security/advisories/new) to report security issues confidentially. The maintainers will:
 
 1. Acknowledge receipt within **72 hours**.
 2. Triage the report, assess severity (CVSS), and confirm or dispute the finding within **7 days**.
@@ -34,7 +34,7 @@ Out of scope:
 
 ## Verifying releases
 
-Every `v*` release publishes `ghcr.io/tensorgreed/ai-orchestrator` (API) and `ghcr.io/tensorgreed/ai-orchestrator-web` (Studio UI) for `linux/amd64` and `linux/arm64`, built by [`.github/workflows/release-images.yml`](.github/workflows/release-images.yml). Nothing is signed with a long-lived key: signatures and attestations use short-lived Sigstore certificates issued to that workflow through GitHub Actions OIDC, and are recorded in the public Rekor transparency log. For each image:
+Every `v*` release publishes `ghcr.io/tensorgreed/l2m` (API) and `ghcr.io/tensorgreed/l2m-web` (Studio UI) for `linux/amd64` and `linux/arm64`, built by [`.github/workflows/release-images.yml`](.github/workflows/release-images.yml). Nothing is signed with a long-lived key: signatures and attestations use short-lived Sigstore certificates issued to that workflow through GitHub Actions OIDC, and are recorded in the public Rekor transparency log. For each image:
 
 - a **cosign signature** on the image digest the release tag points to;
 - **SLSA build provenance** for that digest (repository, tag, commit, workflow run), stored by GitHub and in GHCR;
@@ -44,19 +44,19 @@ The GitHub Release carries the CycloneDX SBOMs of both images and of the source 
 
 ```bash
 VERSION=v0.1.0
-DIGEST=$(docker buildx imagetools inspect ghcr.io/tensorgreed/ai-orchestrator:$VERSION --format '{{json .Manifest.Digest}}' | tr -d '"')
+DIGEST=$(docker buildx imagetools inspect ghcr.io/tensorgreed/l2m:$VERSION --format '{{json .Manifest.Digest}}' | tr -d '"')
 
-cosign verify ghcr.io/tensorgreed/ai-orchestrator@$DIGEST \
-  --certificate-identity "https://github.com/TensorGreed/ai-orchestrator/.github/workflows/release-images.yml@refs/tags/$VERSION" \
+cosign verify ghcr.io/tensorgreed/l2m@$DIGEST \
+  --certificate-identity "https://github.com/TensorGreed/l2m/.github/workflows/release-images.yml@refs/tags/$VERSION" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
-gh attestation verify oci://ghcr.io/tensorgreed/ai-orchestrator@$DIGEST \
-  --repo TensorGreed/ai-orchestrator \
-  --signer-workflow TensorGreed/ai-orchestrator/.github/workflows/release-images.yml \
+gh attestation verify oci://ghcr.io/tensorgreed/l2m@$DIGEST \
+  --repo TensorGreed/l2m \
+  --signer-workflow TensorGreed/l2m/.github/workflows/release-images.yml \
   --source-ref refs/tags/$VERSION
 ```
 
-Any release tag matches `--certificate-identity-regexp '^https://github\.com/TensorGreed/ai-orchestrator/\.github/workflows/release-images\.yml@refs/tags/v.+$'` with the same issuer. The web image, the SBOMs, and pinning a verified digest in Helm or Docker Compose: [Verify a release](https://lsquarem.com/docs/operations/verify-a-release).
+Any release tag matches `--certificate-identity-regexp '^https://github\.com/TensorGreed/l2m/\.github/workflows/release-images\.yml@refs/tags/v.+$'` with the same issuer. The web image, the SBOMs, and pinning a verified digest in Helm or Docker Compose: [Verify a release](https://lsquarem.com/docs/operations/verify-a-release).
 
 ## Vulnerability policy
 

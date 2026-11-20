@@ -149,4 +149,4 @@ Tool results are normally filtered from session memory (the in-context tool mess
 
 When the workflow result carries `clarification`, the chat bubble renders with a "?" badge labeled **"Assistant is asking"**, the question as the body, and the optional `reason` below it as italic context. The bubble looks different enough from a regular answer that users can tell at a glance "the agent is waiting on me."
 
-Sample workflow: [`samples/workflows/agent-clarify-flow.json`](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/agent-clarify-flow.json).
+Sample workflow: [`samples/workflows/agent-clarify-flow.json`](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/agent-clarify-flow.json).

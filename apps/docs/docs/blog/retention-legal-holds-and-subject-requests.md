@@ -28,7 +28,7 @@ The [data retention](/operations/data-retention) page lists each one with the se
 
 ## Retention: one setting per kind of data
 
-The retention service ([PR #174](https://github.com/TensorGreed/ai-orchestrator/pull/174), merged 10 November) reworked how L2M deletes old data by age: one scheduled purge, a setting per kind of data, and a record of what each purge removed. Run history, tool calls, rule events, cassettes, decided approvals and finished queue jobs follow `EXECUTION_HISTORY_RETENTION_DAYS` (30 days by default). Agent memory and `/v1` gateway request metadata, which were never deleted before, get settings of their own (`AGENT_MEMORY_RETENTION_DAYS`, `AI_GATEWAY_REQUEST_RETENTION_DAYS`); both keep everything until you set them. Existing settings still apply: captured production runs go after 14 days unless someone promoted them, eval runs after 90, and the audit log after 365, on its own timer.
+The retention service ([PR #174](https://github.com/TensorGreed/l2m/pull/174), merged 10 November) reworked how L2M deletes old data by age: one scheduled purge, a setting per kind of data, and a record of what each purge removed. Run history, tool calls, rule events, cassettes, decided approvals and finished queue jobs follow `EXECUTION_HISTORY_RETENTION_DAYS` (30 days by default). Agent memory and `/v1` gateway request metadata, which were never deleted before, get settings of their own (`AGENT_MEMORY_RETENTION_DAYS`, `AI_GATEWAY_REQUEST_RETENTION_DAYS`); both keep everything until you set them. Existing settings still apply: captured production runs go after 14 days unless someone promoted them, eval runs after 90, and the audit log after 365, on its own timer.
 
 Some things are never deleted by age: golden runs and golden-set cases (they are deliberate copies), paused runs with their pending approvals, and, since per-project retention, the eval runs that prove a workflow's current or previous release.
 
@@ -42,13 +42,13 @@ One upgrade note: `USAGE_EVENTS_RETENTION_DAYS` used to be documented but never 
 
 ## Per-project retention
 
-Teams have different obligations. With per-project retention ([PR #176](https://github.com/TensorGreed/ai-orchestrator/pull/176), 10 November), a project can keep runs, tool calls, rule events and agent memory for a different number of days than the deployment. A kind with no value of its own follows the deployment.
+Teams have different obligations. With per-project retention ([PR #176](https://github.com/TensorGreed/l2m/pull/176), 10 November), a project can keep runs, tool calls, rule events and agent memory for a different number of days than the deployment. A kind with no value of its own follows the deployment.
 
 Tool calls and rule events are the security evidence of what a project's tools were called with and what the content rules caught, so only an admin can shorten them below the deployment's value. A project admin who tries gets `403 retention_admin_required`, and the attempt is audited. Deployment bounds (`RETENTION_MIN_DAYS`, `RETENTION_MAX_DAYS`) keep every project's values within limits you set.
 
 ## Legal holds
 
-Retention deletes; sometimes you must not. A <Term id="legal-hold">legal hold</Term> ([PR #177](https://github.com/TensorGreed/ai-orchestrator/pull/177), 11 November) keeps a project, a workflow, a list of runs, or the rows found for one person's identifier from deletion until the hold is released:
+Retention deletes; sometimes you must not. A <Term id="legal-hold">legal hold</Term> ([PR #177](https://github.com/TensorGreed/l2m/pull/177), 11 November) keeps a project, a workflow, a list of runs, or the rows found for one person's identifier from deletion until the hold is released:
 
 - retention purges leave held rows out, and the first purge after the release deletes those already past their retention;
 - deleting a held workflow, project, <Term id="golden-set">golden set</Term> or golden run is refused with `409 legal_hold`, and a held workflow cannot be moved to another project;
@@ -60,7 +60,7 @@ GDPR Article 17 gives people a right to erasure, and Article 17(3)(e) says it do
 
 ## Subject references and data-subject requests
 
-When someone asks what you hold about them, GDPR Article 15 gives them a right to a copy, and Article 12(3) asks for an answer "without undue delay and in any event within one month of receipt of the request", extendable by two further months where necessary. [PR #178](https://github.com/TensorGreed/ai-orchestrator/pull/178) (11 November) adds the two parts that make that answer practical.
+When someone asks what you hold about them, GDPR Article 15 gives them a right to a copy, and Article 12(3) asks for an answer "without undue delay and in any event within one month of receipt of the request", extendable by two further months where necessary. [PR #178](https://github.com/TensorGreed/l2m/pull/178) (11 November) adds the two parts that make that answer practical.
 
 **Subject references** are optional, per workflow. A builder names up to three paths that identify the person a run is about, such as `input.customerId` or the run's `session_id`. When a run finishes, each value is normalised and stored as an HMAC-SHA-256 hash under a key only the deployment holds (a `session_id` reference also keeps the memory session id itself, as the memory table does), so a request later finds those runs, and the agent memory of their session, without searching every row.
 
@@ -75,7 +75,7 @@ How it behaves:
 
 ## Deleting a person's data
 
-A data-subject request can also delete. Choose **Delete (erasure)** instead of **Export** when you make it ([PR #187](https://github.com/TensorGreed/ai-orchestrator/pull/187), 12 November). The lookup runs as for an export, then stops at a preview of what it found. Nothing is deleted until an admin, or someone with `data_subject:manage`, presses **Confirm deletion**, which needs a fresh MFA check when step-up is on. The deletion runs in the background on the leader, and checks each row the search found again before deleting it. A run still in progress is deleted once it has finished.
+A data-subject request can also delete. Choose **Delete (erasure)** instead of **Export** when you make it ([PR #187](https://github.com/TensorGreed/l2m/pull/187), 12 November). The lookup runs as for an export, then stops at a preview of what it found. Nothing is deleted until an admin, or someone with `data_subject:manage`, presses **Confirm deletion**, which needs a fresh MFA check when step-up is on. The deletion runs in the background on the leader, and checks each row the search found again before deleting it. A run still in progress is deleted once it has finished.
 
 - **End users.** A found run goes with its tool-call telemetry, rule events, cassettes, approval requests, queue jobs and subject references. Agent memory sessions and artifacts, and golden or captured runs with the evaluation data made from them, are deleted too. Usage rows of a deleted run stay, with the user cleared, so cost totals and budgets do not change.
 - **Staff members.** The account is deleted the way **Settings → Users → Delete** does, and the person's email becomes a pseudonym (`erased-user-` and 8 hex characters) wherever it records who started, wrote or decided something. Because it deletes the account, only an admin can confirm it. A staff request does not search runs for the email, so make an end-user request too if the person's own data flows through runs. Their audit-log rows are kept unchanged until audit retention removes them, because rewriting them would break the audit chain.
@@ -99,4 +99,4 @@ Retention, holds and deletes do not reach backups already taken. A restore with 
 - Concepts: [Self-hosted AI agent platform: what you run and why](/learn/operations/self-hosting-ai-agents), [AI data retention, erasure requests and legal holds](/learn/operations/ai-data-retention-and-erasure)
 - [Data retention](/operations/data-retention), [Legal holds](/operations/legal-hold), [Data-subject requests](/security/data-subject-requests), [Deleting a person's data](/security/data-subject-requests#deleting-a-persons-data), [Production capture: data-subject lookup](/product/production-capture#data-subject-lookup)
 - [GDPR Article 17: right to erasure](https://gdpr-info.eu/art-17-gdpr/), [Article 15: right of access](https://gdpr-info.eu/art-15-gdpr/) and [Article 12: time limits](https://gdpr-info.eu/art-12-gdpr/) (gdpr-info.eu, reproducing Regulation (EU) 2016/679)
-- Pull requests: [#174 retention service](https://github.com/TensorGreed/ai-orchestrator/pull/174), [#176 per-project retention](https://github.com/TensorGreed/ai-orchestrator/pull/176), [#177 legal holds](https://github.com/TensorGreed/ai-orchestrator/pull/177), [#178 data-subject requests](https://github.com/TensorGreed/ai-orchestrator/pull/178), [#187 deletion and erasure](https://github.com/TensorGreed/ai-orchestrator/pull/187) (GitHub)
+- Pull requests: [#174 retention service](https://github.com/TensorGreed/l2m/pull/174), [#176 per-project retention](https://github.com/TensorGreed/l2m/pull/176), [#177 legal holds](https://github.com/TensorGreed/l2m/pull/177), [#178 data-subject requests](https://github.com/TensorGreed/l2m/pull/178), [#187 deletion and erasure](https://github.com/TensorGreed/l2m/pull/187) (GitHub)

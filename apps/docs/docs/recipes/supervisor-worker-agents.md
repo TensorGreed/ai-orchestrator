@@ -31,7 +31,7 @@ A Supervisor node coordinates two worker agents. The researcher has an MCP knowl
 
 ## Steps
 
-1. Download <a href="/docs/recipes/files/supervisor-worker-swarm-flow.json" download>supervisor-worker-swarm-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/supervisor-worker-swarm-flow.json).
+1. Download <a href="/docs/recipes/files/supervisor-worker-swarm-flow.json" download>supervisor-worker-swarm-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/supervisor-worker-swarm-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
 3. Click **Run** in the editor, or call the run API with a question for the team (as in the [zero-key agent recipe](/recipes/zero-key-mcp-agent), with the workflow id `wf-supervisor-worker-swarm`).
 4. Open the run and click the **Supervisor** node to read its trace.

@@ -1,14 +1,14 @@
 apiVersion: v2
-name: ai-orchestrator
+name: l2m
 description: Visual AI workflow builder/runtime (Fastify API, React Studio, Postgres-backed)
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
-home: https://github.com/TensorGreed/ai-orchestrator
+home: https://github.com/TensorGreed/l2m
 sources:
-  - https://github.com/TensorGreed/ai-orchestrator
+  - https://github.com/TensorGreed/l2m
 maintainers:
-  - name: ai-orchestrator
+  - name: l2m
 keywords:
   - ai
   - workflow

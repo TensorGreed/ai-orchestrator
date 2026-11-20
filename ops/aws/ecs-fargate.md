@@ -1,6 +1,6 @@
 # AWS ECS Fargate deployment guide
 
-This guide walks through a production deployment of ai-orchestrator on AWS ECS Fargate with two task definitions (API + webhook), an RDS Postgres database, and an Application Load Balancer in front.
+This guide walks through a production deployment of L2M on AWS ECS Fargate with two task definitions (API + webhook), an RDS Postgres database, and an Application Load Balancer in front.
 
 ## Topology
 
@@ -38,18 +38,18 @@ Two Fargate services:
 - A security group allowing port 4000 from the ALB to the tasks
 - RDS Postgres 15+ instance with a database named `ai_orchestrator`
 - An ACM certificate for your domain
-- An ECR repository with the built ai-orchestrator API image (`docker build -f apps/api/Dockerfile .`)
+- An ECR repository with the built L2M API image (`docker build -f apps/api/Dockerfile .`)
 
 ## Step 1 — Store secrets in AWS Secrets Manager
 
 ```bash
 MASTER_KEY=$(node -e "console.log(require('crypto').randomBytes(32).toString('base64'))")
 aws secretsmanager create-secret \
-  --name ai-orchestrator/master-key \
+  --name l2m/master-key \
   --secret-string "$MASTER_KEY"
 
 aws secretsmanager create-secret \
-  --name ai-orchestrator/db-url \
+  --name l2m/db-url \
   --secret-string "postgresql://ao:$DB_PASSWORD@$RDS_HOST:5432/ai_orchestrator"
 ```
 
@@ -61,7 +61,7 @@ Use [task-definition-api.example.json](./task-definition-api.example.json) and [
 
 - `ACCOUNT_ID` — your AWS account
 - `REGION` — e.g. `us-east-1`
-- `IMAGE_URI` — `<account>.dkr.ecr.<region>.amazonaws.com/ai-orchestrator:latest`
+- `IMAGE_URI` — `<account>.dkr.ecr.<region>.amazonaws.com/l2m:latest`
 
 Register the tasks:
 
@@ -77,9 +77,9 @@ aws ecs register-task-definition \
 
 ```bash
 aws ecs create-service \
-  --cluster ai-orchestrator \
+  --cluster l2m \
   --service-name ao-api \
-  --task-definition ai-orchestrator-api \
+  --task-definition l2m-api \
   --desired-count 2 \
   --launch-type FARGATE \
   --network-configuration 'awsvpcConfiguration={subnets=[subnet-...,subnet-...],securityGroups=[sg-...],assignPublicIp=DISABLED}' \
@@ -87,9 +87,9 @@ aws ecs create-service \
   --health-check-grace-period-seconds 30
 
 aws ecs create-service \
-  --cluster ai-orchestrator \
+  --cluster l2m \
   --service-name ao-webhook \
-  --task-definition ai-orchestrator-webhook \
+  --task-definition l2m-webhook \
   --desired-count 3 \
   --launch-type FARGATE \
   --network-configuration 'awsvpcConfiguration={subnets=[subnet-...,subnet-...],securityGroups=[sg-...],assignPublicIp=DISABLED}' \
@@ -115,13 +115,13 @@ The webhook service is well-suited to scale-on-request-rate:
 ```bash
 aws application-autoscaling register-scalable-target \
   --service-namespace ecs \
-  --resource-id service/ai-orchestrator/ao-webhook \
+  --resource-id service/l2m/ao-webhook \
   --scalable-dimension ecs:service:DesiredCount \
   --min-capacity 2 --max-capacity 30
 
 aws application-autoscaling put-scaling-policy \
   --service-namespace ecs \
-  --resource-id service/ai-orchestrator/ao-webhook \
+  --resource-id service/l2m/ao-webhook \
   --scalable-dimension ecs:service:DesiredCount \
   --policy-name webhook-cpu \
   --policy-type TargetTrackingScaling \
@@ -135,7 +135,7 @@ The API service is typically fine at 2–4 tasks; scheduler work is single-leade
 
 ## Step 6 — CloudWatch log insights
 
-Both task definitions ship logs to `/ecs/ai-orchestrator`. Useful queries:
+Both task definitions ship logs to `/ecs/l2m`. Useful queries:
 
 ```
 # Leader lease transitions
@@ -159,8 +159,8 @@ fields @timestamp, req.url, res.statusCode
 ## Tear down
 
 ```bash
-aws ecs update-service --cluster ai-orchestrator --service ao-api --desired-count 0
-aws ecs update-service --cluster ai-orchestrator --service ao-webhook --desired-count 0
-aws ecs delete-service --cluster ai-orchestrator --service ao-api
-aws ecs delete-service --cluster ai-orchestrator --service ao-webhook
+aws ecs update-service --cluster l2m --service ao-api --desired-count 0
+aws ecs update-service --cluster l2m --service ao-webhook --desired-count 0
+aws ecs delete-service --cluster l2m --service ao-api
+aws ecs delete-service --cluster l2m --service ao-webhook
 ```

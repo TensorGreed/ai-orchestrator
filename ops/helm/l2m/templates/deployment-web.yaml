@@ -2,20 +2,20 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "ai-orchestrator.fullname" . }}-web
+  name: {{ include "l2m.fullname" . }}-web
   labels:
-    {{- include "ai-orchestrator.labels" . | nindent 4 }}
+    {{- include "l2m.labels" . | nindent 4 }}
     app.kubernetes.io/component: web
 spec:
   replicas: {{ .Values.web.replicaCount }}
   selector:
     matchLabels:
-      {{- include "ai-orchestrator.selectorLabels" . | nindent 6 }}
+      {{- include "l2m.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: web
   template:
     metadata:
       labels:
-        {{- include "ai-orchestrator.selectorLabels" . | nindent 8 }}
+        {{- include "l2m.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: web
     spec:
       {{- with .Values.imagePullSecrets }}
@@ -36,9 +36,9 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "ai-orchestrator.fullname" . }}-web
+  name: {{ include "l2m.fullname" . }}-web
   labels:
-    {{- include "ai-orchestrator.labels" . | nindent 4 }}
+    {{- include "l2m.labels" . | nindent 4 }}
     app.kubernetes.io/component: web
 spec:
   type: {{ .Values.web.service.type }}
@@ -48,6 +48,6 @@ spec:
       protocol: TCP
       name: http
   selector:
-    {{- include "ai-orchestrator.selectorLabels" . | nindent 4 }}
+    {{- include "l2m.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: web
 {{- end -}}

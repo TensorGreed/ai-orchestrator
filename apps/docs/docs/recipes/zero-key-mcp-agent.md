@@ -31,7 +31,7 @@ A manual trigger starts one Agent Orchestrator node. Its chat model is the built
 
 ## Steps
 
-1. Download <a href="/docs/recipes/files/mcp-agent-quickstart-flow.json" download>mcp-agent-quickstart-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/mcp-agent-quickstart-flow.json).
+1. Download <a href="/docs/recipes/files/mcp-agent-quickstart-flow.json" download>mcp-agent-quickstart-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/mcp-agent-quickstart-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
 3. Click **Run** in the editor, or call the run API with your own question. The API takes an API key from **Settings → Account → API Keys**:
 

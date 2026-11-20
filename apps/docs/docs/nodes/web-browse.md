@@ -92,7 +92,7 @@ Browser binaries must be installed once: `pnpm exec playwright install chromium`
 }
 ```
 
-Pair with a `prompt_template` + `llm_call` to extract structured branding data. Full sample at [samples/workflows/branding-extract-flow.json](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/branding-extract-flow.json).
+Pair with a `prompt_template` + `llm_call` to extract structured branding data. Full sample at [samples/workflows/branding-extract-flow.json](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/branding-extract-flow.json).
 
 ### Lean text extraction (no screenshot)
 

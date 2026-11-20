@@ -93,4 +93,4 @@ The audit log is on by default and needs no setup; only admins can read it. The 
 
 - Scott A. Crosby and Dan S. Wallach, [Efficient Data Structures for Tamper-Evident Logging](https://www.usenix.org/legacy/event/sec09/tech/full_papers/crosby.pdf) (USENIX Security 2009)
 - [Guide to Computer Security Log Management](https://csrc.nist.gov/pubs/sp/800/92/final), NIST SP 800-92
-- Pull requests: [#71 the chain on both databases and the text fix](https://github.com/TensorGreed/ai-orchestrator/pull/71), [#73 the verdict in backups](https://github.com/TensorGreed/ai-orchestrator/pull/73), [#213 retention checkpoints, sealed headers and bounded export](https://github.com/TensorGreed/ai-orchestrator/pull/213) (GitHub)
+- Pull requests: [#71 the chain on both databases and the text fix](https://github.com/TensorGreed/l2m/pull/71), [#73 the verdict in backups](https://github.com/TensorGreed/l2m/pull/73), [#213 retention checkpoints, sealed headers and bounded export](https://github.com/TensorGreed/l2m/pull/213) (GitHub)

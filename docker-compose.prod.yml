@@ -1,4 +1,4 @@
-## Production docker-compose topology for ai-orchestrator.
+## Production docker-compose topology for L2M.
 ##
 ## Features:
 ##  - Two API replicas (multi-main HA via DB leader lease)
@@ -14,7 +14,7 @@
 ##      BOOTSTRAP_ADMIN_EMAIL, BOOTSTRAP_ADMIN_PASSWORD, LLM keys, etc.
 ##   2. Ensure ports 80/443 are free on the host.
 ##
-## See ops/helm/ai-orchestrator for the Kubernetes equivalent.
+## See ops/helm/l2m for the Kubernetes equivalent.
 
 version: "3.9"
 

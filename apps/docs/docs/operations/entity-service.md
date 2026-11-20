@@ -22,7 +22,7 @@ weights**. You download the model yourself from its publisher, accept its licenc
 | Publisher | Knowledgator (`https://huggingface.co/knowledgator/gliner-pii-base-v1.0`) |
 | Licence | Apache-2.0. The encoder it builds on, `microsoft/deberta-v3-small`, is MIT. |
 | Training data | Not disclosed by the publisher. The model card names only the evaluation set. |
-| Pinned as | A fixed revision, with the URL, size and SHA-256 of every file, in [`apps/ner/models.json`](https://github.com/TensorGreed/ai-orchestrator/blob/main/apps/ner/models.json) |
+| Pinned as | A fixed revision, with the URL, size and SHA-256 of every file, in [`apps/ner/models.json`](https://github.com/TensorGreed/l2m/blob/main/apps/ner/models.json) |
 | Languages | English |
 
 `models.json` is the only list of models the service and the CLI accept. Each entry also holds the model's prompts and
@@ -74,9 +74,9 @@ into a running stack is picked up without a restart.
 
 ```bash
 docker volume create l2m-ner-models
-docker run --rm -v l2m-ner-models:/models ghcr.io/tensorgreed/ai-orchestrator-ner:<tag> models pull --accept-licence
+docker run --rm -v l2m-ner-models:/models ghcr.io/tensorgreed/l2m-ner:<tag> models pull --accept-licence
 docker run -d --name l2m-ner --read-only --tmpfs /tmp --cap-drop ALL -v l2m-ner-models:/models:ro -e NER_TOKEN_FILE=/run/secrets/ner-token \
-  -v "$PWD/ner-token:/run/secrets/ner-token:ro" -p 127.0.0.1:8000:8000 ghcr.io/tensorgreed/ai-orchestrator-ner:<tag>
+  -v "$PWD/ner-token:/run/secrets/ner-token:ro" -p 127.0.0.1:8000:8000 ghcr.io/tensorgreed/l2m-ner:<tag>
 ```
 
 The image is Debian slim (glibc), runs as the unprivileged `node` user, has a `HEALTHCHECK` on `/health`, and is
@@ -147,7 +147,7 @@ its value).
 
 ## Endpoint contract
 
-The full contract is [`apps/ner/openapi.json`](https://github.com/TensorGreed/ai-orchestrator/blob/main/apps/ner/openapi.json)
+The full contract is [`apps/ner/openapi.json`](https://github.com/TensorGreed/l2m/blob/main/apps/ner/openapi.json)
 (OpenAPI 3.1; also in the image at `/app/apps/ner/openapi.json`). Any service that answers it can stand in for
 l2m-ner.
 

@@ -28,7 +28,7 @@ A **Set** node holds three small data sets: key counts by cloud, by algorithm an
 
 ## Steps
 
-1. Download <a href="/docs/recipes/files/report-with-charts-flow.json" download>report-with-charts-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/report-with-charts-flow.json).
+1. Download <a href="/docs/recipes/files/report-with-charts-flow.json" download>report-with-charts-flow.json</a>, or take it from the [samples folder on GitHub](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/report-with-charts-flow.json).
 2. In the studio's workflow editor, import the file (see [import and export](/product/workflow-editor)).
 3. Install Chromium for Playwright on the API host once: `pnpm exec playwright install chromium` from the repo root. Or point `PDF_CHROMIUM_EXECUTABLE_PATH` at a Chromium you already have.
 4. Run it. Open the run and click **PDF**: the node output has the file as `pdf.downloadUrl` (a `data:application/pdf;base64,...` URL) and `pdf.base64`. The **Output** node returns that URL as `result`.

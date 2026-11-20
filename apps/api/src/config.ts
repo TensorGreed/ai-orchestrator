@@ -237,7 +237,7 @@ const envSchema = z.object({
   // 13.2 — step-up: a fresh MFA check before security-admin actions when the session's last one is older than this
   // many minutes. 0 or unset = off.
   STEP_UP_MAX_AGE_MINUTES: optionalIntFromEnv(0, 1440),
-  MFA_ISSUER: z.string().min(1).default("ai-orchestrator"),
+  MFA_ISSUER: z.string().min(1).default("L2M"),
   SAML_ENABLED: booleanFromEnv.default(false),
   SAML_ENTRY_POINT: z.string().optional(),
   SAML_ISSUER: z.string().optional(),

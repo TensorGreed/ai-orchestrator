@@ -183,7 +183,7 @@ Configure a `rag_retrieve` node with `vectorStoreId: "knowledge-base"` and pass 
 
 In the editor, set **Vector Store** to **Knowledge Base (built in)** and pick the knowledge base under **Knowledge Base**: the list shows the knowledge bases of the workflow's project, and picking one also sets the node's **Embedder** to the one the knowledge base was built with. The editor saves the id as `knowledgeBaseId` on the node; a `vectorStoreConfig.knowledgeBaseId` takes precedence when both are set. **Search Mode** and the hybrid settings below show there too (the hybrid ones under **More**).
 
-The full sample is at [samples/workflows/rag-knowledge-base-flow.json](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/rag-knowledge-base-flow.json).
+The full sample is at [samples/workflows/rag-knowledge-base-flow.json](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/rag-knowledge-base-flow.json).
 
 Each retrieved document carries provenance metadata:
 
@@ -296,7 +296,7 @@ Three providers wired today:
 }
 ```
 
-Wire `rag_retrieve` (with `topK: 20-50`) → `rerank` (with `topN: 3-5`) for the canonical "high recall, then high precision" pattern. Sample at [samples/workflows/rag-hybrid-rerank-flow.json](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/rag-hybrid-rerank-flow.json).
+Wire `rag_retrieve` (with `topK: 20-50`) → `rerank` (with `topN: 3-5`) for the canonical "high recall, then high precision" pattern. Sample at [samples/workflows/rag-hybrid-rerank-flow.json](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/rag-hybrid-rerank-flow.json).
 
 API keys can come from a `secretRef.secretId` (preferred — encrypted at rest) or the matching env var (`COHERE_API_KEY`, `JINA_API_KEY`, `VOYAGE_API_KEY`).
 
@@ -365,7 +365,7 @@ Output:
 
 When a workflow run produces `extract_citations` output, the chat bubble renders each `[N]` as a clickable superscript that scrolls to a footnote panel below the bubble (with source ID, retrieval mode, score, and the chunk preview). Click on `[1]` to jump to the corresponding source.
 
-The full sample is at [samples/workflows/rag-with-citations-flow.json](https://github.com/TensorGreed/ai-orchestrator/blob/main/samples/workflows/rag-with-citations-flow.json).
+The full sample is at [samples/workflows/rag-with-citations-flow.json](https://github.com/TensorGreed/l2m/blob/main/samples/workflows/rag-with-citations-flow.json).
 
 ### Wiring the graph
 

@@ -1,21 +1,21 @@
 {
-  "family": "ai-orchestrator-api",
+  "family": "l2m-api",
   "networkMode": "awsvpc",
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "1024",
   "memory": "2048",
   "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskExecutionRole",
-  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ai-orchestrator-task-role",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/l2m-task-role",
   "containerDefinitions": [
     {
       "name": "api",
-      "image": "ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/ai-orchestrator:latest",
+      "image": "ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/l2m:latest",
       "essential": true,
       "portMappings": [{ "containerPort": 4000, "protocol": "tcp" }],
       "environment": [
         { "name": "API_HOST", "value": "0.0.0.0" },
         { "name": "API_PORT", "value": "4000" },
-        { "name": "WEB_ORIGIN", "value": "https://ai-orchestrator.example.com" },
+        { "name": "WEB_ORIGIN", "value": "https://l2m.example.com" },
         { "name": "DB_TYPE", "value": "postgres" },
         { "name": "DB_POSTGRESDB_SSL", "value": "true" },
         { "name": "AUTH_ALLOW_PUBLIC_REGISTER", "value": "false" },
@@ -29,15 +29,15 @@
       "secrets": [
         {
           "name": "SECRET_MASTER_KEY_BASE64",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ai-orchestrator/master-key"
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:l2m/master-key"
         },
         {
           "name": "DATABASE_URL",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ai-orchestrator/db-url"
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:l2m/db-url"
         },
         {
           "name": "OPENAI_API_KEY",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:ai-orchestrator/openai-key"
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:l2m/openai-key"
         }
       ],
       "healthCheck": {
@@ -50,7 +50,7 @@
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {
-          "awslogs-group": "/ecs/ai-orchestrator",
+          "awslogs-group": "/ecs/l2m",
           "awslogs-region": "REGION",
           "awslogs-stream-prefix": "api"
         }
