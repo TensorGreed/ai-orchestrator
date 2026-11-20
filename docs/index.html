@@ -306,9 +306,9 @@
             </article>
             <article class="card">
               <span class="card-icon tone-memory" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.6 13.4l-7.2 7.2a2 2 0 0 1-2.8 0L2 12V2h10l8.6 8.6a2 2 0 0 1 0 2.8z" /><circle cx="7" cy="7" r="1.5" /></svg></span>
-              <h3>Data labels and destinations</h3>
-              <p>Label where each step's data came from and what it contains. Sort every model, server and URL into local, private, approved-vendor or public, and block, redact or ask for approval when sensitive data would go too far.</p>
-              <a class="text-link card-link" href="./docs/product/data-labels-and-destinations">Data destinations →</a>
+              <h3>Tool policy and approvals</h3>
+              <p>Decide per tool what an agent may do: allow, block or ask for approval. Approvers see the call's arguments, can edit them, and every decision is audited.</p>
+              <a class="text-link card-link" href="./docs/product/mcp-tool-policy">Tool policy →</a>
             </article>
           </div>
           <div class="shot-row shot-single">
@@ -331,7 +331,7 @@
               <li><strong>Golden runs and sets.</strong> Save good runs, group them, and replay a draft or a saved version against them.</li>
               <li><strong>Scorers.</strong> JSON equality and schema, text similarity, tool sequence, status, budget and an LLM judge.</li>
               <li><strong>Release gate on publish.</strong> A version reaches production only after its replay job passes the gate's policy; an override needs a written reason and is audited.</li>
-              <li><strong>Production capture.</strong> Sample real runs with personal data masked, and promote the useful ones into a golden set.</li>
+              <li><strong>Production capture.</strong> Sample real runs and promote the useful ones into a golden set.</li>
               <li><strong>A CLI for your pipeline.</strong> Run replays, write JUnit results and publish from CI.</li>
             </ul>
             <div class="code-panel">
