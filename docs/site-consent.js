@@ -7,9 +7,10 @@
   "use strict";
   var GA_ID = "G-J3CBSHR723";
   // GoatCounter site code (the <code> of https://<code>.goatcounter.com). Empty: nothing is loaded or counted.
+  // scripts/check-pages-site.mjs allows exactly these two hosts (gc.zgo.at, <code>.goatcounter.com), never on /demo/.
   // GoatCounter sets no cookies and stores no personal data, so it needs no consent; when it is on, the
   // privacy notes on the landing and the docs say so (.site-counter-note, shown by the site-counter-on class).
-  var GOATCOUNTER_CODE = "";
+  var GOATCOUNTER_CODE = "lsquarem";
   var KEY = "l2m-site-consent";
   var bar = null;
   var loaded = false;
