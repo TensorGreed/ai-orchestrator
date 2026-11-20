@@ -175,8 +175,12 @@ export function ConnectedAccountsPanel({ projectId, secrets, onChanged }: Props)
                         disabled={busy !== null}
                         onClick={() =>
                           void run(`refresh:${secret.id}`, async () => {
-                            await refreshConnectedAccount(secret.id);
-                            await onChanged();
+                            try {
+                              await refreshConnectedAccount(secret.id);
+                            } finally {
+                              // A refused refresh marks the account Needs reconnect; show that either way.
+                              await onChanged();
+                            }
                             return `${secret.name}: token renewed.`;
                           })
                         }
