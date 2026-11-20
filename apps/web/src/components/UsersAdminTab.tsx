@@ -6,12 +6,15 @@
  * - "Reset MFA" is for a user who lost their authenticator: it deletes the authenticator and backup codes and signs
  *   them out everywhere; their next sign-in sets MFA up again. It is refused on your own account.
  *
+ * - "Set password" gives a person who forgot their password a new temporary one, shown once here; it signs them out
+ *   everywhere, and they change it under Settings > Security. Not for your own account, an open invite or an SSO account.
+ *
  * - "Enable" turns back on a user that SCIM provisioning disabled (deactivated or removed at the identity provider).
  *
  * All need a recent MFA check when step-up is on (the studio asks for a code and retries).
  */
 import { useCallback, useEffect, useState } from "react";
-import { enableUser, fetchDeploymentUsers, resetUserMfa, revokeUserSessions, type DeploymentUserView } from "../lib/api";
+import { enableUser, fetchDeploymentUsers, resetUserMfa, resetUserPassword, revokeUserSessions, type DeploymentUserView } from "../lib/api";
 import { InviteUserDialog } from "./InviteUserDialog";
 
 function formatCreated(value: string): string {
@@ -26,6 +29,7 @@ export function UsersAdminTab({ currentUserId }: { currentUserId: string }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [inviting, setInviting] = useState(false);
+  const [temporary, setTemporary] = useState<{ email: string; password: string } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -85,6 +89,28 @@ export function UsersAdminTab({ currentUserId }: { currentUserId: string }) {
     }
   };
 
+  const setPassword = async (user: DeploymentUserView) => {
+    if (
+      !window.confirm(
+        `Set a new temporary password for ${user.email}? Their current password stops working and they are signed out everywhere.`
+      )
+    ) {
+      return;
+    }
+    setBusyId(user.id);
+    setError(null);
+    setNotice(null);
+    setTemporary(null);
+    try {
+      const result = await resetUserPassword(user.id);
+      setTemporary({ email: user.email, password: result.temporaryPassword });
+    } catch (passwordError) {
+      setError(passwordError instanceof Error ? passwordError.message : "Could not set a password");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const enable = async (user: DeploymentUserView) => {
     if (!window.confirm(`Enable ${user.email}? If your identity provider still provisions them, its next update decides again.`)) return;
     setBusyId(user.id);
@@ -112,7 +138,8 @@ export function UsersAdminTab({ currentUserId }: { currentUserId: string }) {
       {inviting && <InviteUserDialog onInvited={() => void refresh()} onClose={() => setInviting(false)} />}
       <p className="settings-help">
         Everyone with an account on this deployment. Signing a user out everywhere ends all of their live sessions.
-        Reset MFA for a user who lost their authenticator; you cannot reset your own, so ask another admin or use a
+        Set a temporary password for someone who forgot theirs (people who sign in with SSO use their identity
+        provider). Reset MFA for a user who lost their authenticator; you cannot reset your own, so ask another admin or use a
         break-glass sign-in from the server host.
       </p>
       {error && (
@@ -123,6 +150,18 @@ export function UsersAdminTab({ currentUserId }: { currentUserId: string }) {
       {notice && (
         <div className="info-banner" role="status">
           {notice}
+        </div>
+      )}
+      {temporary && (
+        <div className="info-banner" role="status">
+          <p>
+            Temporary password for {temporary.email} (shown once; send it to them privately and ask them to change it
+            under Settings &gt; Security):
+          </p>
+          <code className="temporary-password">{temporary.password}</code>{" "}
+          <button type="button" className="mini-btn" onClick={() => setTemporary(null)}>
+            Done
+          </button>
         </div>
       )}
       {!loaded ? (
@@ -188,6 +227,17 @@ export function UsersAdminTab({ currentUserId }: { currentUserId: string }) {
                           aria-label={`Reset MFA for ${user.email}`}
                         >
                           Reset MFA
+                        </button>
+                      )}
+                      {user.id !== currentUserId && !user.pending && (
+                        <button
+                          type="button"
+                          className="mini-btn"
+                          disabled={busyId !== null}
+                          onClick={() => void setPassword(user)}
+                          aria-label={`Set a temporary password for ${user.email}`}
+                        >
+                          Set password
                         </button>
                       )}
                     </td>

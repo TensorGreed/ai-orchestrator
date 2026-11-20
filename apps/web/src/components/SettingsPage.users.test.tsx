@@ -10,7 +10,9 @@ vi.mock("../lib/api", async () => {
     fetchMfaStatus: vi.fn(),
     fetchMySessions: vi.fn(),
     fetchDeploymentUsers: vi.fn(),
-    revokeUserSessions: vi.fn()
+    revokeUserSessions: vi.fn(),
+    resetUserPassword: vi.fn(),
+    changeMyPassword: vi.fn()
   };
 });
 
@@ -30,6 +32,8 @@ describe("Settings users and sessions", () => {
       ]
     });
     vi.mocked(api.revokeUserSessions).mockReset().mockResolvedValue({ revoked: 3 });
+    vi.mocked(api.resetUserPassword).mockReset().mockResolvedValue({ ok: true, userId: "u-2", temporaryPassword: "Tmp-pass-abcdefghijklmn", sessionsEnded: 2 });
+    vi.mocked(api.changeMyPassword).mockReset().mockResolvedValue({ ok: true, sessionsEnded: 1 });
   });
 
   it("shows the signed-in sessions card on the Security tab", async () => {
@@ -55,6 +59,34 @@ describe("Settings users and sessions", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Users" }));
     fireEvent.click(await screen.findByRole("button", { name: "Sign dev@example.com out everywhere" }));
     expect(api.revokeUserSessions).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it("changes your own password on the Security tab once the new one is confirmed", async () => {
+    render(<SettingsPage authUser={{ id: "u-2", email: "dev@example.com", role: "builder" }} projects={projects} activeProjectId="default" />);
+    const submit = await screen.findByRole("button", { name: "Change password" });
+    fireEvent.change(screen.getByLabelText("Current password"), { target: { value: "old-password" } });
+    fireEvent.change(screen.getByLabelText(/New password/), { target: { value: "new-password-1" } });
+    fireEvent.change(screen.getByLabelText("Confirm the new password"), { target: { value: "new-password-2" } });
+    expect(screen.getByText("The passwords do not match.")).toBeInTheDocument();
+    expect(submit).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Confirm the new password"), { target: { value: "new-password-1" } });
+    fireEvent.click(submit);
+    await waitFor(() => expect(api.changeMyPassword).toHaveBeenCalledWith({ currentPassword: "old-password", newPassword: "new-password-1" }));
+    expect(await screen.findByText("Password changed. 1 other session was signed out.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Current password")).toHaveValue("");
+  });
+
+  it("an admin sets a temporary password for another user and sees it once", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<SettingsPage authUser={{ id: "u-admin", email: "admin@example.com", role: "admin" }} projects={projects} activeProjectId="default" />);
+    fireEvent.click(screen.getByRole("tab", { name: "Users" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Set a temporary password for dev@example.com" }));
+    await waitFor(() => expect(api.resetUserPassword).toHaveBeenCalledWith("u-2"));
+    expect(await screen.findByText("Tmp-pass-abcdefghijklmn")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Set a temporary password for admin@example.com" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(screen.queryByText("Tmp-pass-abcdefghijklmn")).not.toBeInTheDocument();
     confirmSpy.mockRestore();
   });
 });

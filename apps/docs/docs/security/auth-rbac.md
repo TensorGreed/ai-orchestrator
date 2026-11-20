@@ -1079,7 +1079,9 @@ set one up in **Settings > Security** first. Break-glass sessions are not asked.
 | Reset a user's MFA | `POST /api/users/:id/mfa/reset` |
 | Sign another user out | `POST /api/users/:id/sessions/revoke` (not when it names your own account) |
 | Enable a user that SCIM disabled | `POST /api/users/:id/enable` |
+| Set a temporary password for another user | `POST /api/users/:id/password/reset` |
 | Turn your own MFA off | `POST /api/auth/mfa/disable` |
+| Change your own password | `POST /api/auth/password` |
 | Create an API key | `POST /api/auth/api-keys`, `POST /api/service-accounts/:id/keys` |
 | Rotate an API key | `POST /api/auth/api-keys/:id/rotate`, `POST /api/service-accounts/:id/keys/:keyId/rotate` |
 | Create a gateway client | `POST /api/mcp/clients` |
@@ -1121,6 +1123,29 @@ step-up when step-up is on. You cannot reset your own MFA, except from a break-g
 not revoked (a lost device does not mean a leaked key); in a role that requires MFA they stop working until the user
 sets up a new authenticator.
 
+## Passwords
+
+**Change your own.** In **Settings > Security > Password**, enter your current password and a new one (8 to 1024
+characters, the same rule as registration and the bootstrap admin), or call `POST /api/auth/password` with
+`{ currentPassword, newPassword }` from a signed-in session (an API key is refused). Your other sessions end (reason
+`policy`); the one you used stays. MFA is unchanged: the next sign-in still asks for a code. With step-up on, the change
+needs a recent MFA check. A wrong current password answers `403 current_password_invalid`; attempts count against the
+sign-in rate limit (`RATE_LIMIT_AUTH_MAX`).
+
+**Set a temporary password for someone else.** An admin opens **Settings > Users > Set password** for a person who forgot
+theirs, or calls `POST /api/users/:id/password/reset`. L2M makes a random 24-character password and shows it once, in
+that answer only; send it to the person privately. Their old password stops working and all their sessions end (reason
+`admin`); they sign in with the temporary one (and their MFA code, if they have one) and change it under **Settings >
+Security**. It needs step-up when step-up is on and is refused on your own account, on an invite not yet accepted
+(send the invite again) and on a service account.
+
+**SSO accounts.** An account linked to an OIDC, SAML or LDAP identity changes its password at the identity provider:
+both routes answer `409 sso_account` for it and change nothing.
+
+Both are audited, without the password: `user.password.change` (success, or failure with `reason: current_password`)
+and `user.password.reset` (with the user's email and how many sessions ended). There is no email reset flow; L2M does
+not assume a mail server.
+
 ## Keeping admin access
 
 No setting here refuses to start or refuses a sign-in outright: a listed role without MFA gets a setup-only session,
@@ -1161,6 +1186,8 @@ If the only admin loses their authenticator and backup codes:
 - `POST /api/auth/step-up` (`{ code }`, TOTP or backup code; refreshes the session's MFA check)
 - `POST /api/auth/mfa/enroll` (`{ password? }`; the password is needed more than 10 minutes after signing in)
 - `POST /api/users/:id/mfa/reset` (admin, step-up)
+- `POST /api/auth/password` (`{ currentPassword, newPassword }`; signed-in session, step-up; see [Passwords](#passwords))
+- `POST /api/users/:id/password/reset` (admin, step-up; answers `{ temporaryPassword, sessionsEnded }` once)
 - `POST /api/auth/api-keys/:id/rotate` (your own key; `{ graceHours? }`, step-up; see
   [Rotating keys](./service-accounts.md#rotating-keys))
 - `GET /api/auth/oidc/metadata` (public; `{ "enabled": false }` when OIDC is off)

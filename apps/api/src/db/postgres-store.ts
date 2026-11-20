@@ -411,6 +411,12 @@ export class PostgresStore implements Store {
   async acceptUserInvite(...args: Parameters<Store["acceptUserInvite"]>): ReturnType<Store["acceptUserInvite"]> {
     return auth.acceptUserInvite(this.ctx, ...args);
   }
+  async setUserPassword(...args: Parameters<Store["setUserPassword"]>): ReturnType<Store["setUserPassword"]> {
+    return auth.setUserPassword(this.ctx, ...args);
+  }
+  async userHasSsoIdentity(...args: Parameters<Store["userHasSsoIdentity"]>): ReturnType<Store["userHasSsoIdentity"]> {
+    return auth.userHasSsoIdentity(this.ctx, ...args);
+  }
   async closeUserInvites(...args: Parameters<Store["closeUserInvites"]>): ReturnType<Store["closeUserInvites"]> {
     return auth.closeUserInvites(this.ctx, ...args);
   }

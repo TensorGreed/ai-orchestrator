@@ -512,6 +512,22 @@ export async function resetUserMfa(userId: string) {
   );
 }
 
+/** Admin: sets a new temporary password for another user (shown once) and signs them out everywhere. */
+export async function resetUserPassword(userId: string) {
+  return apiRequest<{ ok: true; userId: string; temporaryPassword: string; sessionsEnded: number }>(
+    `/api/users/${encodeURIComponent(userId)}/password/reset`,
+    { method: "POST" }
+  );
+}
+
+/** Changes your own password; your other sessions end, this one stays. */
+export async function changeMyPassword(payload: { currentPassword: string; newPassword: string }) {
+  return apiRequest<{ ok: true; sessionsEnded: number }>("/api/auth/password", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
 /**
  * Phase 13.2 — where "Sign in with SSO (OIDC)" sends the browser, or null when the API has OIDC off (its metadata
  * route answers `enabled: false`, or 404 on an older API) or cannot be reached.

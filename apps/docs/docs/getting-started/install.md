@@ -65,6 +65,7 @@ docker compose logs api
 - **Admin account.** The first user is `admin@l2m.local` (or `BOOTSTRAP_ADMIN_EMAIL`). Without
   `BOOTSTRAP_ADMIN_PASSWORD`, a random password is made, printed once in the log and kept in
   `quickstart/initial-admin-password`. To read it again: `docker compose exec api cat /app/apps/api/data/quickstart/initial-admin-password`.
+  Change it after your first sign-in under **Settings → Security → Password** (the file keeps the first one).
 - **Database.** SQLite, in the `l2m-quickstart_l2m-data` volume. Public sign-up is off; invite people under **Settings → Users**.
 
 To choose your own values, put them in a `.env` file next to `docker-compose.yml` before the first start:

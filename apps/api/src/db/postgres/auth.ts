@@ -243,6 +243,25 @@ export async function acceptUserInvite(ctx: PgContext, input: { tokenHash: strin
   });
 }
 
+export async function setUserPassword(ctx: PgContext, input: Parameters<Store["setUserPassword"]>[0]): ReturnType<Store["setUserPassword"]> {
+  const updated =
+    input.expectedPasswordHash === undefined
+      ? await ctx.query<{ id: string }>(`UPDATE users SET password_hash = $1, updated_at = $2 WHERE id = $3 AND kind = 'human' RETURNING id`, [
+          input.passwordHash,
+          input.now,
+          input.userId
+        ])
+      : await ctx.query<{ id: string }>(
+          `UPDATE users SET password_hash = $1, updated_at = $2 WHERE id = $3 AND kind = 'human' AND password_hash = $4 RETURNING id`,
+          [input.passwordHash, input.now, input.userId, input.expectedPasswordHash]
+        );
+  return updated.length > 0;
+}
+
+export async function userHasSsoIdentity(ctx: PgContext, userId: string): Promise<boolean> {
+  return (await ctx.queryOne<{ one: number }>(`SELECT 1 AS one FROM sso_identities WHERE user_id = $1 LIMIT 1`, [userId])) !== null;
+}
+
 export async function closeUserInvites(ctx: PgContext, userId: string, now: string): Promise<number> {
   const closed = await ctx.query<{ id: string }>(`UPDATE user_invites SET accepted_at = $2 WHERE user_id = $1 AND accepted_at IS NULL RETURNING id`, [userId, now]);
   return closed.length;

@@ -1791,6 +1791,12 @@ export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentR
   acceptUserInvite(input: { tokenHash: string; passwordHash: string; now: string }): Promise<{ id: string; email: string; role: string } | null>;
   /** Marks the user's unaccepted invites accepted (the user signed in another way, for example SSO). */
   closeUserInvites(userId: string, now: string): Promise<number>;
+  /**
+   * Sets a person's password hash. With `expectedPasswordHash`, only while the stored hash is still that one
+   * (compare-and-set: of two changes made from the same old password, one wins). False when nothing was changed
+   * (unknown user, a service account, or the hash had changed).
+   */
+  setUserPassword(input: { userId: string; passwordHash: string; now: string; expectedPasswordHash?: string }): Promise<boolean>;
   /** Roadmap 7.3 — one page of listUsers' rows (newest first, id tiebreak) and the number of users. */
   listUsersPage(options: { limit: number; offset: number; kind?: StoredUserKind }): Promise<{
     items: StoredUserSummary[];
@@ -1939,6 +1945,8 @@ export interface Store extends AiGatewayStore, SubjectStore, ScimStore, ContentR
    * the IdP-scoped key). Does nothing and returns false when `from` does not exist or `to` already does.
    */
   renameSsoIdentitySubject(input: { provider: string; from: string; to: string }): Promise<boolean>;
+  /** Whether the user has signed in through single sign-on (an OIDC, SAML or LDAP identity is linked to the account). */
+  userHasSsoIdentity(userId: string): Promise<boolean>;
 
   // ---- Secrets and external secret providers
 
