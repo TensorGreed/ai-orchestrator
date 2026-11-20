@@ -123,3 +123,7 @@ helm upgrade ao ./ops/helm/l2m \
 ```
 
 Point your load balancer at `<release>-webhook` for `/webhook/*` routes and at `<release>-api` for everything else (the ingress template does this automatically).
+
+## Upgrading from the old chart path
+
+The chart was renamed from `ai-orchestrator` (at `ops/helm/ai-orchestrator`) to `l2m`. No chart was ever published under the old name. A release installed from the old path gets new resource names (`<release>-l2m-…`) and new `app.kubernetes.io/name` selector labels from the new chart, and Kubernetes does not allow a Deployment's selector to change in place: reinstall the release, or keep the old names and labels with `--set nameOverride=ai-orchestrator`. <!-- keep-old-name -->
