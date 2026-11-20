@@ -244,7 +244,7 @@ docker compose up --build
 - Web: `http://localhost:5173`
 - API: `http://localhost:4000`
 
-This builds the images from source. Tagged releases also publish signed multi-arch images to GHCR (`ghcr.io/tensorgreed/l2m`, `ghcr.io/tensorgreed/l2m-web`) with SBOMs and build provenance; see [Verify a release](https://lsquarem.com/docs/operations/verify-a-release) to check one and pin its digest.
+This builds the images from source. Tagged releases also publish signed multi-arch images to GHCR (`ghcr.io/tensorgreed/l2m`, `ghcr.io/tensorgreed/l2m-web`) with SBOMs and build provenance, and the same images on Docker Hub (`lsquarem/l2m`, `lsquarem/l2m-web`); see [Verify a release](https://lsquarem.com/docs/operations/verify-a-release) to check one and pin its digest.
 
 ## CI
 

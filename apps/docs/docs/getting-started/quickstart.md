@@ -54,7 +54,7 @@ Closed the welcome window? **Home** lists the same **Starters** first: click **U
 
 ## Run the released images
 
-Each `v*` release also ships signed, multi-arch API and web images on GHCR with SBOMs and build provenance. Check them and pin their digests before deploying: [Verify a release](../operations/verify-a-release.md).
+Each `v*` release also ships signed, multi-arch API and web images on GHCR with SBOMs and build provenance, also on Docker Hub as `lsquarem/l2m` and `lsquarem/l2m-web`. Check them and pin their digests before deploying: [Verify a release](../operations/verify-a-release.md).
 
 ## Run docs site
 

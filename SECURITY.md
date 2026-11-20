@@ -34,7 +34,7 @@ Out of scope:
 
 ## Verifying releases
 
-Every `v*` release publishes `ghcr.io/tensorgreed/l2m` (API) and `ghcr.io/tensorgreed/l2m-web` (Studio UI) for `linux/amd64` and `linux/arm64`, built by [`.github/workflows/release-images.yml`](.github/workflows/release-images.yml). Nothing is signed with a long-lived key: signatures and attestations use short-lived Sigstore certificates issued to that workflow through GitHub Actions OIDC, and are recorded in the public Rekor transparency log. For each image:
+Every `v*` release publishes `ghcr.io/tensorgreed/l2m` (API) and `ghcr.io/tensorgreed/l2m-web` (Studio UI) for `linux/amd64` and `linux/arm64`, built by [`.github/workflows/release-images.yml`](.github/workflows/release-images.yml), and the same images (same digests, signed in both places) on Docker Hub as `lsquarem/l2m` and `lsquarem/l2m-web`. Nothing is signed with a long-lived key: signatures and attestations use short-lived Sigstore certificates issued to that workflow through GitHub Actions OIDC, and are recorded in the public Rekor transparency log. For each image:
 
 - a **cosign signature** on the image digest the release tag points to;
 - **SLSA build provenance** for that digest (repository, tag, commit, workflow run), stored by GitHub and in GHCR;

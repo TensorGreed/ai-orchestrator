@@ -13,6 +13,8 @@ Every `v*` release tag publishes three multi-arch images (`linux/amd64`, `linux/
 | `ghcr.io/tensorgreed/l2m-web` | The Studio web UI (Nginx) |
 | `ghcr.io/tensorgreed/l2m-ner` | [l2m-ner](./entity-service.md), the optional entity service (no model weights; you pull the model yourself) |
 
+The same images are on Docker Hub as `lsquarem/l2m`, `lsquarem/l2m-web` and `lsquarem/l2m-ner`, with the same tags and the same digests, signed and SBOM-attested there by the same release workflow. To check a Docker Hub image, set `API=docker.io/lsquarem/l2m` (and `WEB`, `NER` likewise) below; everything else is unchanged.
+
 The release workflow ([`.github/workflows/release-images.yml`](https://github.com/TensorGreed/l2m/blob/main/.github/workflows/release-images.yml)) builds them in GitHub Actions and, before the tags are added, signs and attests them with keyless Sigstore certificates issued for that workflow run (GitHub OIDC; no long-lived keys exist). This page shows how to check, without trusting the project's word:
 
 - **which image** a tag points to (its digest),
