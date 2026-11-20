@@ -2204,6 +2204,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
     configSchema: {
       type: "object",
       properties: {
+        // false: calls answer "not found" (a call the provider signed is told `trigger_off`); unset = on.
+        active: { type: "boolean" },
         path: { type: "string" },
         signingSecretRef: { type: "object" },
         replayToleranceSeconds: { type: "number" }
@@ -2576,6 +2578,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
     configSchema: {
       type: "object",
       properties: {
+        // false: calls answer "not found" (a call the provider signed is told `trigger_off`); unset = on.
+        active: { type: "boolean" },
         path: { type: "string" },
         secretRef: { type: "object" }
       }
@@ -3205,6 +3209,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
     configSchema: {
       type: "object",
       properties: {
+        // false: calls answer "not found" (a call the provider signed is told `trigger_off`); unset = on.
+        active: { type: "boolean" },
         path: { type: "string" },
         signingSecretRef: { type: "object" },
         replayToleranceSeconds: { type: "number" }
@@ -3315,6 +3321,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
     configSchema: {
       type: "object",
       properties: {
+        // false: calls answer "not found" (a call the provider signed is told `trigger_off`); unset = on.
+        active: { type: "boolean" },
         path: { type: "string" },
         signingSecretRef: { type: "object" }
       }
@@ -3353,6 +3361,8 @@ const baseNodeDefinitions: NodeDefinition[] = [
     configSchema: {
       type: "object",
       properties: {
+        // false: calls answer "not found" (a call the provider signed is told `trigger_off`); unset = on.
+        active: { type: "boolean" },
         path: { type: "string" },
         publicKey: { type: "string" }
       },
@@ -3477,14 +3487,27 @@ export function isEntryNodeType(type: string): boolean {
 }
 
 /**
- * The triggers anyone can reach from outside once a workflow is saved: webhooks, forms, chats, MCP triggers and
- * schedules. Each can be switched off with `config.active: false`; for a webhook, form, chat or MCP trigger unset means
+ * App triggers: a provider (Slack, GitHub, Stripe, Telegram, Discord) calls `/api/webhooks/<app>/:workflowId`. Off,
+ * a call its provider signed answers "not found" with `trigger_off`; anything not signed gets a plain "not found".
+ */
+export const APP_TRIGGER_NODE_TYPES: ReadonlySet<string> = new Set(["slack_trigger", "github_webhook_trigger", "stripe_webhook_trigger", "telegram_trigger", "discord_trigger"]);
+
+/**
+ * The triggers anyone can reach from outside once a workflow is saved: webhooks, forms, chats, MCP triggers,
+ * schedules and app triggers. Each can be switched off with `config.active: false`; for all but a schedule unset means
  * on, as nodes saved before it had no such setting (a schedule's `active` is required, and fires only when true):
  * production calls to an off webhook, form, chat or MCP trigger answer "not found", the MCP gateway
  * leaves an off trigger's tool out, and an off schedule never fires; the `/webhook-test/` URL answers "not found" too.
  * Runs from the editor (Run, Webhook run) work either way. Starter templates and Describe it drafts ship with theirs off.
  */
-export const LIVE_ENTRY_NODE_TYPES: ReadonlySet<string> = new Set(["webhook_input", "form_trigger", "chat_trigger", "mcp_server_trigger", "schedule_trigger"]);
+export const LIVE_ENTRY_NODE_TYPES: ReadonlySet<string> = new Set([
+  "webhook_input",
+  "form_trigger",
+  "chat_trigger",
+  "mcp_server_trigger",
+  "schedule_trigger",
+  ...APP_TRIGGER_NODE_TYPES
+]);
 
 /** Whether `node` is a live entry point that is switched off (see LIVE_ENTRY_NODE_TYPES). */
 export function isLiveEntryOff(node: { type: string; config?: unknown }): boolean {
@@ -3497,6 +3520,16 @@ export function isLiveEntryOff(node: { type: string; config?: unknown }): boolea
 export const LIVE_ENTRY_OFF_CODE = "trigger_off";
 export function liveEntryOffMessage(type: string): string {
   const what =
-    type === "form_trigger" ? "form" : type === "chat_trigger" ? "chat" : type === "mcp_server_trigger" ? "MCP tool" : type === "schedule_trigger" ? "schedule" : "webhook";
+    type === "form_trigger"
+      ? "form"
+      : type === "chat_trigger"
+        ? "chat"
+        : type === "mcp_server_trigger"
+          ? "MCP tool"
+          : type === "schedule_trigger"
+            ? "schedule"
+            : APP_TRIGGER_NODE_TYPES.has(type)
+              ? "trigger"
+              : "webhook";
   return `This ${what} is turned off. Turn it on in the workflow editor to accept live calls.`;
 }

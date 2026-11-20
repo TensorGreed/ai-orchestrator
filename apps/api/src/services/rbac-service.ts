@@ -277,7 +277,15 @@ export class RbacService {
     const membership = await this.getMembership(user.id, projectId);
     if (membership) return membership.permissions;
     if (this.isolation === "strict") return [];
+    // A person share decides what a non-member has in its workflow's project, in every isolation mode: the shared
+    // workflow (canAccessWorkflow) and nothing else there (no other workflows, secrets, variables or project settings).
+    if (await this.hasPersonShareIn(user.id, projectId)) return [];
     return [...GLOBAL_ROLE_PERMISSIONS[user.role]];
+  }
+
+  /** Whether a workflow of `projectId` is shared with this person (a person share, not a share to a project). */
+  private async hasPersonShareIn(userId: string, projectId: string): Promise<boolean> {
+    return (await this.store.listWorkflowsSharedToUser(userId)).some((share) => share.projectId === projectId);
   }
 
   async can(user: SafeUser, projectId: string, permission: Permission): Promise<boolean> {

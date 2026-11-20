@@ -56,6 +56,12 @@ describe("an entry point that is off", () => {
     expect(screen.getByLabelText(/^Live calls/)).toHaveValue("on");
   });
 
+  it("an app trigger can be switched off too, and an off one says so", () => {
+    render(<NodeInspector {...props("slack_trigger", { ...sample("slack_trigger"), active: false })} />);
+    expect(screen.getByTestId("live-entry-off")).toHaveTextContent(/answer \u201cnot found\u201d until you turn it on/);
+    expect(screen.getByLabelText(/^Live calls/)).toHaveValue("off");
+  });
+
   it("an off webhook says so in one line and turns on in one click; saved, the switch is gone from the config", async () => {
     const user = userEvent.setup();
     const view = props("webhook_input", { path: "starter-reshape", method: "POST", authMode: "none", active: false });

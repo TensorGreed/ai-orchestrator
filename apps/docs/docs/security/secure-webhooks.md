@@ -39,11 +39,29 @@ A webhook, form, chat or MCP trigger whose `authMode` is set to a value it does 
 example) refuses every call with `500` and `"code": "unknown_auth_mode"`, instead of treating it as public. Pick an
 Auth Mode in its settings.
 
-## App triggers need their secret
+## App triggers (Slack, GitHub, Stripe, Telegram, Discord)
 
-The Telegram trigger refuses every call (`500`, "Telegram secret token not configured") until you pick the secret that
-holds its secret token, as the Slack, GitHub, Stripe and Discord triggers already did for their signing secrets.
-Telegram sends it in `X-Telegram-Bot-Api-Secret-Token` when you register the webhook with `secret_token`.
+`/api/webhooks/<app>/:workflowId` takes a call only when the provider's own signature or token checks out:
+
+- Each trigger needs its secret (Slack, Stripe: signing secret; GitHub: webhook secret; Telegram: secret token,
+  sent in `X-Telegram-Bot-Api-Secret-Token` when you register the webhook with `secret_token`; Discord: public key).
+- An unknown workflow id, a workflow without that trigger, a trigger with no secret set, and a call whose signature,
+  token or timestamp does not check out all get the same plain `404` (`{"error": "Not found"}`). The route never says
+  which workflow ids exist or which triggers lack a secret. Check the provider's delivery log for a `404` when you set
+  one up: it usually means the secret does not match.
+- Once the signature checks out: a trigger switched off (**Live calls** under **More**) answers `404` with
+  `"code": "trigger_off"`, a deactivated gated workflow `409`, and a version with unfinished settings `409`
+  `workflow_unfinished`.
+
+## Production webhook answers
+
+To anyone not signed in, `/webhook/:path` answers a path that does not exist, and a method the path does not take,
+with the same plain `404` (`{"error": "No webhook endpoint matches this path and method"}`): it lists no endpoints and
+no methods. A signed-in person (or an API key) who may run a workflow on that path gets the detail: `405` with the
+methods it takes, or the endpoints of that method they may run.
+
+A webhook switched off with a bearer token or HMAC signature says it is off (`trigger_off`) only to a call that passes
+that check; anyone else gets the plain `404`. One with Auth Mode **None** says it is off to anyone who has its path.
 
 ## The test URL (`/webhook-test/:path`)
 
@@ -60,8 +78,9 @@ The test URL runs the saved draft, so it is only for people who may edit the wor
 
 ## Switched off (`active: false`)
 
-A webhook, form, chat or MCP trigger whose node has `active: false` takes no production calls: `/webhook/:path`,
-`/api/forms/:path`, `/api/chat/:workflowId` and `/api/mcp-server/:path/*` answer `404` with `"code": "trigger_off"`,
+A webhook, form, chat, MCP or app trigger whose node has `active: false` takes no production calls: `/webhook/:path`,
+`/api/forms/:path`, `/api/chat/:workflowId`, `/api/mcp-server/:path/*` and the app routes answer `404` with
+`"code": "trigger_off"` (a protected webhook and the app routes only once the caller's token or signature checks out),
 and the MCP gateway leaves the tool out. `/webhook-test/:path` answers the same `404`. The editor's **Run** and
 **Webhook run** still work.
 Unset means on, so nodes saved before the setting are unchanged. Starter templates ship with theirs off; the node's

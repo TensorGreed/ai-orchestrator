@@ -244,3 +244,54 @@ describe.each(["role", "strict"] as const)("the test webhook URL needs someone w
     expect(withBoth.statusCode, withBoth.body).toBe(200);
   });
 });
+
+describe.each(["role", "strict"] as const)("the production webhook URL lists nothing to anonymous callers (PROJECT_ISOLATION=%s)", (mode) => {
+  beforeAll(() => {
+    isolation = mode;
+  });
+  afterAll(() => {
+    isolation = "role";
+  });
+
+  it("a missing path and a wrong method get the plain 404; a signed-in person who may run it gets the detail, for their workflows only", async () => {
+    const { context, owner, outsider, viewer } = await seed();
+    for (const [method, url] of [["POST", "/webhook/no-such-hook"], ["GET", "/webhook/orders-wf-a"], ["DELETE", "/webhook/orders-wf-a"]] as const) {
+      const response = await context.app.inject({ method, url, payload: method === "GET" ? undefined : {} });
+      expect(response.statusCode, `${method} ${url}`).toBe(404);
+      expect(response.json(), `${method} ${url}`).toEqual(PLAIN_404);
+    }
+    // A viewer (may not run) learns nothing either.
+    expect((await context.app.inject({ method: "GET", url: "/webhook/orders-wf-a", headers: { cookie: viewer.cookie } })).json()).toEqual(PLAIN_404);
+    // The owner is told the methods it takes, and the endpoints she may run.
+    const wrongMethod = await context.app.inject({ method: "GET", url: "/webhook/orders-wf-a", headers: { cookie: owner.cookie } });
+    expect(wrongMethod.statusCode).toBe(405);
+    expect(wrongMethod.json()).toMatchObject({ allowedMethods: ["POST"] });
+    const missing = await context.app.inject({ method: "POST", url: "/webhook/no-such-hook", headers: { cookie: owner.cookie }, payload: {} });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json<{ availableEndpoints: Array<{ workflowId: string }> }>().availableEndpoints.map((entry) => entry.workflowId)).toEqual(["wf-a"]);
+    const outsiderMissing = await context.app.inject({ method: "POST", url: "/webhook/no-such-hook", headers: { cookie: outsider.cookie }, payload: {} });
+    const listed = outsiderMissing.json<{ availableEndpoints?: Array<{ workflowId: string }> }>().availableEndpoints ?? [];
+    expect(listed.map((entry) => entry.workflowId)).toEqual(mode === "role" ? ["wf-a"] : []);
+    // The call itself still works anonymously.
+    expect((await context.app.inject({ method: "POST", url: "/webhook/orders-wf-a", payload: { customer: "Ana" } })).statusCode).toBe(200);
+  });
+
+  it("a webhook switched off says so only to a caller that passes its token check; anyone else gets the plain 404", async () => {
+    const { context } = await seed();
+    const secret = await context.secretService.createSecret({ name: "hook token", provider: "webhook", value: "tok-off", projectId: "team" });
+    await context.store.upsertWorkflow(hookWorkflow("wf-off-bearer", { active: false, authMode: "bearer_token", authHeaderName: "authorization", secretRef: secret }));
+    await context.store.upsertWorkflow(hookWorkflow("wf-off-open", { active: false }));
+    for (const headers of [{}, { authorization: "Bearer wrong" }]) {
+      const refused = await context.app.inject({ method: "POST", url: "/webhook/orders-wf-off-bearer", headers, payload: {} });
+      expect(refused.statusCode).toBe(404);
+      expect(refused.json()).toEqual(PLAIN_404);
+    }
+    const told = await context.app.inject({ method: "POST", url: "/webhook/orders-wf-off-bearer", headers: { authorization: "Bearer tok-off" }, payload: {} });
+    expect(told.statusCode).toBe(404);
+    expect(told.json()).toMatchObject({ code: LIVE_ENTRY_OFF_CODE });
+    // No token to check: the path is the only key, and it says it is off.
+    expect((await context.app.inject({ method: "POST", url: "/webhook/orders-wf-off-open", payload: {} })).json()).toMatchObject({ code: LIVE_ENTRY_OFF_CODE });
+    expect((await context.store.listExecutionHistory({ page: 1, pageSize: 10 })).total).toBe(0);
+  });
+});
+

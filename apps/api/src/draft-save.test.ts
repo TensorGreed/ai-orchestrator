@@ -391,7 +391,11 @@ describe("live triggers of an unfinished draft", () => {
     expect(await pausedNotes(context, "wf-hook-draft")).toHaveLength(0);
     const authorized = await context.app.inject({ method: "POST", url: "/webhook/draft-orders", headers: { authorization: "Bearer s3cret-token" }, payload: {} });
     expect(authorized.statusCode, authorized.body).toBe(409);
-    expect((await context.app.inject({ method: "PUT", url: "/webhook/draft-orders", payload: {} })).statusCode).toBe(405);
+    // A method nobody serves: anonymous callers get the plain 404; a signed-in editor is told the methods it takes.
+    const anonymousPut = await context.app.inject({ method: "PUT", url: "/webhook/draft-orders", payload: {} });
+    expect(anonymousPut.statusCode).toBe(404);
+    expect(anonymousPut.json()).toEqual({ error: "No webhook endpoint matches this path and method" });
+    expect((await context.app.inject({ method: "PUT", url: "/webhook/draft-orders", headers: { cookie }, payload: {} })).statusCode).toBe(405);
     expect(await runs(context, "wf-hook-draft")).toHaveLength(0);
   });
 

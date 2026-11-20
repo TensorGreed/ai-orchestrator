@@ -15,6 +15,8 @@ This page puts L2M's access model on one page. The details are in [Authenticatio
 2. **The workflow's project.** Then the route checks a permission (such as `workflow:execute`) in the workflow's
    project. It comes from the person's project membership. Without one, it depends on `PROJECT_ISOLATION` (below).
 3. **Shares.** A share can add read or run on one workflow. A share never gives edit, delete, publish or re-sharing.
+   For someone who is not a member of the workflow's project, a person share is all they have in that project, in
+   both isolation modes.
 4. **API keys.** A key acts as its owner. Its scope can narrow that, never widen it.
 
 Both checks must pass. A membership cannot let a viewer call a builder route, and a role cannot reach a project the
@@ -117,8 +119,9 @@ are not a member of a project it is shared to, and are not an admin.
 - `GET /api/workflows/:id/access` answers `ownRunsOnly: true`.
 
 It holds under both `PROJECT_ISOLATION` settings. Under `role`, the global role that opens every project to a
-non-member does not count for a workflow shared with them: the person share decides, and they see their own runs.
-Workflows that are not shared with them keep the view their role gives.
+non-member does not count in a project where a workflow is shared with them: the person share decides. They see the
+shared workflow and their own runs of it, and nothing else of that project: no other workflow, secret, variable,
+member list or project setting. Other projects keep the view their role gives. Removing the share gives the role back.
 
 The share also caps what they may do with it, under both settings: a builder whose access to a workflow comes only
 from a person share gets the share's level, as anyone else would. **Can view** reads it; **Can view and run** also runs

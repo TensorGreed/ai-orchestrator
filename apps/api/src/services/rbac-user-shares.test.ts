@@ -11,7 +11,11 @@ const shares: Record<string, "read" | "execute"> = { "wf|u-viewer": "execute", "
 const store = {
   getWorkflowUserShare: async (workflowId: string, userId: string) => (shares[`${workflowId}|${userId}`] ? { accessLevel: shares[`${workflowId}|${userId}`] } : null),
   getProjectRole: async () => null,
-  listWorkflowShares: async () => []
+  listWorkflowShares: async () => [],
+  listWorkflowsSharedToUser: async (userId: string) =>
+    Object.entries(shares)
+      .filter(([key]) => key.endsWith(`|${userId}`))
+      .map(([key, accessLevel]) => ({ workflowId: key.split("|")[0]!, accessLevel, name: "x", projectId: "team", updatedAt: null }))
 } as unknown as Store;
 
 const user = (role: SafeUser["role"], extra: Partial<SafeUser> = {}): SafeUser => ({ id: `u-${role}`, email: `${role}@x`, role, ...extra });
@@ -87,10 +91,15 @@ describe("a person share caps the person at the share under role isolation", () 
     expect(await rbac.mayManageWorkflowShares(user("builder"), wf)).toBe(false);
     // An operator with an execute share runs it.
     expect(await rbac.canAccessWorkflow(user("operator"), wf, "workflow:execute")).toBe(true);
-    // A workflow not shared with the builder keeps the role's permissions (role isolation).
+    // The share decides what the builder has in its project: no other workflow there, and no project permission.
     const other = { id: "other", projectId: "team" };
-    expect(await rbac.canAccessWorkflow(user("builder"), other, "workflow:write")).toBe(true);
-    expect(await rbac.mayManageWorkflowShares(user("builder"), other)).toBe(true);
+    expect(await rbac.canAccessWorkflow(user("builder"), other, "workflow:read")).toBe(false);
+    expect(await rbac.mayManageWorkflowShares(user("builder"), other)).toBe(false);
+    for (const permission of ["secret:read", "secret:write", "secret:use", "project:manage", "project:invite", "workflow:read"] as const) {
+      expect(await rbac.can(user("builder"), "team", permission), permission).toBe(false);
+    }
+    // Another project keeps what role isolation lends the builder.
+    expect(await rbac.canAccessWorkflow(user("builder"), { id: "elsewhere-wf", projectId: "elsewhere" }, "workflow:write")).toBe(true);
     // Admins are never capped.
     expect(await rbac.canAccessWorkflow(user("admin"), wf, "workflow:write")).toBe(true);
   });

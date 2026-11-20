@@ -377,7 +377,8 @@ See [Approval gates](../product/approvals.md). Release requests (Phase 15.4) app
 ## Webhooks
 
 - `POST /api/webhooks/execute` and `POST /api/webhooks/execute/stream` (operator and up with `workflow:execute`; an operator's run uses no pinned data; `{ workflow_id?, webhook_path?, session_id?, system_prompt?, user_prompt?, variables?, customData?, payload? }`). `payload` is the request body the run's webhook receives (what <span v-pre>`{{webhook.<field>}}`</span> reads), with the prompt fields on top of it, as a call to `/webhook/:path` gets them; without it the body holds the prompt fields only.
-- `ANY /webhook/:path` (production: answers `409` with `code: "workflow_unfinished"`, and starts no run, while the version production would run has unfinished node settings)
+- `ANY /webhook/:path` (production: answers `409` with `code: "workflow_unfinished"`, and starts no run, while the version production would run has unfinished node settings; a missing path or wrong method answers a plain `404` that lists nothing unless the caller is signed in, or sends an API key, and may run a workflow there)
+- `POST /api/webhooks/{slack,github,stripe,telegram,discord}/:workflowId` (anything the provider did not sign, an unknown id and a trigger without its secret all answer a plain `404`; once signed: `404` `trigger_off` when off, `409` when deactivated or unfinished)
 - `ANY /webhook-test/:path` (runs the draft: a signed-in session or an API key, in `Authorization: Bearer` or `X-API-Key`, of someone with edit access; anyone else gets a plain `404`; an operator with run access only gets `403`; an off webhook answers `404` with `code: "trigger_off"`)
 
 ### Content rules on responses (`content_filter`)

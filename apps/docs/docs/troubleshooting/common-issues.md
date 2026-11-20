@@ -40,6 +40,13 @@ The webhook (or form, chat or MCP trigger) is switched off, as a starter templat
 trigger node, click **Turn on** and save. The editor's **Run** and **Webhook run** work while it is off; the
 `/webhook-test/` URL answers the same `404` until you turn it on.
 
+## Webhook 404 with no detail
+
+Called without signing in, `/webhook/:path` answers a missing path and a wrong method with the same plain `404`, and
+lists nothing. Call it signed in (or with an API key) to see the methods the path takes and the endpoints you may run.
+App webhooks (`/api/webhooks/<app>/:workflowId`) answer a plain `404` to anything their provider did not sign: check
+that the trigger's secret matches the provider's.
+
 ## Webhook 404 on `/webhook-test/:path`
 
 The test URL runs the draft, so it answers only someone who may edit the workflow: a signed-in session in the same

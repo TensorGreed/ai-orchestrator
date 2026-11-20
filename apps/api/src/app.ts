@@ -6292,6 +6292,43 @@ export async function createApp(
     reply.code(refusal ? 409 : 404);
     return productionRefusalBody(refusal, "Workflow not found");
   };
+  /**
+   * An app trigger's route (Slack, GitHub, Stripe, Telegram, Discord): the workflow production would run (unfinished
+   * or deactivated included, so the caller can be checked first) and its trigger node; null when there is none. Until
+   * the provider's own signature or token is verified, every refusal is the same plain 404 (appTriggerNotFound), so the
+   * route never tells a caller which workflow ids exist or which triggers lack a secret.
+   */
+  const appTriggerTarget = async (workflowId: string, nodeType: string): Promise<{ workflow: Workflow; node: WorkflowNode; deactivated: boolean } | null> => {
+    const live = await productionTriggerWorkflow(workflowId);
+    const deactivated = live ? null : await releaseService.deactivatedProductionWorkflow(workflowId);
+    const workflow = live ?? deactivated;
+    const node = workflow?.nodes.find((entry) => entry.type === nodeType);
+    return workflow && node ? { workflow, node, deactivated: deactivated !== null } : null;
+  };
+  const appTriggerNotFound = (reply: FastifyReply): { error: string } => {
+    reply.code(404);
+    return { error: APP_TRIGGER_NOT_FOUND_MESSAGE };
+  };
+  /** After the provider's signature passed: why production does not take the call (deactivated, off, unfinished), or null. */
+  const appTriggerRefusal = async (
+    reply: FastifyReply,
+    target: { workflow: Workflow; node: WorkflowNode; deactivated: boolean }
+  ): Promise<{ error: string; code?: string } | null> => {
+    if (target.deactivated) {
+      reply.code(409);
+      return productionRefusalBody(DEACTIVATED_MESSAGE, APP_TRIGGER_NOT_FOUND_MESSAGE);
+    }
+    if (isLiveEntryOff(target.node)) {
+      reply.code(404);
+      return { error: liveEntryOffMessage(target.node.type), code: LIVE_ENTRY_OFF_CODE };
+    }
+    const paused = await releaseService.pausedRefusal(target.workflow);
+    if (paused) {
+      reply.code(409);
+      return { error: paused, code: "workflow_unfinished" };
+    }
+    return null;
+  };
   /** Phase 15.4 — the deactivated gated workflow whose published version has a node matching `matches`, for a "deactivated" answer. */
   const deactivatedMatch = async (matches: (workflow: Workflow) => boolean): Promise<Workflow | null> => {
     for (const summary of await store.listWorkflows()) {
@@ -12916,39 +12953,25 @@ export async function createApp(
     "/api/webhooks/slack/:workflowId",
     { config: { rawBody: true } },
     async (request, reply) => {
-      const workflow = await productionWorkflow(request.params.workflowId);
-      if (!workflow) return await productionMissing(reply, request.params.workflowId);
-      const slackNode = workflow.nodes.find((n) => n.type === "slack_trigger");
-      if (!slackNode) {
-        reply.code(400);
-        return { error: "Workflow has no slack_trigger node" };
-      }
+      const target = await appTriggerTarget(request.params.workflowId, "slack_trigger");
+      if (!target) return appTriggerNotFound(reply);
+      const { workflow, node: slackNode } = target;
       const rawBody = typeof request.rawBody === "string" ? request.rawBody : "";
 
       const secretRef = toSecretReference((slackNode.config as Record<string, unknown>).signingSecretRef);
       const signingSecret = await secretService.resolveSecret(secretRef);
-      if (!signingSecret) {
-        reply.code(500);
-        return { error: "Slack signing secret not configured" };
-      }
+      if (!signingSecret) return appTriggerNotFound(reply);
       const ts = getHeaderValue(request.headers, "x-slack-request-timestamp");
       const sig = getHeaderValue(request.headers, "x-slack-signature");
-      if (!ts || !sig) {
-        reply.code(401);
-        return { error: "Missing Slack signature headers" };
-      }
+      if (!ts || !sig) return appTriggerNotFound(reply);
       const tsMs = Number(ts) * 1000;
       const tolerance = Number((slackNode.config as Record<string, unknown>).replayToleranceSeconds ?? 300) * 1000;
-      if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > tolerance) {
-        reply.code(401);
-        return { error: "Slack timestamp outside tolerance" };
-      }
+      if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > tolerance) return appTriggerNotFound(reply);
       const basestring = `v0:${ts}:${rawBody}`;
       const expected = `v0=${crypto.createHmac("sha256", signingSecret).update(basestring).digest("hex")}`;
-      if (!safeEqualSecret(expected, sig)) {
-        reply.code(401);
-        return { error: "Slack signature mismatch" };
-      }
+      if (!safeEqualSecret(expected, sig)) return appTriggerNotFound(reply);
+      const refused = await appTriggerRefusal(reply, target);
+      if (refused) return refused;
 
       // URL verification challenge handshake.
       const body = request.body as Record<string, unknown> | undefined;
@@ -13034,30 +13057,19 @@ export async function createApp(
     "/api/webhooks/github/:workflowId",
     { config: { rawBody: true } },
     async (request, reply) => {
-      const workflow = await productionWorkflow(request.params.workflowId);
-      if (!workflow) return await productionMissing(reply, request.params.workflowId);
-      const ghNode = workflow.nodes.find((n) => n.type === "github_webhook_trigger");
-      if (!ghNode) {
-        reply.code(400);
-        return { error: "Workflow has no github_webhook_trigger node" };
-      }
+      const target = await appTriggerTarget(request.params.workflowId, "github_webhook_trigger");
+      if (!target) return appTriggerNotFound(reply);
+      const { workflow, node: ghNode } = target;
       const rawBody = typeof request.rawBody === "string" ? request.rawBody : "";
       const secretRef = toSecretReference((ghNode.config as Record<string, unknown>).secretRef);
       const secret = await secretService.resolveSecret(secretRef);
-      if (!secret) {
-        reply.code(500);
-        return { error: "GitHub webhook secret not configured" };
-      }
+      if (!secret) return appTriggerNotFound(reply);
       const sig = getHeaderValue(request.headers, "x-hub-signature-256");
-      if (!sig) {
-        reply.code(401);
-        return { error: "Missing X-Hub-Signature-256 header" };
-      }
+      if (!sig) return appTriggerNotFound(reply);
       const expected = `sha256=${crypto.createHmac("sha256", secret).update(rawBody).digest("hex")}`;
-      if (!safeEqualSecret(expected, sig)) {
-        reply.code(401);
-        return { error: "GitHub signature mismatch" };
-      }
+      if (!safeEqualSecret(expected, sig)) return appTriggerNotFound(reply);
+      const refused = await appTriggerRefusal(reply, target);
+      if (refused) return refused;
       // A redelivery (the same X-GitHub-Delivery) of a delivery already taken starts no second run.
       const deliveryId = getHeaderValue(request.headers, "x-github-delivery");
       const deliveryKey = deliveryId ? `${workflow.id}:${deliveryId}` : null;
@@ -13102,44 +13114,27 @@ export async function createApp(
     "/api/webhooks/stripe/:workflowId",
     { config: { rawBody: true } },
     async (request, reply) => {
-      const workflow = await productionWorkflow(request.params.workflowId);
-      if (!workflow) return await productionMissing(reply, request.params.workflowId);
-      const stripeNode = workflow.nodes.find((n) => n.type === "stripe_webhook_trigger");
-      if (!stripeNode) {
-        reply.code(400);
-        return { error: "Workflow has no stripe_webhook_trigger node" };
-      }
+      const target = await appTriggerTarget(request.params.workflowId, "stripe_webhook_trigger");
+      if (!target) return appTriggerNotFound(reply);
+      const { workflow, node: stripeNode } = target;
       const rawBody = getRawRequestBody(request);
       const secretRef = toSecretReference((stripeNode.config as Record<string, unknown>).signingSecretRef);
       const signingSecret = await secretService.resolveSecret(secretRef);
-      if (!signingSecret) {
-        reply.code(500);
-        return { error: "Stripe signing secret not configured" };
-      }
+      if (!signingSecret) return appTriggerNotFound(reply);
       const sigHeader = getHeaderValue(request.headers, "stripe-signature");
-      if (!sigHeader) {
-        reply.code(401);
-        return { error: "Missing Stripe-Signature header" };
-      }
+      if (!sigHeader) return appTriggerNotFound(reply);
       const parts = sigHeader.split(",").map((p) => p.trim());
       const ts = parts.find((p) => p.startsWith("t="))?.slice(2) ?? "";
       const v1Signatures = parts.filter((p) => p.startsWith("v1=")).map((p) => p.slice(3));
-      if (!ts || v1Signatures.length === 0) {
-        reply.code(401);
-        return { error: "Malformed Stripe-Signature header" };
-      }
+      if (!ts || v1Signatures.length === 0) return appTriggerNotFound(reply);
       const tsMs = Number(ts) * 1000;
       const tolerance = Number((stripeNode.config as Record<string, unknown>).replayToleranceSeconds ?? 300) * 1000;
-      if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > tolerance) {
-        reply.code(401);
-        return { error: "Stripe timestamp outside tolerance" };
-      }
+      if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > tolerance) return appTriggerNotFound(reply);
       const expected = crypto.createHmac("sha256", signingSecret).update(`${ts}.${rawBody}`).digest("hex");
       const matches = v1Signatures.some((sig) => safeEqualSecret(expected, sig));
-      if (!matches) {
-        reply.code(401);
-        return { error: "Stripe signature mismatch" };
-      }
+      if (!matches) return appTriggerNotFound(reply);
+      const refused = await appTriggerRefusal(reply, target);
+      if (refused) return refused;
 
       const body = request.body as Record<string, unknown> | undefined;
       const executionId = crypto.randomUUID();
@@ -13169,24 +13164,16 @@ export async function createApp(
     "/api/webhooks/telegram/:workflowId",
     { config: { rawBody: true } },
     async (request, reply) => {
-      const workflow = await productionWorkflow(request.params.workflowId);
-      if (!workflow) return await productionMissing(reply, request.params.workflowId);
-      const tgNode = workflow.nodes.find((n) => n.type === "telegram_trigger");
-      if (!tgNode) {
-        reply.code(400);
-        return { error: "Workflow has no telegram_trigger node" };
-      }
+      const target = await appTriggerTarget(request.params.workflowId, "telegram_trigger");
+      if (!target) return appTriggerNotFound(reply);
+      const { workflow, node: tgNode } = target;
       const secretRef = toSecretReference((tgNode.config as Record<string, unknown>).signingSecretRef);
       const configuredSecret = await secretService.resolveSecret(secretRef);
-      if (!configuredSecret) {
-        reply.code(500);
-        return { error: "Telegram secret token not configured" };
-      }
+      if (!configuredSecret) return appTriggerNotFound(reply);
       const headerValue = getHeaderValue(request.headers, "x-telegram-bot-api-secret-token");
-      if (!headerValue || !safeEqualSecret(configuredSecret, headerValue)) {
-        reply.code(401);
-        return { error: "Telegram secret token mismatch" };
-      }
+      if (!headerValue || !safeEqualSecret(configuredSecret, headerValue)) return appTriggerNotFound(reply);
+      const refused = await appTriggerRefusal(reply, target);
+      if (refused) return refused;
 
       const body = request.body as Record<string, unknown> | undefined;
       const executionId = crypto.randomUUID();
@@ -13215,26 +13202,17 @@ export async function createApp(
     "/api/webhooks/discord/:workflowId",
     { config: { rawBody: true } },
     async (request, reply) => {
-      const workflow = await productionWorkflow(request.params.workflowId);
-      if (!workflow) return await productionMissing(reply, request.params.workflowId);
-      const dcNode = workflow.nodes.find((n) => n.type === "discord_trigger");
-      if (!dcNode) {
-        reply.code(400);
-        return { error: "Workflow has no discord_trigger node" };
-      }
+      const target = await appTriggerTarget(request.params.workflowId, "discord_trigger");
+      if (!target) return appTriggerNotFound(reply);
+      const { workflow, node: dcNode } = target;
       const rawBody = getRawRequestBody(request);
       const nodeConfig = dcNode.config as Record<string, unknown>;
       const publicKeyHex = typeof nodeConfig.publicKey === "string" ? nodeConfig.publicKey.trim() : "";
-      if (!publicKeyHex) {
-        reply.code(500);
-        return { error: "Discord publicKey not configured" };
-      }
+      if (!publicKeyHex) return appTriggerNotFound(reply);
       const signature = getHeaderValue(request.headers, "x-signature-ed25519");
       const timestamp = getHeaderValue(request.headers, "x-signature-timestamp");
-      if (!signature || !timestamp) {
-        reply.code(401);
-        return { error: "Missing Discord signature headers" };
-      }
+      if (!signature || !timestamp) return appTriggerNotFound(reply);
+      let verified = false;
       try {
         const publicKey = Buffer.from(publicKeyHex, "hex");
         const sig = Buffer.from(signature, "hex");
@@ -13247,15 +13225,13 @@ export async function createApp(
           format: "der",
           type: "spki"
         });
-        const verified = crypto.verify(null, message, keyObject, sig);
-        if (!verified) {
-          reply.code(401);
-          return { error: "Discord signature mismatch" };
-        }
-      } catch (err) {
-        reply.code(401);
-        return { error: `Discord signature verification failed: ${err instanceof Error ? err.message : String(err)}` };
+        verified = crypto.verify(null, message, keyObject, sig);
+      } catch {
+        verified = false;
       }
+      if (!verified) return appTriggerNotFound(reply);
+      const refused = await appTriggerRefusal(reply, target);
+      if (refused) return refused;
 
       const body = request.body as Record<string, unknown> | undefined;
       // Discord interactions ping — must reply with type=1 immediately.
@@ -14108,7 +14084,9 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
     }
   });
 
-  const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and method";
+  /** What an app trigger route answers to anything but a verified call to a live trigger (see appTriggerTarget). */
+const APP_TRIGGER_NOT_FOUND_MESSAGE = "Not found";
+const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and method";
   const WEBHOOK_TEST_DRAFT_MESSAGE =
     "The test URL runs the draft, which needs a builder role and edit access to the workflow. Call the webhook's own URL to run the released version.";
   /**
@@ -14199,9 +14177,17 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
               return { error: DEACTIVATED_MESSAGE, path: request.params.path };
             }
           }
+          // Production: only a signed-in person (or an API key) who may run a workflow on this path is told more than
+          // the plain 404 (the methods it takes, the endpoints of that method); anyone else learns nothing, not even
+          // that the path exists with another method.
+          const detailCaller = isTestRoute ? testCaller : await webhookTestCaller(request);
+          if (!detailCaller) {
+            reply.code(404);
+            return { error: NO_WEBHOOK_MATCH_MESSAGE };
+          }
           const pathMatches = await filterAsync(
             await listWebhookEndpointMatchesByPath(store, request.params.path, loadForRoute, !isTestRoute),
-            async (entry) => !testCaller || (await runAccess.workflow(testCaller, entry.workflowId, "workflow:execute")).ok
+            async (entry) => (await runAccess.workflow(detailCaller, entry.workflowId, "workflow:execute")).ok
           );
           if (pathMatches.length > 0) {
             const allowedMethods = [...new Set(pathMatches.map((entry) => entry.method))];
@@ -14217,8 +14203,11 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
           }
           reply.code(404);
           if (isTestRoute) return { error: NO_WEBHOOK_MATCH_MESSAGE };
-          const allEndpoints = await listAllWebhookEndpoints(store, loadForRoute, true);
-          const methodMatches = allEndpoints.filter((entry) => entry.method === request.method).slice(0, 20);
+          const allEndpoints = await filterAsync(
+            await listAllWebhookEndpoints(store, loadForRoute, true),
+            async (entry) => entry.method === request.method && (await runAccess.workflow(detailCaller, entry.workflowId, "workflow:execute")).ok
+          );
+          const methodMatches = allEndpoints.slice(0, 20);
           return {
             error: NO_WEBHOOK_MATCH_MESSAGE,
             path: request.params.path,
@@ -14230,7 +14219,24 @@ button{padding:10px 16px;background:#2b6cb0;color:#fff;border:none;border-radius
 
         // A webhook switched off (a starter's, until its owner turns it on) takes no calls on its URL or its test URL;
         // the editor's Run and Webhook run still work.
+        // On production, a webhook with a token or signature says it is off only to a caller that passes that check;
+        // anyone else gets the plain 404.
         if (match.endpoint.config.active === false) {
+          const offSecurity = normalizeWebhookSecurityConfig(match.endpoint.config);
+          if (!isTestRoute && offSecurity.authMode !== "none") {
+            const offAuth = await verifyWebhookRequestAuth({
+              security: offSecurity,
+              headers: request.headers as Record<string, unknown>,
+              rawBody: getRawRequestBody(request as unknown as { rawBody?: unknown; body: unknown }),
+              endpointKey: `off:${match.workflow.id}:${match.endpoint.nodeId}`,
+              store,
+              secretService
+            });
+            if (!offAuth.ok) {
+              reply.code(404);
+              return { error: NO_WEBHOOK_MATCH_MESSAGE };
+            }
+          }
           reply.code(404);
           return { error: liveEntryOffMessage("webhook_input"), code: LIVE_ENTRY_OFF_CODE, path: request.params.path };
         }

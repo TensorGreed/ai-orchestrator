@@ -60,6 +60,7 @@ Webhook-based trigger validated with Ed25519 signature (X-Signature-Ed25519 + X-
 
 | Field | Type | Required | Values |
 |---|---|---|---|
+| `active` | `boolean` | no | — |
 | `path` | `string` | no | — |
 | `publicKey` | `string` | yes | — |
 
@@ -187,6 +188,7 @@ Webhook trigger that validates the X-Hub-Signature-256 header. Point a GitHub we
 
 | Field | Type | Required | Values |
 |---|---|---|---|
+| `active` | `boolean` | no | — |
 | `path` | `string` | no | — |
 | `secretRef` | `object` | no | — |
 
@@ -563,6 +565,7 @@ Webhook-based trigger that validates Slack signing secret. Point Slack Events at
 
 | Field | Type | Required | Values |
 |---|---|---|---|
+| `active` | `boolean` | no | — |
 | `path` | `string` | no | — |
 | `signingSecretRef` | `object` | no | — |
 | `replayToleranceSeconds` | `number` | no | — |
@@ -616,6 +619,7 @@ Webhook-based trigger that validates Stripe signatures. Point Stripe at /api/web
 
 | Field | Type | Required | Values |
 |---|---|---|---|
+| `active` | `boolean` | no | — |
 | `path` | `string` | no | — |
 | `signingSecretRef` | `object` | yes | — |
 | `replayToleranceSeconds` | `number` | no | — |
@@ -681,6 +685,7 @@ Webhook-based trigger validated by X-Telegram-Bot-Api-Secret-Token; refuses ever
 
 | Field | Type | Required | Values |
 |---|---|---|---|
+| `active` | `boolean` | no | — |
 | `path` | `string` | no | — |
 | `signingSecretRef` | `object` | yes | — |
 

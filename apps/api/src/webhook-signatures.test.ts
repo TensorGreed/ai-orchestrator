@@ -122,7 +122,7 @@ describe("signed webhooks hash the body as it arrived", () => {
       headers: { "content-type": "application/json", "x-hub-signature-256": signature, "x-github-delivery": "d-2" },
       payload: PRETTY_BODY.replace("two words", "three words")
     });
-    expect(tampered.statusCode).toBe(401);
+    expect(tampered.statusCode).toBe(404);
   });
 
   it("GitHub: the same X-GitHub-Delivery within the window starts no second run", async () => {
@@ -197,7 +197,7 @@ describe("signed webhooks hash the body as it arrived", () => {
       headers: { "content-type": "application/json", "x-slack-request-timestamp": ts, "x-slack-signature": sign(ts, body) },
       payload: body.replace("hi", "bye")
     });
-    expect(tampered.statusCode).toBe(401);
+    expect(tampered.statusCode).toBe(404);
   });
 
   it("Slack: a URL verification challenge over a pretty-printed body is answered", async () => {
@@ -272,7 +272,7 @@ describe("signed webhooks hash the body as it arrived", () => {
       headers: { "content-type": "application/json", "stripe-signature": `t=${t},v1=${v1}` },
       payload: JSON.stringify(JSON.parse(PRETTY_BODY))
     });
-    expect(compact.statusCode).toBe(401);
+    expect(compact.statusCode).toBe(404);
   });
 
   it("generic webhook HMAC mode: a signature over a pretty-printed body is accepted; a re-serialised body is refused", async () => {

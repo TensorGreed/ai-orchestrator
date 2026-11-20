@@ -23,6 +23,7 @@ interface TestContext {
   app: FastifyInstance;
   store: Store;
   authService: AuthService;
+  secretService: SecretService;
   config: AppConfig;
   tempDir: string;
 }
@@ -52,7 +53,7 @@ async function createTestContext(options: { queue?: boolean } = {}): Promise<Tes
   const queue = options.queue === false ? undefined : new QueueService(store, { pollIntervalMs: 3_600_000 });
   const app = await createApp(config, store, secretService, authService, undefined, queue);
   await app.ready();
-  const context: TestContext = { app, store, authService, config, tempDir };
+  const context: TestContext = { app, store, authService, secretService, config, tempDir };
   contexts.push(context);
   return context;
 }
@@ -217,8 +218,8 @@ describe.each(["strict", "role"] as const)("a person who has a workflow only thr
     expect(await access(gus)).toMatchObject({ canEdit: false, canRun: true, canShare: false });
     expect(await access(owner)).toMatchObject({ canEdit: true, canRun: true, canShare: true });
     expect(await access(admin)).toMatchObject({ canEdit: true, canRun: true, canShare: true });
-    if (mode === "role") expect(await access(gus, "wf-other")).toMatchObject({ canEdit: true, canRun: true, canShare: true });
-    else expect((await call(context, "GET", "/api/workflows/wf-other/access", gus.cookie)).statusCode).toBe(404);
+    // The share decides what he has in its project, in both modes: no other workflow there.
+    expect((await call(context, "GET", "/api/workflows/wf-other/access", gus.cookie)).statusCode).toBe(404);
 
     // He runs it (the released version, with his own input).
     await run(gus);
@@ -451,16 +452,37 @@ describe.each(["strict", "role"] as const)("a person who has a workflow only thr
     expect((await call(context, "GET", "/api/workflows/wf-team/access", gus.cookie)).json<{ ownRunsOnly: boolean }>().ownRunsOnly).toBe(false);
   });
 
-  it.runIf(mode === "role")("with role isolation, a workflow not shared with the person keeps today's view: their global role reads every run", async () => {
-    const { context, owner, olivia, run } = await seed();
+  it("the share is all the person has in its project: no other workflow, secret, variable or project setting there", async () => {
+    const { context, owner, olivia, gus, run } = await seed();
     await context.store.upsertWorkflow({ ...echoWorkflow("wf-open"), name: "Open" });
     const ownerRun = await run(owner, "wf-open");
-    // Not shared with Olivia: her operator role reads the project, and every run of it.
-    expect((await call(context, "GET", `/api/executions/${ownerRun}`, olivia.cookie)).statusCode).toBe(200);
-    expect(await listRuns(context, olivia, "?workflowId=wf-open")).toEqual({ ids: [ownerRun], total: 1 });
-    expect((await call(context, "GET", "/api/workflows/wf-open/access", olivia.cookie)).json<{ ownRunsOnly: boolean }>().ownRunsOnly).toBe(false);
-    // Shared with her: her own runs only, though her role would read the project.
-    expect((await call(context, "GET", "/api/workflows/wf-team/access", olivia.cookie)).json<{ ownRunsOnly: boolean }>().ownRunsOnly).toBe(true);
+    const secret = await context.secretService.createSecret({ name: "team key", provider: "openai", value: "sk-team", projectId: "team" });
+    for (const person of [olivia, gus]) {
+      expect((await call(context, "GET", `/api/executions/${ownerRun}`, person.cookie)).statusCode).toBe(404);
+      expect((await call(context, "GET", "/api/workflows/wf-open", person.cookie)).statusCode).toBe(404);
+      const workflows = (await call(context, "GET", "/api/workflows?projectId=team", person.cookie)).json<Array<{ id: string }> | { items: Array<{ id: string }> }>();
+      const ids = (Array.isArray(workflows) ? workflows : (workflows.items ?? [])).map((row) => row.id);
+      expect(ids, person.email).not.toContain("wf-open");
+      // Secrets: none listed, none readable, none written in the project.
+      const secrets = await call(context, "GET", "/api/secrets?projectId=team", person.cookie);
+      expect(JSON.stringify(secrets.json()), person.email).not.toContain(secret.secretId);
+      const created = await call(context, "POST", "/api/secrets", person.cookie, { name: "mine", provider: "openai", value: "sk-x", projectId: "team" });
+      expect(created.statusCode, `${person.email} ${created.body}`).toBeGreaterThanOrEqual(403);
+      // Variables and project settings.
+      const variable = await call(context, "POST", "/api/variables", person.cookie, { projectId: "team", key: "REGION", value: "eu" });
+      expect(variable.statusCode, `${person.email} ${variable.body}`).toBeGreaterThanOrEqual(403);
+      expect((await call(context, "GET", "/api/variables?projectId=team", person.cookie)).statusCode, person.email).toBe(403);
+      const renamed = await call(context, "PUT", "/api/projects/team", person.cookie, { name: "Mine" });
+      expect(renamed.statusCode, `${person.email} ${renamed.body}`).toBeGreaterThanOrEqual(403);
+      expect((await call(context, "GET", "/api/projects/team/members", person.cookie)).statusCode, person.email).toBeGreaterThanOrEqual(403);
+      // The shared workflow still reads, and runs with the execute share.
+      expect((await call(context, "GET", "/api/workflows/wf-team", person.cookie)).statusCode).toBe(200);
+    }
+    await run(olivia);
+    // Once the share is gone, role isolation lends the role again; strict lends nothing.
+    await context.store.removeWorkflowUserShare("wf-team", olivia.id);
+    await context.store.removeWorkflowUserShare("wf-gated", olivia.id);
+    expect((await call(context, "GET", `/api/executions/${ownerRun}`, olivia.cookie)).statusCode).toBe(mode === "role" ? 200 : 404);
   });
 });
 
