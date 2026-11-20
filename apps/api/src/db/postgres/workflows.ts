@@ -399,6 +399,9 @@ export async function deleteProject(ctx: PgContext, id: string): Promise<boolean
     await client.query(`DELETE FROM variables WHERE project_id = $1`, [id]);
     // v81 — and its OpenAPI specs (project configuration, like variables).
     await client.query(`DELETE FROM openapi_specs WHERE project_id = $1`, [id]);
+    // v82 — and its own OAuth apps with their client secrets.
+    await client.query(`DELETE FROM secrets WHERE id IN (SELECT client_secret_id FROM oauth_apps WHERE project_id = $1)`, [id]);
+    await client.query(`DELETE FROM oauth_apps WHERE project_id = $1`, [id]);
     await client.query(`DELETE FROM guard_bindings WHERE scope = 'project' AND scope_id = $1`, [id]);
     // 12.6 — a re-created project with the same id starts with no model allowlist.
     await client.query(`DELETE FROM model_allowlist_entries WHERE scope = 'project' AND project_id = $1`, [id]);

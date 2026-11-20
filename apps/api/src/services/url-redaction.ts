@@ -7,7 +7,7 @@
  */
 
 /** Callback routes whose query carries authorization-response secrets. */
-export const SENSITIVE_CALLBACK_PATHS: ReadonlySet<string> = new Set(["/api/auth/oidc/callback", "/api/mcp/oauth/callback"]);
+export const SENSITIVE_CALLBACK_PATHS: ReadonlySet<string> = new Set(["/api/auth/oidc/callback", "/api/mcp/oauth/callback", "/api/connect/callback"]);
 
 /** Query parameters redacted on those routes (`error`, `error_description` and `iss` are kept for diagnosis). */
 export const SENSITIVE_CALLBACK_PARAMS: readonly string[] = ["code", "state", "session_state", "id_token", "access_token"];

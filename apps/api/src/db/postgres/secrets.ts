@@ -136,6 +136,8 @@ export async function deleteSecret(ctx: PgContext, id: string): ReturnType<Store
     if ((result.rowCount ?? 0) === 0) return false;
     await client.query(`DELETE FROM secret_shares WHERE secret_id = $1`, [id]);
     await client.query(`DELETE FROM external_secret_cache WHERE secret_id = $1`, [id]);
+    // v82 — a connected account's details go with its secret.
+    await client.query(`DELETE FROM oauth_accounts WHERE secret_id = $1`, [id]);
     return true;
   });
 }

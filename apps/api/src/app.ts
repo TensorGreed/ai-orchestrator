@@ -13,7 +13,7 @@ import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { nanoid } from "nanoid";
 import { z } from "zod";
 import { createDefaultAgentRuntime } from "@ai-orchestrator/agent-runtime";
-import { createDefaultConnectorRegistry } from "@ai-orchestrator/connector-sdk";
+import { createDefaultConnectorRegistry, createDefaultOAuthProviderRegistry } from "@ai-orchestrator/connector-sdk";
 import {
   ContainerSandboxLauncher,
   McpRuntimeGuard,
@@ -300,6 +300,7 @@ import { WORKFLOW_BUILDER_TRIGGER_TYPE, WORKFLOW_BUILDER_USAGE_LABEL, WORKFLOW_B
 import { effectiveTriggerTrust, isEntryNodeType, parseStoredDataLabels, recordedInputLabels, triggerInputProvenance, unionDataLabels, type DataLabels } from "@ai-orchestrator/shared";
 import { LIVE_ENTRY_OFF_CODE, isLiveEntryOff, liveEntryOffMessage, publicEntryWarnings, UNKNOWN_AUTH_MODE_CODE, unknownAuthMode, unknownAuthModeMessage } from "@ai-orchestrator/shared";
 import { envModelProviders } from "@ai-orchestrator/shared";
+import { CONNECTED_ACCOUNT_SECRET_PROVIDER } from "@ai-orchestrator/shared";
 import {
   CONTENT_FILTER_CODE,
   RESPONSE_WITHHELD_MESSAGE,
@@ -432,6 +433,8 @@ import { registerAiGatewayRoutes, type AiGatewayModelCheck } from "./ai-gateway-
 import { registerAiGatewayAdminRoutes } from "./ai-gateway-admin-routes.js";
 import { registerMcpOnboardingRoutes } from "./mcp-onboarding-routes.js";
 import { registerIntegrationCatalogRoutes } from "./integration-catalog-routes.js";
+import { registerConnectedAccountRoutes } from "./connected-account-routes.js";
+import { ConnectedAccountService, resolveConnectRedirectUri } from "./services/connected-account-service.js";
 import {
   buildClientMetadataDocument,
   carryIssuerBinding,
@@ -447,7 +450,7 @@ import {
   resolveMcpOAuthRedirectUri
 } from "./services/mcp-oauth-service.js";
 import { createMcpOAuthEgressFetch } from "./services/mcp-oauth-egress.js";
-import { isInternalSecretProvider } from "./services/secret-service.js";
+import { isInternalSecretProvider, isManagedSecretProvider } from "./services/secret-service.js";
 import type { QueueClaimFence, SessionAuthMethod, Store } from "./db/store.js";
 
 interface Tier1IntegrationSpec {
@@ -2104,7 +2107,7 @@ export async function createApp(
   // in this process outside cluster mode (as before), in the database in cluster mode so any instance can finish them.
   const challengeStore: ChallengeStore = clusterMode
     ? new DbChallengeStore(store, secretService, { warn: (message, fields) => app.log.warn(fields ?? {}, message) })
-    : new MemoryChallengeStore({ maxPerKind: { mcp_oauth: MCP_OAUTH_MAX_PENDING } });
+    : new MemoryChallengeStore({ maxPerKind: { mcp_oauth: MCP_OAUTH_MAX_PENDING, oauth_account: MCP_OAUTH_MAX_PENDING } });
 
   // Phase 10.5 — OAuth connections for remote MCP servers. The http adapter
   // asks this service for access tokens; tokens stay in SecretService.
@@ -2148,6 +2151,39 @@ export async function createApp(
       });
     }
   });
+  // Connected accounts (Slack, Google, GitHub, Microsoft, Notion): sign-in with the deployment's own OAuth app; the
+  // tokens stay in an `oauth_account` secret and runs get only the current access token (connected-account-service.ts).
+  if (config.CONNECTED_ACCOUNTS_TEST_PROVIDER_URL) {
+    app.log.warn({ url: config.CONNECTED_ACCOUNTS_TEST_PROVIDER_URL }, "CONNECTED_ACCOUNTS_TEST_PROVIDER_URL is set: connected accounts talk to a local mock provider, not to Slack, Google, GitHub, Microsoft or Notion. Tests only.");
+  }
+  const connectedAccountService = new ConnectedAccountService(store, secretService, {
+    registry: createDefaultOAuthProviderRegistry(config.CONNECTED_ACCOUNTS_TEST_PROVIDER_URL ? { testBaseUrl: config.CONNECTED_ACCOUNTS_TEST_PROVIDER_URL } : {}),
+    redirectUri: resolveConnectRedirectUri(config),
+    stateTtlMs: config.MCP_OAUTH_STATE_TTL_MS,
+    refreshSkewMs: config.MCP_OAUTH_REFRESH_SKEW_MS,
+    challenges: challengeStore,
+    ...(clusterMode && clusterStore
+      ? {
+          refreshLock: createClusterRefreshLock(
+            async (key, waitMs, fn) => await clusterStore.withClusterLock(ADVISORY_LOCK_CLASS_MCP_OAUTH_REFRESH, key, { waitMs }, fn)
+          )
+        }
+      : {}),
+    onAudit: async (event) => {
+      await auditService.record({
+        category: "secret",
+        eventType: event.eventType,
+        action: "update",
+        outcome: event.outcome,
+        actor: { type: "system" },
+        resourceType: "secret",
+        resourceId: event.secretId,
+        projectId: event.projectId,
+        metadata: event.metadata
+      });
+    }
+  });
+  secretService.attachConnectedAccounts(async (secretId) => await connectedAccountService.getAccessToken(secretId));
   // An admin's read-only mark in tool policy decides whether the MCP clients may send a call again (D13).
   const readOnlyMarks = createReadOnlyMarkLookup(async (registryServerId) => await store.listMcpToolClassifications(registryServerId));
   const mcpRegistry = createDefaultMCPRegistry({
@@ -2756,12 +2792,22 @@ export async function createApp(
     // A replay answering from a model tape makes no request for a recorded answer (what the allowlist says about
     // those is reported afterwards); its lenient live calls go through the enforcing registry the tape was given.
     const tapeReplay = Boolean(input.replay && input.providerRegistry);
-    const scoped = runScope.dependenciesFor(mergedWorkflow, {
+    // Connected accounts: a 401 to a token this run's own secrets handed out gets one fresh token (sub-workflows too).
+    const runCredentials = connectedAccountService.runCredentials();
+    const withRunCredentials = <T extends Partial<WorkflowExecutionDependencies>>(deps: T): T => {
+      const scopeChild = deps.scopeSubWorkflow;
+      return {
+        ...deps,
+        ...(deps.resolveSecret ? { resolveSecret: runCredentials.wrap(deps.resolveSecret) } : {}),
+        ...(scopeChild ? { scopeSubWorkflow: (child: Workflow) => withRunCredentials(scopeChild(child)) } : {})
+      };
+    };
+    const scoped = withRunCredentials(runScope.dependenciesFor(mergedWorkflow, {
       actor: input.policyActor,
       resolveRegisteredMcpServer: runPlan?.resolveRegisteredMcpServer,
       channel,
       ...(input.sessionOwner ? { sessionOwner: input.sessionOwner } : {})
-    });
+    }));
     // The execution timeout aborts the run's signal, so it interrupts a
     // model call, MCP call or retry wait that is in flight instead of only
     // being checked between nodes. The reason marks it as a timeout, which
@@ -2828,6 +2874,7 @@ export async function createApp(
           // scoped to the workflow's project (run-scope.ts); a sub-workflow
           // gets its own project's scope through scopeSubWorkflow.
           ...scoped,
+          refreshRejectedCredential: runCredentials.refreshRejected,
           memoryStore:
             input.replay?.sandbox.memoryStore ??
             (runPlan?.memoryCapture && scoped.memoryStore ? runPlan.memoryCapture.wrap(scoped.memoryStore) : scoped.memoryStore),
@@ -14876,8 +14923,8 @@ const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and meth
         details: parsed.error.issues
       };
     }
-    if (isInternalSecretProvider(parsed.data.provider)) {
-      // Providers L2M uses for its own secrets cannot be created through the API.
+    if (isManagedSecretProvider(parsed.data.provider)) {
+      // Providers L2M uses for its own secrets (and connected accounts, made by signing in) cannot be created here.
       reply.code(400);
       return { error: "Invalid secret payload", details: [{ path: ["provider"], message: "Unsupported provider" }] };
     }
@@ -15014,11 +15061,13 @@ const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and meth
       reply.code(403);
       return { error: "Only an admin can delete a secret flagged sensitive output." };
     }
-    await secretService.deleteSecret(request.params.id);
+    // A connected account: revoke it at the provider where it offers that, then delete it with its details.
+    const revoked = row.provider === CONNECTED_ACCOUNT_SECRET_PROVIDER ? (await connectedAccountService.disconnect(row.id)).revoked : undefined;
+    if (revoked === undefined) await secretService.deleteSecret(request.params.id);
     sensitiveSecrets.invalidate();
     await audit(request, user, {
       category: "secret",
-      eventType: "secret.delete",
+      eventType: revoked === undefined ? "secret.delete" : "oauth_account.disconnected",
       action: "delete",
       resourceType: "secret",
       resourceId: request.params.id,
@@ -15039,7 +15088,15 @@ const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and meth
         : undefined;
 
     const pageRequest = pageRequestFromQuery(request.query);
-    const secrets = await filterAsync(await secretService.listSecrets({ projectId }), (secret) => canSeeSecret(user, secret));
+    const visibleSecrets = await filterAsync(await secretService.listSecrets({ projectId }), (secret) => canSeeSecret(user, secret));
+    // Connected accounts carry what may be shown about them (provider, account, scopes, status, expiry).
+    const connections = await connectedAccountService.viewsFor(
+      visibleSecrets.filter((secret) => secret.provider === CONNECTED_ACCOUNT_SECRET_PROVIDER).map((secret) => secret.id)
+    );
+    const secrets = visibleSecrets.map((secret) => {
+      const connection = connections.get(secret.id);
+      return connection ? { ...secret, connection } : secret;
+    });
     // The visibility check is per secret (shares, project roles), so the page is cut after it.
     if (pageRequest) return pageOfById(secrets, pageRequest, (secret) => secret.createdAt);
     return secrets;
@@ -16377,6 +16434,21 @@ const NO_WEBHOOK_MATCH_MESSAGE = "No webhook endpoint matches this path and meth
   });
 
   // Integration catalog: registered MCP servers' tools and stored OpenAPI specs as palette entries.
+  registerConnectedAccountRoutes({
+    app,
+    store,
+    service: connectedAccountService,
+    webOrigin: config.WEB_ORIGIN.split(",").map((entry) => entry.trim()).find(Boolean) ?? "/",
+    webOrigins: config.WEB_ORIGIN.split(",").map((entry) => entry.trim().replace(/\/+$/, "")).filter(Boolean),
+    requireRole: (request, reply, roles) => requireRole(request, reply, roles),
+    requireStepUp: async (request, reply, action) => await requireStepUp(request, reply, action),
+    can: async (user, projectId, permission) => await rbacService.can(user, projectId, permission),
+    canSeeSecret: async (user, secret) => await canSeeSecret(user, secret),
+    auditUser: async (request, user, event) => await audit(request, user, event),
+    sessionIdOf: (request) => getSessionIdFromRequest(request),
+    sessionUser: async (sessionId) => await authService.getSessionUser(sessionId)
+  });
+
   registerIntegrationCatalogRoutes({
     app,
     store,

@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { nanoid } from "nanoid";
-import type { SecretReference } from "@ai-orchestrator/shared";
+import { CONNECTED_ACCOUNT_SECRET_PROVIDER, type SecretReference } from "@ai-orchestrator/shared";
 import type { ExternalSecretsService } from "./external-secrets-service";
 import type { Store } from "../db/store.js";
 
@@ -16,10 +16,22 @@ interface EncryptedSecret {
  * refuses them, the secrets list hides them and the generic delete route
  * leaves them alone. Only `resolveInternalSecret` reads them.
  */
-export const INTERNAL_SECRET_PROVIDERS: ReadonlySet<string> = new Set(["mcp_oauth", "mcp_oauth_user", "audit_signing"]);
+export const INTERNAL_SECRET_PROVIDERS: ReadonlySet<string> = new Set(["mcp_oauth", "mcp_oauth_user", "audit_signing", "oauth_client"]);
+
+/** Connected accounts: the client secret of a deployment's OAuth app (internal: never handed to a node). */
+export const OAUTH_CLIENT_SECRET_PROVIDER = "oauth_client";
 
 export function isInternalSecretProvider(provider: string | null | undefined): boolean {
   return typeof provider === "string" && INTERNAL_SECRET_PROVIDERS.has(provider);
+}
+
+/**
+ * Secrets L2M writes itself: the internal ones, and connected accounts (provider `oauth_account`). A connected account
+ * is listed, shared and picked like any secret, but nobody creates one through the secrets API or reads its stored
+ * value: `resolveSecret` hands out only its current access token (see attachConnectedAccounts).
+ */
+export function isManagedSecretProvider(provider: string | null | undefined): boolean {
+  return isInternalSecretProvider(provider) || provider === CONNECTED_ACCOUNT_SECRET_PROVIDER;
 }
 
 function parseMasterKey(rawKey?: string): Buffer {
@@ -45,6 +57,16 @@ export class SecretService {
 
   attachExternalSecrets(service: ExternalSecretsService): void {
     this.externalSecrets = service;
+  }
+
+  private connectedAccountToken: ((secretId: string) => Promise<string>) | null = null;
+
+  /**
+   * Connected accounts: `resolveSecret` of an `oauth_account` secret asks this for the account's current access token
+   * (renewed when due; throws when the account needs reconnecting). Without it such secrets resolve to nothing.
+   */
+  attachConnectedAccounts(resolve: (secretId: string) => Promise<string>): void {
+    this.connectedAccountToken = resolve;
   }
 
   private readonly valueListeners = new Set<(values: string[]) => void>();
@@ -198,6 +220,10 @@ export class SecretService {
     if (isInternalSecretProvider(row.provider)) {
       return undefined;
     }
+    if (row.provider === CONNECTED_ACCOUNT_SECRET_PROVIDER) {
+      // Only the access token, never the stored token set.
+      return this.connectedAccountToken && row.source !== "external" ? await this.connectedAccountToken(row.id) : undefined;
+    }
 
     if (row.source === "external") {
       return await this.resolveExternal(row);
@@ -247,7 +273,7 @@ export class SecretService {
     if (provider.credentialsSecretId) {
       const credRow = await this.store.getSecret(provider.credentialsSecretId);
       // Secrets L2M manages for itself (OAuth tokens, the audit signing key) never leave as provider credentials.
-      if (credRow && credRow.source !== "external" && !isInternalSecretProvider(credRow.provider)) {
+      if (credRow && credRow.source !== "external" && !isManagedSecretProvider(credRow.provider)) {
         credentialValue = this.decrypt({
           iv: credRow.iv,
           authTag: credRow.auth_tag,
@@ -281,6 +307,28 @@ export class SecretService {
       return undefined;
     }
     return this.decrypt({ iv: row.iv, authTag: row.auth_tag, ciphertext: row.ciphertext });
+  }
+
+  /** Connected accounts — the stored token set of an `oauth_account` secret (the account service only). */
+  async readConnectedAccountValue(secretId: string): Promise<string | undefined> {
+    const row = await this.store.getSecret(secretId);
+    if (!row || row.provider !== CONNECTED_ACCOUNT_SECRET_PROVIDER || row.source === "external") return undefined;
+    return this.decrypt({ iv: row.iv, authTag: row.auth_tag, ciphertext: row.ciphertext });
+  }
+
+  /** Connected accounts — replace the token set of an `oauth_account` secret in place (refresh, reconnect). */
+  async updateConnectedAccountValue(secretId: string, value: string): Promise<boolean> {
+    const row = await this.store.getSecret(secretId);
+    if (!row || row.provider !== CONNECTED_ACCOUNT_SECRET_PROVIDER || row.source === "external") return false;
+    await this.store.saveSecret({
+      id: row.id,
+      name: row.name,
+      provider: row.provider,
+      projectId: row.projectId,
+      source: "local",
+      ...this.encrypt(value)
+    });
+    return true;
   }
 
   /** Phase 10.5 — replace the value of an internal secret in place (token rotation). */

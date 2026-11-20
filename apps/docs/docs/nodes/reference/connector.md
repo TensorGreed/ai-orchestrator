@@ -1138,7 +1138,7 @@ Create a Stripe customer. Secret must contain a restricted/private API key.
 
 ### `teams_send_message` — Microsoft Teams: Send Message
 
-Post a card or text message to a Microsoft Teams channel via an incoming webhook.
+Post a card or text message to a Microsoft Teams channel via an incoming webhook, or as a connected Microsoft account (Team ID and Channel ID).
 
 **Config fields**
 
@@ -1146,6 +1146,8 @@ Post a card or text message to a Microsoft Teams channel via an incoming webhook
 |---|---|---|---|
 | `webhookUrl` | `string` | no | — |
 | `secretRef` | `object` | no | — |
+| `teamId` | `string` | no | — |
+| `channelId` | `string` | no | — |
 | `text` | `string` | no | — |
 | `title` | `string` | no | — |
 | `themeColor` | `string` | no | — |

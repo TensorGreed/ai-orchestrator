@@ -166,6 +166,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     EVAL_RUN_RETENTION_DAYS: 90,
     APPROVAL_SWEEP_INTERVAL_MS: 60_000,
     APP_PUBLIC_URL: "",
+    CONNECTED_ACCOUNTS_TEST_PROVIDER_URL: "",
     GUARD_AUTO_APPLY: true,
     GATEWAY_RULES_WITHOUT_BINDING: true,
     CONTENT_SCAN_MAX_BYTES: 5 * 1024 * 1024,

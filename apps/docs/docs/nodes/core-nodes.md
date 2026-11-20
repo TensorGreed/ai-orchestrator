@@ -249,10 +249,13 @@ Every node has the same error settings, under **More** in its inspector.
 
 ### HTTP Request secrets
 
-- A secret picked on the node (`secretRef`) is sent as `Authorization: Bearer <secret>`, as before.
+- **Auth** chooses how the secret is sent: None (default), Bearer token, Basic auth, API key in a header or the query
+  string, OAuth2 client credentials, or a [connected account](/security/connect-accounts#http-request-auth).
+- A secret picked on the node (`secretRef`) without `secretAuth` is sent as `Authorization: Bearer <secret>`, as before.
 - `secretAuth` sends it another way: `{ "type": "basic" }` (the secret holds `user:password`),
-  `{ "type": "header", "name": "X-API-Key" }` or `{ "type": "query", "name": "api_key" }`. Nodes made from an API
-  operation set it from the spec (see [Your integrations](./integrations.md)); a node without it is unchanged.
+  `{ "type": "header", "name": "X-API-Key" }`, `{ "type": "query", "name": "api_key" }`, `{ "type": "connected" }` or
+  `{ "type": "oauth2_client_credentials", "tokenUrl": "…", "clientId": "…" }`. Nodes made from an API operation set
+  it from the spec (see [Your integrations](./integrations.md)); a node without it is unchanged.
 - A secret in its own header or in the query stays with the site: a redirect to another host fails the node. The
   query secret is never part of the URL in run logs or error messages.
 

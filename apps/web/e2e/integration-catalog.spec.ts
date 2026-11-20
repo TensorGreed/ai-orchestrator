@@ -145,7 +145,7 @@ test.describe("your integrations in the palette", () => {
       await expect(form).toContainText("POST /tickets");
       await form.getByLabel("title").fill("{{ user_prompt }}");
       await form.getByLabel("priority").fill("3");
-      await page.getByRole("combobox", { name: /^Secret\b/ }).selectOption(secretId!);
+      await page.getByRole("combobox", { name: "Key secret" }).selectOption(secretId!);
       await expect(page.getByText("Sent in the X-API-Key header.", { exact: true })).toBeVisible();
       await page.screenshot({ path: `${SHOTS}/catalog-operation-form.png` });
       await page.getByRole("button", { name: "Save changes" }).click();

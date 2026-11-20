@@ -87,6 +87,26 @@ function deferredPositiveIntFromEnv(fallback: number) {
 /** 13.3 — the shortest usage retention: monthly budgets sum a month of usage events. */
 export const USAGE_EVENTS_MIN_RETENTION_DAYS = 31;
 
+/** Why `value` is not a plain http(s) base URL (no credentials, query or fragment), or null. */
+export function publicBaseUrlProblem(value: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return "not a URL";
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return "not http(s)";
+  if (url.username || url.password) return "carries a user name or password";
+  if (url.search || url.hash) return "carries a query or fragment";
+  return null;
+}
+
+function isLoopbackHttpUrl(value: string): boolean {
+  if (publicBaseUrlProblem(value) !== null) return false;
+  const host = new URL(value).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return host === "localhost" || host === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+}
+
 const envSchema = z.object({
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("warn"),
   API_PORT: z.coerce.number().int().positive().default(4000),
@@ -753,6 +773,21 @@ const envSchema = z.object({
     .default("")
     .refine((value) => value === "" || /^https?:\/\/[^\s]+$/i.test(value), {
       message: "APP_PUBLIC_URL must be an http(s) URL"
+    })
+    // Connected accounts build their exact redirect URL from it (<base>/api/connect/callback).
+    .refine((value) => value === "" || publicBaseUrlProblem(value) === null, {
+      message: "APP_PUBLIC_URL must be a plain base URL: no user name, password, query or fragment"
+    }),
+  /**
+   * Connected accounts — tests and local end-to-end runs only: every OAuth provider endpoint (Slack, Google, GitHub,
+   * Microsoft, Notion) moves to this mock server, under /<provider>/… . Only a loopback http(s) URL is accepted, so it
+   * cannot send real sign-ins anywhere else. Empty (the default) = the providers' real endpoints.
+   */
+  CONNECTED_ACCOUNTS_TEST_PROVIDER_URL: z
+    .string()
+    .default("")
+    .refine((value) => value === "" || isLoopbackHttpUrl(value), {
+      message: "CONNECTED_ACCOUNTS_TEST_PROVIDER_URL must be a loopback http(s) URL (tests only)"
     }),
   /** Phase 11.1 — largest audit bundle (zip) the API exports, in bytes. */
   AUDIT_BUNDLE_MAX_BYTES: z.coerce.number().int().min(1_024).max(2_147_483_647).default(104_857_600),

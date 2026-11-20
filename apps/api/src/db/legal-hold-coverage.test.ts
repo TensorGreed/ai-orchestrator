@@ -135,6 +135,8 @@ const NOT_HOLDABLE: Record<string, string> = {
   deleteAuditExportDestination: "configuration",
   deleteVariable: "configuration",
   deleteOpenApiSpec: "configuration",
+  deleteOAuthApp: "configuration",
+  deleteOAuthAccount: "a connected account's display row (name, scopes, expiry); the secret holds the tokens",
   deleteNotificationConfig: "configuration",
   deleteBudget: "configuration",
   deleteGuardVaultTokens: "token vault entries (a deletion leaves out the tokens a held row holds)",

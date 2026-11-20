@@ -16,10 +16,10 @@ const secretRef = (
  */
 export const NODE_CREDENTIAL_SPECS: Readonly<Record<string, readonly NodeCredentialSpec[]>> = {
   teams_send_message: [
-    secretRef("teams", "Webhook URL Secret", "Secret whose value is the Teams incoming webhook URL. Only needed when Webhook URL is blank.", false)
+    secretRef("teams", "Webhook URL Secret", "A connected Microsoft account when Team ID and Channel ID are set; otherwise a secret whose value is the Teams incoming webhook URL (only needed when Webhook URL is blank).", false)
   ],
-  notion_create_page: [secretRef("notion", "Notion Token Secret", "Notion internal integration token (secret_...).")],
-  notion_query_database: [secretRef("notion", "Notion Token Secret", "Notion internal integration token (secret_...).")],
+  notion_create_page: [secretRef("notion", "Notion Token Secret", "A connected Notion account, or a Notion internal integration token (secret_...).")],
+  notion_query_database: [secretRef("notion", "Notion Token Secret", "A connected Notion account, or a Notion internal integration token (secret_...).")],
   airtable_create_record: [secretRef("airtable", "Airtable Token Secret", "Airtable personal access token.")],
   airtable_list_records: [secretRef("airtable", "Airtable Token Secret", "Airtable personal access token.")],
   airtable_update_record: [secretRef("airtable", "Airtable Token Secret", "Airtable personal access token.")],
@@ -50,9 +50,9 @@ export const NODE_CREDENTIAL_SPECS: Readonly<Record<string, readonly NodeCredent
   discord_send_message: [
     secretRef("discord", "Webhook URL Secret", "Secret whose value is the Discord webhook URL. Only needed when Webhook URL is blank.", false)
   ],
-  google_drive_trigger: [secretRef("google", "Google Access Token Secret", "Google OAuth access token with Drive read scope.")],
-  google_calendar_create_event: [secretRef("google", "Google Access Token Secret", "Google OAuth access token with the Calendar events scope.")],
-  google_calendar_list_events: [secretRef("google", "Google Access Token Secret", "Google OAuth access token with Calendar read scope.")],
+  google_drive_trigger: [secretRef("google", "Google Access Token Secret", "A connected Google account with Drive, or a Google OAuth access token with Drive read scope.")],
+  google_calendar_create_event: [secretRef("google", "Google Access Token Secret", "A connected Google account with Calendar, or a Google OAuth access token with the Calendar events scope.")],
+  google_calendar_list_events: [secretRef("google", "Google Access Token Secret", "A connected Google account with Calendar, or a Google OAuth access token with Calendar read scope.")],
   twilio_send_sms: [secretRef("twilio", "Twilio Auth Token Secret", "Twilio auth token that pairs with the Account SID field.")],
   rerank: [
     secretRef("custom", "Reranker API Key Secret", "Cohere, Jina or Voyage API key matching the provider. Optional when the server sets the provider's API key environment variable.", false)

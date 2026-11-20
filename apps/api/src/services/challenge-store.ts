@@ -20,7 +20,7 @@ import type { Store } from "../db/store.js";
  * end alert goes out once) are always kept in the database store, whatever the deployment, because the link is minted
  * by another process (break-glass-service.ts).
  */
-export type ChallengeKind = "mfa_login" | "sso_mfa" | "mcp_oauth" | "break_glass" | "break_glass_session";
+export type ChallengeKind = "mfa_login" | "sso_mfa" | "mcp_oauth" | "oauth_account" | "break_glass" | "break_glass_session";
 
 export interface IssueChallengeInput<T> {
   kind: ChallengeKind;

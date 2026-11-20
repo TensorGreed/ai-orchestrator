@@ -2895,12 +2895,14 @@ const baseNodeDefinitions: NodeDefinition[] = [
     type: "teams_send_message",
     label: "Microsoft Teams: Send Message",
     category: "Connector",
-    description: "Post a card or text message to a Microsoft Teams channel via an incoming webhook.",
+    description: "Post a card or text message to a Microsoft Teams channel via an incoming webhook, or as a connected Microsoft account (Team ID and Channel ID).",
     configSchema: {
       type: "object",
       properties: {
         webhookUrl: { type: "string" },
         secretRef: { type: "object" },
+        teamId: { type: "string" },
+        channelId: { type: "string" },
         text: { type: "string" },
         title: { type: "string" },
         themeColor: { type: "string" },

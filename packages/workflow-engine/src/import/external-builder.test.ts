@@ -1413,3 +1413,53 @@ describe("external workflow import — Filter and Set item semantics", () => {
     ]);
   });
 });
+
+describe("external workflow import — HTTP auth presets", () => {
+  const http = (name: string, parameters: Record<string, unknown>, credentials?: Record<string, unknown>) => ({
+    name,
+    type: "n8n-nodes-base.httpRequest",
+    parameters: { method: "GET", url: "https://api.example.com/x", ...parameters },
+    ...(credentials ? { credentials } : {})
+  });
+  const conversion = convertExternalWorkflow(
+    exportWith([
+      http("Basic", { authentication: "genericCredentialType", genericAuthType: "httpBasicAuth" }, { httpBasicAuth: { id: "1", name: "Basic login" } }),
+      http("Header", { authentication: "genericCredentialType", genericAuthType: "httpHeaderAuth" }, { httpHeaderAuth: { id: "2", name: "Key" } }),
+      http("Query", { authentication: "genericCredentialType", genericAuthType: "httpQueryAuth" }, { httpQueryAuth: { id: "3", name: "Q" } }),
+      http("Bearer", { authentication: "genericCredentialType", genericAuthType: "httpBearerAuth" }, { httpBearerAuth: { id: "4", name: "B" } }),
+      http("Generic OAuth2", { authentication: "genericCredentialType", genericAuthType: "oAuth2Api" }, { oAuth2Api: { id: "5", name: "O" } }),
+      http("Slack OAuth", { authentication: "predefinedCredentialType", nodeCredentialType: "slackOAuth2Api" }, { slackOAuth2Api: { id: "6", name: "S" } }),
+      http("Gmail", { authentication: "predefinedCredentialType", nodeCredentialType: "gmailOAuth2" }, { gmailOAuth2: { id: "7", name: "G" } }),
+      http("GitHub token", { authentication: "predefinedCredentialType", nodeCredentialType: "githubApi" }, { githubApi: { id: "8", name: "GH" } }),
+      http("Open", { authentication: "none" })
+    ])
+  );
+  const auth = (name: string) => conversion.workflow.nodes.find((node) => node.name === name)!.config.secretAuth;
+  const reason = (name: string) => reportFor(conversion, name).reason;
+
+  it("maps basic, header, query and bearer to the matching Auth choice", () => {
+    expect(auth("Basic")).toEqual({ type: "basic" });
+    expect(reason("Basic")).toMatch(/user:password/);
+    expect(auth("Header")).toEqual({ type: "header", name: "X-API-Key" });
+    expect(reason("Header")).toMatch(/header name/);
+    expect(auth("Query")).toEqual({ type: "query", name: "api_key" });
+    expect(reason("Query")).toMatch(/parameter name/);
+    expect(auth("Bearer")).toEqual({ type: "bearer" });
+    expect(auth("Open")).toBeUndefined();
+  });
+
+  it("maps a provider's OAuth credential to a connected account, and a token credential to bearer", () => {
+    expect(auth("Slack OAuth")).toEqual({ type: "connected" });
+    expect(reason("Slack OAuth")).toMatch(/Connect a Slack account/);
+    expect(auth("Gmail")).toEqual({ type: "connected" });
+    expect(reason("Gmail")).toMatch(/Connect a Google account/);
+    expect(auth("GitHub token")).toEqual({ type: "bearer" });
+  });
+
+  it("leaves a generic OAuth2 credential as a bearer token and says which choice to pick", () => {
+    expect(auth("Generic OAuth2")).toEqual({ type: "bearer" });
+    expect(reason("Generic OAuth2")).toMatch(/OAuth2 client credentials/);
+    // Every mapped node still validates without warnings about its secret.
+    expect(validateWorkflowGraph(conversion.workflow).issues.filter((issue) => issue.code.startsWith("http_auth") || issue.code === "invalid_http_secret_auth")).toEqual([]);
+  });
+});

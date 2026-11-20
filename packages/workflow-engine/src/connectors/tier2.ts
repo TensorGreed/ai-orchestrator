@@ -146,12 +146,55 @@ export async function executeTeamsSendMessage(
   ctx: Tier2Context
 ): Promise<unknown> {
   const NODE = "teams_send_message";
+  // A team and channel: post through Microsoft Graph with the secret as the access token (a connected Microsoft
+  // account with ChannelMessage.Send). Otherwise the incoming webhook, as before.
+  // The mode follows the settings as written (as the destination rules read them), never what they render to: a
+  // template that renders empty is an error, not a fall-back to the webhook.
+  if (getString(config, "teamId").trim() || getString(config, "channelId").trim()) {
+    const teamId = renderTemplate(getString(config, "teamId"), ctx.templateData).trim();
+    const channelId = renderTemplate(getString(config, "channelId"), ctx.templateData).trim();
+    if (!teamId || !channelId) {
+      throw new WorkflowError(`${NODE}: set both Team ID and Channel ID to post with a Microsoft account.`, ErrorCategory.NODE_CONFIG, false);
+    }
+    const token = await requireSecret(ctx, config, NODE);
+    const text = renderTemplate(getString(config, "text"), ctx.templateData);
+    const title = renderTemplate(getString(config, "title"), ctx.templateData);
+    const escape = (value: string) => value.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
+    const content = title ? `<p><strong>${escape(title)}</strong></p><p>${escape(text)}</p>` : `<p>${escape(text)}</p>`;
+    const res = await getFetch(ctx)(
+      `https://graph.microsoft.com/v1.0/teams/${encodeURIComponent(teamId)}/channels/${encodeURIComponent(channelId)}/messages`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ body: { contentType: "html", content } })
+      }
+    );
+    const data = asRecord(await parseJsonResponse(res, NODE));
+    return { ok: true, status: res.status, id: data.id ?? null };
+  }
   // The setting is rendered as written (the text the outbound check rendered), then trimmed.
   const configured = getString(config, "webhookUrl");
   let webhookUrl = configured.trim() ? renderTemplate(configured, ctx.templateData).trim() : "";
   if (!configured.trim()) {
     const fromSecret = await resolveSecretOptional(ctx, config);
-    if (fromSecret?.trim()) webhookUrl = renderTemplate(fromSecret.trim(), ctx.templateData);
+    if (fromSecret?.trim()) {
+      // The secret must be the webhook URL. Anything else (a connected Microsoft account's access token) is never
+      // fetched or shown.
+      let parsed: URL | null = null;
+      try {
+        parsed = new URL(fromSecret.trim());
+      } catch {
+        parsed = null;
+      }
+      if (!parsed || (parsed.protocol !== "https:" && parsed.protocol !== "http:")) {
+        throw new WorkflowError(
+          `${NODE}: the secret is not a webhook URL. To post with a Microsoft account, set Team ID and Channel ID.`,
+          ErrorCategory.NODE_CONFIG,
+          false
+        );
+      }
+      webhookUrl = renderTemplate(fromSecret.trim(), ctx.templateData);
+    }
   }
   if (!webhookUrl) {
     throw new WorkflowError(
