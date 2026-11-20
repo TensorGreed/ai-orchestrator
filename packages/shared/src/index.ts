@@ -64,3 +64,4 @@ export * from "./workflow-builder";
 export * from "./public-entry";
 export * from "./new-node-defaults";
 export * from "./rag-search";
+export * from "./connected-accounts";

@@ -31,6 +31,7 @@ import {
   executeTwilioSendSms,
   type Tier2Context
 } from "./tier2";
+import { withCredentialRefresh, type RefreshRejectedCredential } from "../http-auth";
 
 export const TIER2_NODE_TYPES: ReadonlySet<WorkflowNodeType> = new Set<WorkflowNodeType>([
   "teams_send_message",
@@ -69,6 +70,8 @@ export interface Tier2DispatchContext {
   templateData: Record<string, unknown>;
   resolveSecret: (ref?: SecretReference) => Promise<string | undefined>;
   fetchImpl?: typeof fetch;
+  /** A 401 to a connected account's token: a fresh token for one retry (see http-auth.ts). */
+  refreshRejectedCredential?: RefreshRejectedCredential;
   nowMs?: () => number;
 }
 
@@ -80,7 +83,8 @@ export async function executeTier2Node(
   const tier2Ctx: Tier2Context = {
     templateData: ctx.templateData,
     resolveSecret: ctx.resolveSecret,
-    fetchImpl: ctx.fetchImpl,
+    // A connected account's token refused with 401 is renewed once and the call sent again.
+    fetchImpl: ctx.refreshRejectedCredential ? withCredentialRefresh(ctx.fetchImpl ?? (globalThis.fetch as typeof fetch), ctx.refreshRejectedCredential) : ctx.fetchImpl,
     nowMs: ctx.nowMs
   };
 

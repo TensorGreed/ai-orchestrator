@@ -31,3 +31,4 @@ export function createDefaultConnectorRegistry(): ConnectorRegistry {
   registry.register(new QdrantConnectorAdapter());
   return registry;
 }
+export * from "./oauth/providers";

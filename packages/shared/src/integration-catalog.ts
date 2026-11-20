@@ -36,12 +36,22 @@ const MAX_WARNINGS = 20;
 export const OPENAPI_HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 export type OpenApiHttpMethod = (typeof OPENAPI_HTTP_METHODS)[number];
 
-/** How an HTTP Request node sends its secret. Unset on a node means `Authorization: Bearer <secret>`. */
+/**
+ * How an HTTP Request node sends its secret. Unset on a node means `Authorization: Bearer <secret>`.
+ *
+ * `connected`: the secret is a connected account; its current access token goes as a bearer token (refreshed when
+ * due, and once more when the server answers 401). `oauth2_client_credentials`: the secret is the client secret; the
+ * node gets an access token from `tokenUrl` (client credentials grant, cached until it expires) and sends that as a
+ * bearer token. `clientAuth` says where the client id and secret go on the token request (`body`, the default, or a
+ * `basic` Authorization header).
+ */
 export type HttpSecretAuth =
   | { type: "bearer" }
   | { type: "basic" }
   | { type: "header"; name: string }
-  | { type: "query"; name: string };
+  | { type: "query"; name: string }
+  | { type: "connected" }
+  | { type: "oauth2_client_credentials"; tokenUrl: string; clientId: string; scope?: string; clientAuth: "body" | "basic" };
 
 export interface OpenApiParameter {
   name: string;
@@ -801,7 +811,28 @@ export function readHttpSecretAuth(value: unknown): HttpSecretAuth | null | stri
   if (value === undefined || value === null) return null;
   if (!isRecord(value)) return "secretAuth must be an object";
   const type = text(value.type);
-  if (type === "bearer" || type === "basic") return { type };
+  if (type === "bearer" || type === "basic" || type === "connected") return { type };
+  if (type === "oauth2_client_credentials") {
+    const tokenUrl = text(value.tokenUrl);
+    if (!tokenUrl) return "secretAuth.tokenUrl is required for OAuth2 client credentials";
+    let parsed: URL;
+    try {
+      parsed = new URL(tokenUrl);
+    } catch {
+      return "secretAuth.tokenUrl is not a valid URL";
+    }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return "secretAuth.tokenUrl must be an http(s) URL";
+    if (parsed.username || parsed.password) return "secretAuth.tokenUrl may not carry a user name or password";
+    if (tokenUrl.length > 2048) return "secretAuth.tokenUrl is too long";
+    const clientId = text(value.clientId);
+    if (!clientId) return "secretAuth.clientId is required for OAuth2 client credentials";
+    if (clientId.length > 512) return "secretAuth.clientId is too long";
+    const scope = text(value.scope);
+    if (scope.length > 2048) return "secretAuth.scope is too long";
+    const clientAuth = value.clientAuth === undefined || value.clientAuth === null || value.clientAuth === "" ? "body" : value.clientAuth;
+    if (clientAuth !== "body" && clientAuth !== "basic") return "secretAuth.clientAuth must be body or basic";
+    return { type, tokenUrl, clientId, ...(scope ? { scope } : {}), clientAuth };
+  }
   if (type === "header" || type === "query") {
     const name = text(value.name);
     if (!name) return `secretAuth.name is required for ${type}`;
@@ -810,7 +841,7 @@ export function readHttpSecretAuth(value: unknown): HttpSecretAuth | null | stri
     if (name.length > 128) return "secretAuth.name is too long";
     return { type, name };
   }
-  return "secretAuth.type must be bearer, basic, header or query";
+  return "secretAuth.type must be bearer, basic, header, query, connected or oauth2_client_credentials";
 }
 
 /** One line saying how a node sends its secret. */
@@ -818,6 +849,16 @@ export function describeHttpSecretAuth(auth: HttpSecretAuth | null): string {
   if (!auth || auth.type === "bearer") return "as a bearer token (Authorization: Bearer …)";
   if (auth.type === "basic") return "as basic auth (the secret holds user:password)";
   if (auth.type === "header") return `in the ${auth.name} header`;
+  if (auth.type === "connected") return "as the connected account's access token (Authorization: Bearer …)";
+  if (auth.type === "oauth2_client_credentials") {
+    let host = auth.tokenUrl;
+    try {
+      host = new URL(auth.tokenUrl).host;
+    } catch {
+      // Shown as written.
+    }
+    return `as the client secret for an access token from ${host} (sent as Authorization: Bearer …)`;
+  }
   return `as the ${auth.name} query parameter`;
 }
 

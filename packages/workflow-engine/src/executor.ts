@@ -193,6 +193,7 @@ import {
 } from "./mcp-client-features";
 import { executePhase2Node } from "./phase2-dispatch";
 import { executeTier1Node, TIER1_NODE_TYPES } from "./connectors/tier1-dispatch";
+import { dropClientCredentialsToken, getClientCredentialsToken, sendWithCredentialRefresh, withCredentialRefresh, type ClientCredentialsRequest, type RefreshRejectedCredential } from "./http-auth";
 import { executeTier2Node, TIER2_NODE_TYPES } from "./connectors/tier2-dispatch";
 import { executePhase35TriggerNode, PHASE35_TRIGGER_NODE_TYPES } from "./connectors/triggers-dispatch";
 import { NO_CODE_SANDBOX_PLAN, codeNodesDisabledError, runJavaScriptCode, runPythonCode, type CodeSandboxPlan } from "./code-sandbox";
@@ -544,6 +545,12 @@ export interface WorkflowExecutionDependencies {
    */
   onUnrecordedModelUsage?: (telemetry: Record<string, unknown>) => void | Promise<void>;
   resolveSecret: (secretRef?: SecretReference) => Promise<string | undefined>;
+  /**
+   * Connected accounts — a server answered 401 to `token`, a bearer token this run sent. Returns a fresh token when
+   * the token came from a connected account (the API renews it once), else undefined. HTTP Request and the connector
+   * nodes then send the request once more with it. Absent: a 401 stands.
+   */
+  refreshRejectedCredential?: RefreshRejectedCredential;
   /**
    * 12.2 — secrets flagged "sensitive output": a node whose config references one of them produces sensitive output
    * (its labels gain `sensitive` on every run, without a scan). Absent or empty: no config is walked.
@@ -4813,6 +4820,14 @@ async function executeNodeHandler(
       let requestUrl = renderedUrl;
       // A secret in the query or in a header the redirect handling does not know stays with this origin.
       let secretStaysOnOrigin = false;
+      // OAuth2 client credentials: the token request, kept to drop a token the server refuses.
+      let clientCredentials: ClientCredentialsRequest | null = null;
+      const guardOptions = {
+        config: dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD,
+        ...(dependencies.outboundDnsResolver ? { resolver: dependencies.outboundDnsResolver } : {})
+      };
+      // The token request goes through the same outbound checks as the request itself, and never follows a redirect.
+      const postTokenRequest = async (url: string, init: RequestInit) => await guardedFetch(url, { ...init, redirect: "manual", signal: dependencies.abortSignal ?? null }, guardOptions);
       const secretRef = toRecord(config.secretRef);
       if (typeof secretRef.secretId === "string" && secretRef.secretId.trim()) {
         const secretValue = await dependencies.resolveSecret({ secretId: secretRef.secretId.trim() });
@@ -4822,7 +4837,12 @@ async function executeNodeHandler(
         // Unset or malformed (validation reports it): a bearer token, as before secretAuth existed.
         const secretAuth = readHttpSecretAuth(config.secretAuth);
         const auth = secretAuth && typeof secretAuth !== "string" ? secretAuth : { type: "bearer" as const };
-        if (auth.type === "basic") {
+        if (auth.type === "oauth2_client_credentials") {
+          // The secret is the client secret; the request carries the access token the token URL hands out for it.
+          clientCredentials = { tokenUrl: auth.tokenUrl, clientId: auth.clientId, clientSecret: secretValue, clientAuth: auth.clientAuth, ...(auth.scope ? { scope: auth.scope } : {}) };
+          const token = await getClientCredentialsToken(clientCredentials, postTokenRequest);
+          requestHeaders.set("Authorization", `Bearer ${token}`);
+        } else if (auth.type === "basic") {
           requestHeaders.set("Authorization", `Basic ${Buffer.from(secretValue, "utf8").toString("base64")}`);
         } else if (auth.type === "header") {
           requestHeaders.set(auth.name, secretValue);
@@ -4873,9 +4893,8 @@ async function executeNodeHandler(
           applyJsonContentType(requestHeaders, renderedBody);
         }
 
-        const response = await guardedFetch(requestUrl, requestInit, {
-          config: dependencies.outboundGuard ?? DEFAULT_OUTBOUND_GUARD,
-          ...(dependencies.outboundDnsResolver ? { resolver: dependencies.outboundDnsResolver } : {}),
+        const send = async (headers: Headers) => await guardedFetch(requestUrl, { ...requestInit, headers }, {
+          ...guardOptions,
           // Phase 16 — a redirect is judged again, by the strictest hop of the chain so far.
           ...(outbound?.onRedirect || secretStaysOnOrigin
             ? {
@@ -4890,6 +4909,18 @@ async function executeNodeHandler(
               }
             : {})
         });
+        let response: Response;
+        if (clientCredentials) {
+          // A refused client-credentials token is dropped and a new one asked for, once.
+          const request = clientCredentials;
+          response = await sendWithCredentialRefresh(requestHeaders, send, async () => {
+            dropClientCredentialsToken(request);
+            return await getClientCredentialsToken(request, postTokenRequest);
+          });
+        } else {
+          // A connected account's token the server refuses is renewed once (the API answers only for its own tokens).
+          response = await sendWithCredentialRefresh(requestHeaders, send, dependencies.refreshRejectedCredential);
+        }
         const responseHeaders: Record<string, string> = {};
         response.headers.forEach((value, key) => {
           responseHeaders[key] = value;
@@ -8617,7 +8648,8 @@ async function executeNodeHandler(
     case "github_webhook_trigger": {
       return executeTier1Node(node, config, {
         templateData,
-        resolveSecret: dependencies.resolveSecret
+        resolveSecret: dependencies.resolveSecret,
+        ...(dependencies.refreshRejectedCredential ? { refreshRejectedCredential: dependencies.refreshRejectedCredential } : {})
       });
     }
 
@@ -8649,7 +8681,8 @@ async function executeNodeHandler(
     case "twilio_send_sms": {
       return executeTier2Node(node, config, {
         templateData,
-        resolveSecret: dependencies.resolveSecret
+        resolveSecret: dependencies.resolveSecret,
+        ...(dependencies.refreshRejectedCredential ? { refreshRejectedCredential: dependencies.refreshRejectedCredential } : {})
       });
     }
 

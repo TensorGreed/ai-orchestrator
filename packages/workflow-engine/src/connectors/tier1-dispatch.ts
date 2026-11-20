@@ -23,6 +23,7 @@ import {
   type Tier1ClientFactories,
   type Tier1Context
 } from "./tier1";
+import { withCredentialRefresh, type RefreshRejectedCredential } from "../http-auth";
 
 export const TIER1_NODE_TYPES: ReadonlySet<WorkflowNodeType> = new Set<WorkflowNodeType>([
   "slack_send_message",
@@ -52,6 +53,8 @@ export interface Tier1DispatchContext {
   resolveSecret: (ref?: SecretReference) => Promise<string | undefined>;
   clients?: Tier1ClientFactories;
   fetchImpl?: typeof fetch;
+  /** A 401 to a connected account's token: a fresh token for one retry (see http-auth.ts). */
+  refreshRejectedCredential?: RefreshRejectedCredential;
 }
 
 export async function executeTier1Node(
@@ -63,7 +66,8 @@ export async function executeTier1Node(
     templateData: ctx.templateData,
     resolveSecret: ctx.resolveSecret,
     clients: ctx.clients,
-    fetchImpl: ctx.fetchImpl
+    // A connected account's token refused with 401 is renewed once and the call sent again.
+    fetchImpl: ctx.refreshRejectedCredential ? withCredentialRefresh(ctx.fetchImpl ?? (globalThis.fetch as typeof fetch), ctx.refreshRejectedCredential) : ctx.fetchImpl
   };
 
   switch (node.type) {

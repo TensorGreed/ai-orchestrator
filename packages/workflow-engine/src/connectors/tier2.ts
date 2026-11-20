@@ -146,6 +146,30 @@ export async function executeTeamsSendMessage(
   ctx: Tier2Context
 ): Promise<unknown> {
   const NODE = "teams_send_message";
+  // A team and channel: post through Microsoft Graph with the secret as the access token (a connected Microsoft
+  // account with ChannelMessage.Send). Otherwise the incoming webhook, as before.
+  const teamId = renderTemplate(getString(config, "teamId"), ctx.templateData).trim();
+  const channelId = renderTemplate(getString(config, "channelId"), ctx.templateData).trim();
+  if (teamId || channelId) {
+    if (!teamId || !channelId) {
+      throw new WorkflowError(`${NODE}: set both Team ID and Channel ID to post with a Microsoft account.`, ErrorCategory.NODE_CONFIG, false);
+    }
+    const token = await requireSecret(ctx, config, NODE);
+    const text = renderTemplate(getString(config, "text"), ctx.templateData);
+    const title = renderTemplate(getString(config, "title"), ctx.templateData);
+    const escape = (value: string) => value.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
+    const content = title ? `<p><strong>${escape(title)}</strong></p><p>${escape(text)}</p>` : `<p>${escape(text)}</p>`;
+    const res = await getFetch(ctx)(
+      `https://graph.microsoft.com/v1.0/teams/${encodeURIComponent(teamId)}/channels/${encodeURIComponent(channelId)}/messages`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ body: { contentType: "html", content } })
+      }
+    );
+    const data = asRecord(await parseJsonResponse(res, NODE));
+    return { ok: true, status: res.status, id: data.id ?? null };
+  }
   // The setting is rendered as written (the text the outbound check rendered), then trimmed.
   const configured = getString(config, "webhookUrl");
   let webhookUrl = configured.trim() ? renderTemplate(configured, ctx.templateData).trim() : "";
