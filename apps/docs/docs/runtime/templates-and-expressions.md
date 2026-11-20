@@ -125,6 +125,11 @@ Every top-level field of the template data whose name is a valid JavaScript name
 
 :::
 
+## Previewing expressions
+
+`POST /api/expressions/preview` lets the editor evaluate an expression field against sample data before you save a
+workflow.
+
 ## Related
 
 - [Core nodes](/nodes/core-nodes) and the [node reference](/nodes/reference/): which fields each node has.

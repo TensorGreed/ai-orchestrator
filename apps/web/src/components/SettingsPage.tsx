@@ -147,6 +147,7 @@ import { ServiceAccountsTab } from "./ServiceAccountsTab";
 import { ScimProvisioningTab } from "./ScimProvisioningTab";
 import { EMPTY_KEY_SCOPE, KeyScopeFields, keyScopePayload, type KeyScopeValue } from "./KeyScopeFields";
 import { describeKeyScopes } from "../lib/key-scopes";
+import { ChangePasswordCard } from "./ChangePasswordCard";
 import { SignedInSessionsCard } from "./SignedInSessionsCard";
 import { UsersAdminTab } from "./UsersAdminTab";
 
@@ -307,6 +308,7 @@ export function SettingsPage({ authUser, projects, activeProjectId }: SettingsPa
         {tab === "security" && (
           <>
             <SecurityTab />
+            <ChangePasswordCard />
             <SignedInSessionsCard />
           </>
         )}

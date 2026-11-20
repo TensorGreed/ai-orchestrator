@@ -26,7 +26,11 @@ Agent orchestration is iterative, not one-shot.
   - supported: `openai_chat_model`, `anthropic_chat_model`, `ollama_chat_model`, `openai_compatible_chat_model`, `ai_gateway_chat_model`, `azure_openai_chat_model`, `google_gemini_chat_model`, `llm_call`
 - `memory`: attach `local_memory`
 - `tool`: attach one or more `mcp_tool` (any MCP server, or a [built-in tool](./built-in-agent-tools.md)) or `workflow_tool` (another workflow as one tool, see [Workflow Tool](./workflow-tool.md))
-- `worker`: attach worker agents (supervisor use cases)
+- `worker`: attach worker agents (Supervisor node only). Connected workers (`Agent Orchestrator` or `Supervisor` nodes) are exposed to the parent as tool calls, so a Supervisor can delegate downstream recursively.
+
+These attachment edges are not part of linear DAG execution. The `chat_model` attachment is required, and the runtime
+always uses that node's `provider` config. Attachment-only helper nodes are marked as skipped in execution traces
+because the agent runtime consumes them instead of running them as steps.
 
 In the visual editor, use the `+` button below an Agent port to open a filtered drawer for compatible Language Model, Memory, or Tool nodes. Clicking an item creates and attaches it automatically.
 
@@ -73,6 +77,33 @@ Workers on the `worker` port and the runtime's own tools (`agent_clarify` always
 
 The tool-result limits are fields on the Agent node (see the [node reference](../nodes/reference/agent.md)). The full
 tool output is kept in the [session tool cache](#session-tool-cache-multi-turn-reuse) when a `session_id` is set.
+
+### Starting values for large-context local models
+
+For a local model with about 92k tokens of available context, a reasonable starting point on the Agent node's
+**Tool Output Limits (Advanced)** is:
+
+- `toolMessageMaxChars`: `90000`
+- `toolPayloadMaxDepth`: `8`
+- `toolPayloadMaxObjectKeys`: `256`
+- `toolPayloadMaxArrayItems`: `256`
+- `toolPayloadMaxStringChars`: `4096`
+
+These values are passed to the runtime and validated server-side. If you still hit provider context errors, reduce them
+first (especially `toolMessageMaxChars`), then reduce the number of attached tools.
+
+## Simple Memory
+
+`Simple Memory` (`local_memory`) is database-backed session memory. Its config:
+
+- `namespace`: the memory bucket key (default `default`)
+- `sessionIdTemplate`: defaults to `{{session_id}}`
+- `maxMessages`: the maximum persisted turns kept
+- `persistToolMessages`: whether tool messages are saved in memory
+
+Memory is stored in the `session_memory` table (`namespace`, `session_id`, `messages_json`, `created_at`,
+`updated_at`). The session tool cache below is stored in `session_tool_cache` (`id`, `namespace`, `session_id`,
+`tool_name`, `tool_call_id`, `args_json`, `output_json`, `error`, `summary_json`, `created_at`).
 
 ## Common failure causes
 

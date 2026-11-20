@@ -18,6 +18,36 @@ async function project(store: Store, id: string) {
 }
 
 describeStoreContract("store contract: users and auth", (ctx) => {
+  it("sets a person's password, compare-and-set when the old hash is given; never a service account's", async () => {
+    const store = ctx.store();
+    await user(store, "u1");
+    const before = await store.getUserById("u1");
+    await tick();
+    expect(await store.setUserPassword({ userId: "u1", passwordHash: "new-1", now: "2026-11-20T10:00:00.000Z", expectedPasswordHash: "hash-u1" })).toBe(true);
+    expect(await store.getUserById("u1")).toMatchObject({ passwordHash: "new-1", updatedAt: "2026-11-20T10:00:00.000Z", createdAt: before?.createdAt });
+    // The old hash is gone: a second change made from it loses.
+    expect(await store.setUserPassword({ userId: "u1", passwordHash: "new-2", now: "2026-11-20T10:01:00.000Z", expectedPasswordHash: "hash-u1" })).toBe(false);
+    expect((await store.getUserById("u1"))?.passwordHash).toBe("new-1");
+    // Without an expected hash (an admin's reset) it is set as it is.
+    expect(await store.setUserPassword({ userId: "u1", passwordHash: "reset", now: "2026-11-20T10:02:00.000Z" })).toBe(true);
+    expect((await store.getUserById("u1"))?.passwordHash).toBe("reset");
+    expect(await store.setUserPassword({ userId: "missing", passwordHash: "x", now: "2026-11-20T10:03:00.000Z" })).toBe(false);
+    await store.createServiceAccount({ id: "svc1", email: "bot@service.invalid", role: "operator", description: null, createdBy: null });
+    expect(await store.setUserPassword({ userId: "svc1", passwordHash: "x", now: "2026-11-20T10:03:00.000Z" })).toBe(false);
+    expect((await store.getUserById("svc1"))?.passwordHash).toBe("!");
+  });
+
+  it("tells whether a user has signed in through SSO", async () => {
+    const store = ctx.store();
+    await user(store, "u1");
+    await user(store, "u2");
+    expect(await store.userHasSsoIdentity("u1")).toBe(false);
+    await store.upsertSsoIdentity({ id: "sso1", userId: "u1", provider: "oidc", subject: "sub-1", email: "u1@example.com" });
+    expect(await store.userHasSsoIdentity("u1")).toBe(true);
+    expect(await store.userHasSsoIdentity("u2")).toBe(false);
+    expect(await store.userHasSsoIdentity("missing")).toBe(false);
+  });
+
   it("saves, reads, lists, counts and re-roles users; emails are lower-cased and matched case-insensitively", async () => {
     const store = ctx.store();
     expect(await store.countUsers()).toBe(0);

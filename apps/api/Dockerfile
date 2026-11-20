@@ -22,7 +22,8 @@
 # - runtime stage is a slim node:26-alpine that runs as a non-root user,
 #   includes a /health HEALTHCHECK, and carries the production node_modules and
 #   the sources of the api and workspace packages (no apps/web, apps/docs or
-#   apps/vscode-l2m-agent), at the same /app/apps/api path as before.
+#   apps/vscode-l2m-agent), at the same /app/apps/api path as before, and
+#   samples/workflows and samples/starters, which seed the templates.
 #
 # Build:   docker build -f apps/api/Dockerfile -t l2m-api .
 # Run:     docker run -p 4000:4000 -e SECRET_MASTER_KEY_BASE64=... l2m-api
@@ -70,9 +71,12 @@ RUN pnpm install --frozen-lockfile
 FROM deps AS build
 COPY apps/api apps/api
 COPY packages packages
+# The templates and starters the API seeds on its first start (seed-service.ts reads them from samples/).
+COPY samples/workflows samples/workflows
+COPY samples/starters samples/starters
 RUN pnpm --filter @ai-orchestrator/api exec tsc -p tsconfig.image.json --noEmit \
     && mkdir /sources \
-    && tar -cf - --exclude=node_modules apps/api packages | tar -xf - -C /sources
+    && tar -cf - --exclude=node_modules apps/api packages samples | tar -xf - -C /sources
 
 # ---------- production dependencies ----------
 FROM toolchain AS prod-deps

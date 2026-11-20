@@ -172,6 +172,7 @@ describe("decideStepUp", () => {
       "user.mfa_reset",
       "user.sessions_revoke",
       "user.enable",
+      "user.password_reset",
       "mfa.disable",
       "api_key.create",
       "api_key.rotate",

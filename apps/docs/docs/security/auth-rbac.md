@@ -144,6 +144,24 @@ needs a role also accepts every role above it.
     Refusals are audited as `user.register` with outcome `denied`.
   - `admin` can invite a user by email (see [User invites](#user-invites))
 
+## Register request and bootstrap
+
+`POST /api/auth/register` takes:
+
+- `email` (required)
+- `password` (required, at least 8 characters)
+- `role` (optional: `admin`, `builder`, `operator` or `viewer`)
+- `admin` (optional boolean shortcut, the same as `role: "admin"`)
+
+Bootstrap strategy:
+
+- If `BOOTSTRAP_ADMIN_EMAIL` and `BOOTSTRAP_ADMIN_PASSWORD` are set and there are no users yet, the API creates the
+  first admin account on startup.
+- If they are not set, create the first user with `POST /api/auth/register`; the first user defaults to `admin`.
+- Keep `AUTH_ALLOW_PUBLIC_REGISTER=false` outside development.
+
+API errors: `401` for a missing, invalid or expired session, and `403` for an authenticated user without the required role.
+
 ## User invites
 
 An admin invites someone by email and role (`POST /api/users/invite`, see [Endpoints](#endpoints)). The invite creates
@@ -1061,6 +1079,7 @@ set one up in **Settings > Security** first. Break-glass sessions are not asked.
 | Reset a user's MFA | `POST /api/users/:id/mfa/reset` |
 | Sign another user out | `POST /api/users/:id/sessions/revoke` (not when it names your own account) |
 | Enable a user that SCIM disabled | `POST /api/users/:id/enable` |
+| Set a temporary password for another user | `POST /api/users/:id/password/reset` |
 | Turn your own MFA off | `POST /api/auth/mfa/disable` |
 | Create an API key | `POST /api/auth/api-keys`, `POST /api/service-accounts/:id/keys` |
 | Rotate an API key | `POST /api/auth/api-keys/:id/rotate`, `POST /api/service-accounts/:id/keys/:keyId/rotate` |
@@ -1103,6 +1122,37 @@ step-up when step-up is on. You cannot reset your own MFA, except from a break-g
 not revoked (a lost device does not mean a leaked key); in a role that requires MFA they stop working until the user
 sets up a new authenticator.
 
+## Passwords
+
+**Change your own.** In **Settings > Security > Password**, enter your current password and a new one (8 to 1024
+characters, the same rule as registration and the bootstrap admin), or call `POST /api/auth/password` with
+`{ currentPassword, newPassword }` from a signed-in session (an API key is refused). Your other sessions end (reason
+`policy`); the one you used stays. MFA is unchanged: the next sign-in still asks for a code. The current password is
+the re-check, so step-up does not ask for a code here (a user without an authenticator can still change it). A wrong
+current password answers `403 current_password_invalid`; requests count against the sign-in rate limit
+(`RATE_LIMIT_AUTH_MAX`), and five wrong ones in 15 minutes lock the change for that person (`429
+password_change_locked`; counted from the audit log, so this lock needs `AUDIT_LOG_ENABLED`, the default).
+
+**Set a temporary password for someone else.** An admin opens **Settings > Users > Set password** for a person who forgot
+theirs, or calls `POST /api/users/:id/password/reset`. L2M makes a random 24-character password and shows it once, in
+that answer only; send it to the person privately. Their old password stops working and all their sessions end (reason
+`admin`); they sign in with the temporary one (and their MFA code, if they have one) and change it under **Settings >
+Security**. The temporary password does not expire and is not forced to change, so tell them to change it. It needs
+step-up when step-up is on, and is refused with an API key, on your own account, on a disabled user, on an invite not
+yet accepted (send the invite again) and on a service account.
+
+Both routes take only a signed-in session and only from the studio's own page (the `Origin` or `Referer` must be the
+studio's), so another site cannot fire them with your cookie.
+
+**SSO accounts.** An account linked to an OIDC, SAML or LDAP identity changes its password at the identity provider.
+An admin cannot set a password on it (`409 sso_account`). Someone who signs in only with SSO has no password they know,
+so they cannot change one either; a local account that was later linked to SSO can still change the local password it
+holds.
+
+Both are audited, without the password: `user.password.change` (success, or failure with `reason: current_password`)
+and `user.password.reset` (with the user's email and how many sessions ended). There is no email reset flow; L2M does
+not assume a mail server.
+
 ## Keeping admin access
 
 No setting here refuses to start or refuses a sign-in outright: a listed role without MFA gets a setup-only session,
@@ -1143,6 +1193,8 @@ If the only admin loses their authenticator and backup codes:
 - `POST /api/auth/step-up` (`{ code }`, TOTP or backup code; refreshes the session's MFA check)
 - `POST /api/auth/mfa/enroll` (`{ password? }`; the password is needed more than 10 minutes after signing in)
 - `POST /api/users/:id/mfa/reset` (admin, step-up)
+- `POST /api/auth/password` (`{ currentPassword, newPassword }`; signed-in session; see [Passwords](#passwords))
+- `POST /api/users/:id/password/reset` (admin, step-up; answers `{ temporaryPassword, sessionsEnded }` once)
 - `POST /api/auth/api-keys/:id/rotate` (your own key; `{ graceHours? }`, step-up; see
   [Rotating keys](./service-accounts.md#rotating-keys))
 - `GET /api/auth/oidc/metadata` (public; `{ "enabled": false }` when OIDC is off)

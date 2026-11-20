@@ -1,0 +1,36 @@
+title: "[Q&A] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ask anything about installing, building with or running L2M. Search the [docs](https://lsquarem.com/docs/) and earlier discussions first; a bug report belongs in [Issues](https://github.com/TensorGreed/l2m/issues/new/choose).
+        Please leave out secrets, tokens and private data from logs and workflow exports.
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      description: What are you trying to do, and what happened instead?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: L2M version
+      description: The image tag or release (for example v0.1.0), or the commit if you run from source.
+      placeholder: v0.1.0
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you run L2M
+      options:
+        - Docker quickstart (install.sh or docker-compose.quickstart.yml)
+        - Docker Compose from the repository
+        - Helm / Kubernetes
+        - From source (pnpm)
+        - Other
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: Workflow JSON (trimmed), logs or screenshots that help. Remove secrets first.
+      render: text

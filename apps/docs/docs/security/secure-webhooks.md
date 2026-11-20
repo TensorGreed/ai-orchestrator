@@ -14,11 +14,99 @@ Compatibility API route:
 
 - `POST /api/webhooks/execute`
 
+## Calling a webhook
+
+Configure the `Webhook Input` node with:
+
+- `method` (default `POST`)
+- `path` (example: `agent-demo`)
+
+Then call the generated URL, for example from Postman:
+
+- Test URL: `http://localhost:4000/webhook-test/<path>` (send an API key: `X-API-Key: <key>`)
+- Production URL: `http://localhost:4000/webhook/<path>`
+
+Minimum payload:
+
+```json
+{
+  "session_id": "demo-session-1",
+  "system_prompt": "You are a tool-using agent. Use tools when required.",
+  "user_prompt": "What time is it in America/Toronto and what is 12*7?",
+  "variables": {
+    "tenant": "local-dev"
+  }
+}
+```
+
+For long runs, add an optional field:
+
+```json
+{
+  "executionTimeoutMs": 1200000
+}
+```
+
+Example with curl:
+
+```bash
+curl -X POST http://localhost:4000/webhook/agent-demo \
+  -H "Content-Type: application/json" \
+  -d '{
+    "session_id": "demo-session-1",
+    "system_prompt": "You are a tool-using agent. Use tools when required.",
+    "user_prompt": "What time is it in America/Toronto and what is 12*7?"
+  }'
+```
+
+The compatibility endpoint `POST /api/webhooks/execute` (with `workflow_id`) is still supported.
+
 ## Webhook auth modes
 
 - `none`
 - `bearer_token`
 - `hmac_sha256`
+
+Configure these in the Webhook node modal: the auth mode, the header names, the secret reference, and an idempotency
+toggle with its header name.
+
+### Postman example: bearer token
+
+Header:
+
+- `Authorization: Bearer <token>`
+
+Body:
+
+```json
+{
+  "user_prompt": "hello",
+  "system_prompt": "You are concise."
+}
+```
+
+### Postman example: HMAC SHA256
+
+Assume the timestamp header is `x-webhook-timestamp`, the signature header is `x-webhook-signature` and the signing
+secret is `<shared_secret>`. The signature is `hex(HMAC_SHA256(secret, timestamp + "." + raw_body))`.
+
+Headers:
+
+- `x-webhook-timestamp: <unix_seconds_or_iso>`
+- `x-webhook-signature: <hex_signature>` (or `sha256=<hex_signature>`)
+
+Body (raw JSON):
+
+```json
+{
+  "user_prompt": "hello",
+  "system_prompt": "You are concise."
+}
+```
+
+Signed requests need the timestamp and are rejected outside the tolerance window (default 5 minutes). A duplicate
+signed fingerprint within the TTL is rejected as a replay (`403`). With idempotency on, a repeated `Idempotency-Key`
+for the same endpoint returns the cached result instead of running again.
 
 ## Public triggers get a warning on save
 

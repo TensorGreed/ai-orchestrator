@@ -99,3 +99,11 @@ Call with (dict "root" $ "explicit" <value> "minimum" <n> "worker" <bool>).
 {{- int .minimum -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+The image tag: the value when set, else the release this chart belongs to ("v" + appVersion).
+Usage: include "l2m.imageTag" (dict "tag" .Values.image.tag "root" .)
+*/}}
+{{- define "l2m.imageTag" -}}
+{{- .tag | default (printf "v%s" .root.Chart.AppVersion) -}}
+{{- end -}}

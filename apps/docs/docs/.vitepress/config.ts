@@ -13,7 +13,7 @@ import { LEVEL_LABELS, trackById, TRACKS } from "./site/tracks.js";
 
 const BLOG_IS_EMPTY = blogPosts().length === 0;
 
-// One consent script serves the landing and the docs. It lives with the landing (repo-root
+// One page-counter script serves the landing and the docs. It lives with the landing (repo-root
 // docs/site-consent.js); copy it into public/ so VitePress serves it in dev and ships it in the
 // build at /docs/site-consent.js (public/site-consent.js is generated and git-ignored).
 copyFileSync(
@@ -63,7 +63,7 @@ function partsOf(relativePath: string): Crumb[] {
 
 export default defineConfig({
   title: "L2M",
-  description: "Documentation for L2M, the open-source, self-hosted studio and runtime to build, run and govern MCP agents.",
+  description: "Documentation for L2M, the open-source, self-hosted orchestrator for putting AI agents into production: build visually, connect MCP servers, control tool calls.",
   lang: "en",
   // Served as a subpath under lsquarem.com — the marketing landing lives at
   // the root, the VitePress build is mounted at /docs/. The Pages deployment
@@ -214,9 +214,11 @@ export default defineConfig({
       {
         text: "Getting Started",
         items: [
+          { text: "Install with Docker", link: "/getting-started/install" },
           { text: "Build your first MCP agent in 5 min", link: "/getting-started/build-your-first-mcp-agent" },
           { text: "Starter templates", link: "/getting-started/starter-templates" },
           { text: "Quickstart", link: "/getting-started/quickstart" },
+          { text: "Run from source", link: "/getting-started/run-from-source" },
           { text: "Environment", link: "/getting-started/environment" },
           { text: "VS Code Extension", link: "/getting-started/vscode-extension" }
         ]
@@ -268,7 +270,10 @@ export default defineConfig({
       },
       {
         text: "Architecture",
-        items: [{ text: "Overview", link: "/architecture/overview" }]
+        items: [
+          { text: "Overview", link: "/architecture/overview" },
+          { text: "Workflow JSON and samples", link: "/architecture/workflow-json" }
+        ]
       },
       {
         text: "Runtime",
@@ -285,6 +290,7 @@ export default defineConfig({
         items: [
           { text: "Core Nodes", link: "/nodes/core-nodes" },
           { text: "Your Integrations (MCP tools, APIs)", link: "/nodes/integrations" },
+          { text: "Triggers and integrations", link: "/nodes/triggers-and-integrations" },
           { text: "Azure Nodes", link: "/nodes/azure-nodes" },
           { text: "Chart (Vega-Lite)", link: "/nodes/chart" },
           { text: "Web Browse (Playwright)", link: "/nodes/web-browse" },

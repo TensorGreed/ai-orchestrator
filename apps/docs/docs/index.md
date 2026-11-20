@@ -1,14 +1,17 @@
 ---
 layout: home
-title: "L2M documentation: run and govern MCP agents, self-hosted"
+title: "L2M docs: put AI agents into production, self-hosted"
 titleTemplate: false
-description: "Docs for L2M, the open-source, self-hosted studio and runtime to build, run and govern MCP agents: tutorials, MCP control plane, approvals, audit, API."
+description: "Docs for L2M, the open-source, self-hosted orchestrator for AI agents: install, tutorials, MCP servers and gateway, approvals, replay tests, API."
 hero:
   name: L2M
-  text: The MCP-native agent runtime
-  tagline: Visual workflow builder, multi-agent Swarm, and a VS Code surface — for developers composing AI agents that do real work in real systems via the Model Context Protocol.
+  text: Put AI agents into production, on your own servers
+  tagline: An open-source, self-hosted orchestrator for AI agents and workflows. Build them visually, connect any MCP server, and control every tool call with approvals, budgets and replay tests.
   actions:
     - theme: brand
+      text: Install with Docker
+      link: /getting-started/install
+    - theme: alt
       text: Build your first MCP agent (5 min)
       link: /getting-started/build-your-first-mcp-agent
     - theme: alt

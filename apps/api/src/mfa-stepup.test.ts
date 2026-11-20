@@ -365,6 +365,7 @@ describe("step-up (STEP_UP_MAX_AGE_MINUTES)", () => {
       { method: "GET", url: "/api/data-protection/requests/dsr_x/export" },
       { method: "POST", url: "/api/data-protection/requests/dsr_x/confirm", payload: {} },
       { method: "POST", url: `/api/users/${other.id}/enable` },
+      { method: "POST", url: `/api/users/${other.id}/password/reset` },
       { method: "POST", url: "/api/scim/tokens", payload: { name: "idp" } },
       { method: "POST", url: "/api/scim/tokens/sct_x/rotate", payload: {} },
       { method: "DELETE", url: "/api/scim/tokens/sct_x" }

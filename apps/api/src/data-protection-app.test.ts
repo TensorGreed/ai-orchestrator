@@ -108,6 +108,23 @@ async function waitFor(context: TestContext, cookie: string, id: string, status:
   throw new Error(`Request ${id} never reached ${status}`);
 }
 
+/**
+ * Waits for a request's audit entry. The service records a status change first (compare-and-set) and its audit entry
+ * just after, so a request seen in a status may not have that entry yet.
+ */
+async function waitForAudit(context: TestContext, id: string, eventType: string): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const rows = await testSql(context.store).all<{ n: number | string }>(
+      "SELECT COUNT(*) AS n FROM audit_logs WHERE event_type = ? AND resource_id = ?",
+      eventType,
+      id
+    );
+    if (Number(rows[0]?.n ?? 0) > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`Request ${id} never got the audit entry ${eventType}`);
+}
+
 async function dataSubjectText(context: TestContext): Promise<string> {
   const sql = testSql(context.store);
   const parts: unknown[] = [];
@@ -247,6 +264,7 @@ describe("data-subject requests in the app", () => {
     const deferred = await waitFor(context, admin, id, "deferred_by_hold");
     expect(deferred.deletion).toMatchObject({ deferred: 1 });
     expect(await context.store.getExecutionHistory(executionId)).not.toBeNull();
+    await waitForAudit(context, id, "data_subject.deletion_deferred");
 
     const released = await context.app.inject({ method: "POST", url: `/api/legal-holds/${holdId}/release`, headers: { cookie: admin }, payload: { reason: "Settled" } });
     expect(released.statusCode, released.body).toBe(200);
@@ -255,6 +273,7 @@ describe("data-subject requests in the app", () => {
     expect(await context.store.getExecutionHistory(executionId)).toBeNull();
     expect(Number(await usage())).toBe(usageBefore);
 
+    await waitForAudit(context, id, "data_subject.deleted");
     const audit = await testSql(context.store).all<{ event_type: string }>("SELECT event_type FROM audit_logs WHERE event_type LIKE 'data_subject.%' ORDER BY created_at");
     expect(audit.map((row) => row.event_type)).toEqual(
       expect.arrayContaining([

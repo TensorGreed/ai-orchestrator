@@ -344,6 +344,7 @@ import { GuardService } from "./services/guard-service.js";
 import type { GuardSimulationRun } from "./services/guard-simulation-sink.js";
 import { startSseHeartbeat, type SseSessionWatch } from "./sse-heartbeat.js";
 import { idleExpiresAt, idleMinutesFor, maxSessionsFor, parseSessionPolicy } from "./services/session-policy.js";
+import { registerPasswordRoutes } from "./password-routes.js";
 import { registerSessionRoutes } from "./session-routes.js";
 import {
   cronQueueItemId,
@@ -7455,6 +7456,8 @@ export async function createApp(
       "/api/auth/login",
       "/api/auth/register",
       "/api/auth/invite",
+      // Guesses of the current password from a signed-in session.
+      "/api/auth/password",
       // 13.2 — a break-glass link's confirm POST (each attempt is audited).
       "/api/auth/break-glass",
       "/api/auth/saml/login",
@@ -9187,6 +9190,17 @@ export async function createApp(
     audit: async (request, user, event) => await audit(request, user, event),
     clearSessionCookie,
     requireStepUp: async (request, reply, action, targetUserId) => await requireStepUp(request, reply, action, { targetUserId })
+  });
+
+  registerPasswordRoutes({
+    app,
+    store,
+    sessions: sessionService,
+    requireRole: async (request, reply, roles) => await requireRole(request, reply, roles),
+    audit: async (request, user, event) => await audit(request, user, event),
+    requireStepUp: async (request, reply, action, targetUserId) => await requireStepUp(request, reply, action, targetUserId ? { targetUserId } : {}),
+    // Declared further down; only called while a request is handled.
+    calledFromStudio: (request) => sessionCallFromStudio(request)
   });
 
   // ---------------------------------------------------------------------------

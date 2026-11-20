@@ -37,7 +37,7 @@ spec:
       {{- end }}
       containers:
         - name: webhook
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ .Values.image.repository }}:{{ include "l2m.imageTag" (dict "tag" .Values.image.tag "root" .) }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http

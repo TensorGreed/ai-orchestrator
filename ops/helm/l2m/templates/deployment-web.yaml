@@ -24,7 +24,7 @@ spec:
       {{- end }}
       containers:
         - name: web
-          image: "{{ .Values.web.image.repository }}:{{ .Values.web.image.tag }}"
+          image: "{{ .Values.web.image.repository }}:{{ include "l2m.imageTag" (dict "tag" .Values.web.image.tag "root" .) }}"
           imagePullPolicy: {{ .Values.web.image.pullPolicy }}
           ports:
             - name: http

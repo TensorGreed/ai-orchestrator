@@ -5435,6 +5435,19 @@ export class SqliteStore implements Store {
     return result;
   }
 
+  async setUserPassword(input: Parameters<Store["setUserPassword"]>[0]): ReturnType<Store["setUserPassword"]> {
+    const { changes } =
+      input.expectedPasswordHash === undefined
+        ? this.db
+            .prepare(`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ? AND kind = 'human'`)
+            .run(input.passwordHash, input.now, input.userId)
+        : this.db
+            .prepare(`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ? AND kind = 'human' AND password_hash = ?`)
+            .run(input.passwordHash, input.now, input.userId, input.expectedPasswordHash);
+    if (changes > 0) this.persist();
+    return changes > 0;
+  }
+
   async closeUserInvites(userId: string, now: string): Promise<number> {
     const { changes } = this.db.prepare(`UPDATE user_invites SET accepted_at = ? WHERE user_id = ? AND accepted_at IS NULL`).run(now, userId);
     if (changes > 0) this.persist();
@@ -8524,6 +8537,10 @@ export class SqliteStore implements Store {
       ]
     );
     this.persist();
+  }
+
+  async userHasSsoIdentity(userId: string): Promise<boolean> {
+    return this.queryOne<{ one: number }>(`SELECT 1 AS one FROM sso_identities WHERE user_id = ? LIMIT 1`, [userId]) !== null;
   }
 
   async renameSsoIdentitySubject(input: { provider: string; from: string; to: string }): Promise<boolean> {

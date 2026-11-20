@@ -27,8 +27,9 @@ export default {
       "doc-after": () => h(HubDocFooter),
       "layout-bottom": () =>
         h("p", { class: "site-privacy-note" }, [
-          "This website (not the L2M product) uses Google Analytics, only after you accept cookies. ",
-          h("a", { href: "#", "data-cookie-settings": "" }, "Cookie settings")
+          "This website (not the L2M product) counts page views with ",
+          h("a", { href: "https://www.goatcounter.com/help/privacy", rel: "noopener" }, "GoatCounter"),
+          ", without cookies."
         ])
     });
   },

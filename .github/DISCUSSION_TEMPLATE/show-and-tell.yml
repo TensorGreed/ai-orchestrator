@@ -1,0 +1,29 @@
+title: "[Show and tell] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Share a workflow, an agent, an MCP server setup or a template you built with L2M. Others can import it and learn from it.
+        Check the export for secrets before you attach it: secrets are referenced by id, but values you typed into node fields are exported as they are.
+  - type: textarea
+    id: what
+    attributes:
+      label: What it does
+      description: One or two sentences, and who it is for.
+    validations:
+      required: true
+  - type: textarea
+    id: how
+    attributes:
+      label: How it works
+      description: The main nodes, MCP servers, models and anything it needs (keys, services).
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Workflow JSON (optional)
+      description: Paste the export (Workflow → Export), or attach the file.
+      render: json
+  - type: textarea
+    id: media
+    attributes:
+      label: Screenshots or a short clip (optional)

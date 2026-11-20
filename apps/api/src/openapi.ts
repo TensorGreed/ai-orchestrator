@@ -776,6 +776,48 @@ export const openApiSpec = {
         }
       }
     },
+    "/api/auth/password": {
+      post: {
+        tags: ["Auth"],
+        summary:
+          "Change your own password (a signed-in session from the studio's page, not an API key): the current password and a new one of 8 to 1024 characters. Your other sessions end. Five wrong current passwords in 15 minutes lock it (429).",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                additionalProperties: false,
+                required: ["currentPassword", "newPassword"],
+                properties: { currentPassword: { type: "string" }, newPassword: { type: "string", minLength: 8, maxLength: 1024 } }
+              }
+            }
+          }
+        },
+        responses: {
+          "200": { description: "{ ok, sessionsEnded }" },
+          "400": { description: "Invalid payload, an API key (code: session_required), or the new password equals the current one (code: password_unchanged)" },
+          "403": { description: "The current password is not correct (code: current_password_invalid), or another site's page (code: cross_site_refused)" },
+          "409": { description: "The password changed meanwhile (code: password_changed_meanwhile)" },
+          "429": { description: "Too many wrong current passwords (code: password_change_locked)" }
+        }
+      }
+    },
+    "/api/users/{id}/password/reset": {
+      post: {
+        tags: ["Users"],
+        summary:
+          "Set a new temporary password for another user (admin, a signed-in session from the studio's page, step-up): generated, returned once, never stored in plain text. All of that user's sessions end. Not for your own account, a disabled user, a pending invite or an SSO account.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "{ ok, userId, temporaryPassword, sessionsEnded }" },
+          "400": { description: "Your own account (code: own_account), or an API key (code: session_required)" },
+          "403": { description: "Not an admin, another site's page (code: cross_site_refused), or step-up required (code: step_up_required)" },
+          "404": { description: "User not found (or a service account)" },
+          "409": { description: "Disabled (code: user_disabled), invite not accepted yet (code: invite_pending), or an SSO account (code: sso_account)" }
+        }
+      }
+    },
     "/api/users/{id}/mfa/reset": {
       post: {
         tags: ["Users"],

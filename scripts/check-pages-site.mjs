@@ -8,7 +8,8 @@
 //   - the hero's primary button goes to /demo/ and the demo loads;
 //   - the nav's "Live demo" button is visible at 360 px and 1440 px;
 //   - every internal link and asset on the landing pages answers 200, and every #fragment exists;
-//   - no request leaves the site's origin (fonts are self-hosted, no trackers);
+//   - no request leaves the site's origin (fonts are self-hosted), except the cookieless page counter's script and
+//     endpoint on the landing and the docs, never on /demo/;
 //   - the links into the demo open the workflow they name, and `demoRun=recorded` starts its
 //     recorded run;
 //   - no console errors on the landing pages or the demo.
@@ -110,9 +111,19 @@ const pass = (message) => console.log(`  ✓ ${message}`);
 // CHROMIUM_EXECUTABLE_PATH uses an installed Chromium instead of the one Playwright downloads.
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_EXECUTABLE_PATH || undefined });
 
+// The cookieless page counter (docs/site-consent.js) is the one thing the landing and the docs may load from
+// elsewhere: its script and its count endpoint, never from the demo. The check answers both itself, so no test
+// visit is counted.
+const COUNTER_SCRIPT = "https://gc.zgo.at/count.js";
+const COUNTER_ENDPOINT = "https://lsquarem.goatcounter.com/count";
+const counterRequests = [];
+const isCounterUrl = (url) => url === COUNTER_SCRIPT || url.startsWith(`${COUNTER_ENDPOINT}`);
+
 /** A page that records console errors and every request that leaves the origin. */
 async function openPage(viewport, label) {
   const context = await browser.newContext({ viewport });
+  await context.route(COUNTER_SCRIPT, (route) => route.fulfill({ status: 200, contentType: "text/javascript", body: "" }));
+  await context.route(`${COUNTER_ENDPOINT}**`, (route) => route.fulfill({ status: 204, body: "" }));
   const page = await context.newPage();
   page.on("console", (message) => {
     if (message.type() === "error") fail(`${label}: console error: ${message.text()}`);
@@ -121,6 +132,11 @@ async function openPage(viewport, label) {
   page.on("request", (request) => {
     const url = request.url();
     if (!url.startsWith(origin) && !url.startsWith("data:") && !url.startsWith("blob:")) {
+      const from = request.frame()?.url() ?? "";
+      if (isCounterUrl(url) && !from.startsWith(`${origin}/demo`)) {
+        counterRequests.push({ from, url });
+        return;
+      }
       fail(`${label}: request left the origin: ${url}`);
     }
   });
@@ -157,6 +173,35 @@ console.log("Hero call to action");
     fail("the demo studio did not load");
   }
   await page.waitForLoadState("networkidle");
+  await context.close();
+}
+
+// 1b. The page counter loads on the landing and the docs (and only its two hosts), never in the demo; no Google
+// Analytics or consent bar anywhere.
+console.log("Page counter");
+for (const pathname of ["/", "/docs/", "/demo/"]) {
+  const { context, page } = await openPage({ width: 1440, height: 900 }, `${pathname} (counter)`);
+  const before = counterRequests.length;
+  await page.goto(`${origin}${pathname}`, { waitUntil: "networkidle" });
+  const loaded = counterRequests.slice(before).some((request) => request.url === COUNTER_SCRIPT);
+  const endpoint = await page.evaluate(() => document.querySelector("script[data-goatcounter]")?.getAttribute("data-goatcounter") ?? null);
+  // GoatCounter only: no Google Analytics, no consent bar, and the privacy note says what the site does.
+  const site = await page.evaluate(() => ({
+    gtag: "gtag" in window || Boolean(document.querySelector('script[src*="googletagmanager"]')),
+    consentBar: Boolean(document.querySelector(".site-consent, [data-cookie-settings]")),
+    note: document.querySelector(".site-privacy-note, .footer-note")?.textContent ?? ""
+  }));
+  !site.gtag && !site.consentBar ? pass(`${pathname}: no Google Analytics or consent bar`) : fail(`${pathname}: Google Analytics or a consent bar is on the page`);
+  if (pathname !== "/demo/") {
+    /GoatCounter, without cookies/.test(site.note) && !/Google|accept cookies/i.test(site.note)
+      ? pass(`${pathname}: privacy note names the cookieless counter only`)
+      : fail(`${pathname}: privacy note is not accurate: ${site.note.trim()}`);
+  }
+  if (pathname === "/demo/") {
+    !loaded && endpoint === null ? pass("/demo/: no page counter") : fail("/demo/: the page counter loaded in the demo");
+  } else {
+    loaded && endpoint === COUNTER_ENDPOINT ? pass(`${pathname}: page counter loads (${endpoint})`) : fail(`${pathname}: page counter not loaded (endpoint ${endpoint})`);
+  }
   await context.close();
 }
 

@@ -623,7 +623,16 @@ jobs:
         run: |
           set -euo pipefail
           if ! gh release view "$VERSION" > /dev/null 2>&1; then
+            # Hand-written notes in release-notes/<tag>.md at the tag come first and replace GitHub's generated list
+            # of pull requests; without that file the generated list is used.
+            generate=(--generate-notes)
+            if gh api -H "Accept: application/vnd.github.raw" "repos/$GH_REPO/contents/release-notes/$VERSION.md?ref=$VERSION" > notes-head.md 2> /dev/null; then
+              generate=()
+            else
+              : > notes-head.md
+            fi
             {
+              if [ -s notes-head.md ]; then cat notes-head.md; echo; echo "---"; echo; fi
               echo "Images (multi-arch, signed, with SBOM and provenance attestations):"
               echo
               echo "~~~"
@@ -634,7 +643,7 @@ jobs:
             } > release-notes.md
             flags=()
             if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
-            gh release create "$VERSION" --verify-tag --title "$VERSION" --notes "$(cat release-notes.md)" --generate-notes "${flags[@]}"
+            gh release create "$VERSION" --verify-tag --title "$VERSION" --notes-file release-notes.md "${generate[@]}" "${flags[@]}"
           fi
           gh release upload "$VERSION" assets/* --clobber
 

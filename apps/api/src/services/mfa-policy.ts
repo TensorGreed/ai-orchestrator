@@ -79,6 +79,7 @@ export const STEP_UP_ACTIONS = {
   "user.mfa_reset": "Reset a user's MFA",
   "user.sessions_revoke": "Sign another user out (end their sessions)",
   "user.enable": "Enable a user that SCIM disabled",
+  "user.password_reset": "Set a temporary password for another user",
   "mfa.disable": "Turn your own MFA off",
   "api_key.create": "Create an API key",
   "api_key.rotate": "Rotate an API key",

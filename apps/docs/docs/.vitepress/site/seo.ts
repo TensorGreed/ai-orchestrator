@@ -12,7 +12,7 @@ import { LEVEL_LABELS, trackById, type Level } from "./tracks.js";
 // The share card lives with the landing at the site root (source: scripts/social-card/).
 export const DEFAULT_SOCIAL_CARD = `${SITE}/assets/social-card.png`;
 export const DEFAULT_SOCIAL_CARD_ALT =
-  "L2M: run and govern MCP agents, self-hosted. The L2M studio with an agent hub, its chat model, memory and MCP tools, and the run tape of a finished run.";
+  "L2M: put AI agents into production, on your own servers. The L2M studio with an agent hub, its chat model, memory and MCP tools, and the run tape of a finished run.";
 
 const ORGANIZATION_ID = { "@id": `${SITE}/#organization` };
 const WEBSITE_ID = { "@id": `${SITE}/#website` };

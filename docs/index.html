@@ -3,24 +3,24 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>L2M: run and govern MCP agents, self-hosted</title>
-    <meta name="description" content="L2M is an open-source, self-hosted platform to build, run and govern MCP agents: MCP server governance, approvals, signed audit bundles and release gates." />
+    <title>L2M: put AI agents into production, on your own servers</title>
+    <meta name="description" content="Open-source, self-hosted orchestrator for AI agents: build visually, connect any MCP server, control every tool call with approvals, budgets and replays." />
     <link rel="canonical" href="https://lsquarem.com/" />
     <meta name="theme-color" content="#07090f" />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="L2M" />
     <meta property="og:url" content="https://lsquarem.com/" />
-    <meta property="og:title" content="L2M: run and govern MCP agents, self-hosted" />
-    <meta property="og:description" content="Build MCP agents visually, run them, and govern every tool call: control plane, approvals, signed audit bundles and release gates. Open source, self-hosted. Live demo in your browser." />
+    <meta property="og:title" content="L2M: put AI agents into production, on your own servers" />
+    <meta property="og:description" content="L2M is an open-source, self-hosted orchestrator for putting AI agents into production safely: build them visually, connect any MCP server, and control every tool call with approvals, budgets and replay tests. Live demo in your browser." />
     <meta property="og:image" content="https://lsquarem.com/assets/social-card.png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
-    <meta property="og:image:alt" content="L2M: run and govern MCP agents, self-hosted. The L2M studio with an agent hub, its chat model, memory and MCP tools, and the run tape of a finished run." />
+    <meta property="og:image:alt" content="L2M: put AI agents into production, on your own servers. The L2M studio with an agent hub, its chat model, memory and MCP tools, and the run tape of a finished run." />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="L2M: run and govern MCP agents, self-hosted" />
-    <meta name="twitter:description" content="Build MCP agents visually, run them, and govern every tool call. Open source, self-hosted. Live demo in your browser." />
+    <meta name="twitter:title" content="L2M: put AI agents into production, on your own servers" />
+    <meta name="twitter:description" content="Build AI agents visually, connect any MCP server, and control every tool call. Open source, self-hosted. Live demo in your browser." />
     <meta name="twitter:image" content="https://lsquarem.com/assets/social-card.png" />
-    <meta name="twitter:image:alt" content="L2M: run and govern MCP agents, self-hosted. The L2M studio with an agent hub, its chat model, memory and MCP tools, and the run tape of a finished run." />
+    <meta name="twitter:image:alt" content="L2M: put AI agents into production, on your own servers. The L2M studio with an agent hub, its chat model, memory and MCP tools, and the run tape of a finished run." />
     <link rel="icon" type="image/svg+xml" href="./assets/favicon.svg" />
     <link rel="alternate" type="application/atom+xml" title="L2M blog" href="https://lsquarem.com/docs/blog/feed.xml" />
     <script type="application/ld+json">
@@ -33,7 +33,7 @@
           "url": "https://lsquarem.com/",
           "name": "L2M",
           "alternateName": "L²M",
-          "description": "Run and govern MCP agents, self-hosted.",
+          "description": "Put AI agents into production, on your own servers.",
           "inLanguage": "en",
           "publisher": {
             "@id": "https://lsquarem.com/#organization"
@@ -54,11 +54,11 @@
           "name": "L2M",
           "alternateName": "L²M",
           "url": "https://lsquarem.com/",
-          "description": "An open-source, self-hosted studio and runtime for MCP agents: build them visually, run them with tool calling, and govern them with an MCP control plane, approvals, signed audit bundles and release gates.",
+          "description": "L2M is an open-source, self-hosted orchestrator for putting AI agents into production safely: build them visually, connect any MCP server, and control every tool call with approvals, budgets and replay tests.",
           "applicationCategory": "DeveloperApplication",
           "applicationSubCategory": "AI agent platform",
           "operatingSystem": "Linux",
-          "softwareRequirements": "Node.js 24+ and pnpm 10+, or Docker (linux/amd64, linux/arm64)",
+          "softwareRequirements": "Docker with Compose (linux/amd64, linux/arm64); Node.js 24+ and pnpm 10+ to build from source",
           "license": "https://opensource.org/licenses/MIT",
           "isAccessibleForFree": true,
           "offers": {
@@ -73,7 +73,9 @@
             "name": "L2M documentation",
             "url": "https://lsquarem.com/docs/"
           },
-          "downloadUrl": "https://github.com/TensorGreed/l2m",
+          "downloadUrl": "https://lsquarem.com/install.sh",
+          "installUrl": "https://lsquarem.com/docs/getting-started/install",
+          "softwareVersion": "0.1.0",
           "publisher": {
             "@id": "https://lsquarem.com/#organization"
           }
@@ -118,7 +120,7 @@
         <a class="brand" href="./">
           <img src="./assets/lsquarem-logo.svg" alt="" width="32" height="32" />
           <strong>L<sup>2</sup>M</strong>
-          <span class="brand-tag">MCP agents, governed</span>
+          <span class="brand-tag">AI agents in production</span>
         </a>
 
         <nav class="nav" id="siteNav" aria-label="Main">
@@ -161,9 +163,9 @@
             <li>Self-hosted only</li>
             <li>No call-home</li>
           </ul>
-          <h1 id="hero-title">The place your <span class="accent">MCP agents</span> run and are governed.</h1>
+          <h1 id="hero-title">Put <span class="accent">AI agents</span> into production, on your own servers.</h1>
           <p class="lead">
-            Build tool-calling agents in a visual studio, run them against your MCP servers, and decide what every tool call may do: policies, approvals, signed audit bundles and a release gate. It all runs on your own infrastructure.
+            L2M is an open-source, self-hosted orchestrator for putting AI agents into production safely: build them visually, connect any MCP server, and control every tool call with approvals, budgets and replay tests.
           </p>
           <div class="hero-actions">
             <a class="btn btn-primary btn-lg" href="./demo/">
@@ -172,7 +174,11 @@
             </a>
             <a class="btn btn-lg" href="./docs/">Read the docs</a>
           </div>
-          <p class="hero-note">Runs in your browser, no sign-up. Recorded runs; nothing leaves your browser.</p>
+          <div class="install-cmd" aria-label="Install on your own machine">
+            <code id="installCommand">curl -fsSL https://lsquarem.com/install.sh | sh</code>
+            <button class="btn btn-sm" type="button" data-copy-target="installCommand">Copy</button>
+          </div>
+          <p class="hero-note">The demo runs in your browser, no sign-up. To install, you need Docker; <a href="./docs/getting-started/install">read the script or use two commands instead</a>.</p>
         </div>
       </section>
 
@@ -300,9 +306,9 @@
             </article>
             <article class="card">
               <span class="card-icon tone-memory" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.6 13.4l-7.2 7.2a2 2 0 0 1-2.8 0L2 12V2h10l8.6 8.6a2 2 0 0 1 0 2.8z" /><circle cx="7" cy="7" r="1.5" /></svg></span>
-              <h3>Data labels and destinations</h3>
-              <p>Label where each step's data came from and what it contains. Sort every model, server and URL into local, private, approved-vendor or public, and block, redact or ask for approval when sensitive data would go too far.</p>
-              <a class="text-link card-link" href="./docs/product/data-labels-and-destinations">Data destinations →</a>
+              <h3>Tool policy and approvals</h3>
+              <p>Decide per tool what an agent may do: allow, block or ask for approval. Approvers see the call's arguments, can edit them, and every decision is audited.</p>
+              <a class="text-link card-link" href="./docs/product/mcp-tool-policy">Tool policy →</a>
             </article>
           </div>
           <div class="shot-row shot-single">
@@ -325,7 +331,7 @@
               <li><strong>Golden runs and sets.</strong> Save good runs, group them, and replay a draft or a saved version against them.</li>
               <li><strong>Scorers.</strong> JSON equality and schema, text similarity, tool sequence, status, budget and an LLM judge.</li>
               <li><strong>Release gate on publish.</strong> A version reaches production only after its replay job passes the gate's policy; an override needs a written reason and is audited.</li>
-              <li><strong>Production capture.</strong> Sample real runs with personal data masked, and promote the useful ones into a golden set.</li>
+              <li><strong>Production capture.</strong> Sample real runs and promote the useful ones into a golden set.</li>
               <li><strong>A CLI for your pipeline.</strong> Run replays, write JUnit results and publish from CI.</li>
             </ul>
             <div class="code-panel">
@@ -397,18 +403,18 @@
         <div class="container split">
           <div>
             <span class="eyebrow">Get running</span>
-            <h2 id="gr-title">From clone to a working MCP agent.</h2>
-            <p class="lead">No model key is needed to start: the MCP Agent Quickstart template uses the built-in echo model and an in-process mock MCP server. Swap in real models and servers when you're ready.</p>
+            <h2 id="gr-title">From install to a working MCP agent.</h2>
+            <p class="lead">You need Docker, nothing else. No model key is needed to start: the starter templates and the MCP Agent Quickstart use built-in sample data, the echo model and a mock MCP server. Swap in real models and servers when you're ready.</p>
             <div class="hero-actions" style="justify-content: flex-start;">
               <a class="btn btn-primary" href="./docs/getting-started/build-your-first-mcp-agent">Follow the tutorial</a>
               <a class="btn" href="./demo/">Try the live demo first</a>
             </div>
           </div>
           <ol class="steps">
-            <li><div><code>git clone</code> the repository, then <code>pnpm install</code> (Node 24+, pnpm 10+).</div></li>
-            <li><div>Copy <code>.env.example</code> to <code>.env</code>, set <code>SECRET_MASTER_KEY_BASE64</code> and the bootstrap admin's email and password.</div></li>
-            <li><div><code>pnpm dev</code>, then sign in at <code>localhost:5173</code>.</div></li>
+            <li><div><code>curl -fsSL https://lsquarem.com/install.sh | sh</code> (or the <a href="./docs/getting-started/install">two-command install</a>).</div></li>
+            <li><div>Open <code>localhost:8080</code> and sign in as <code>admin@l2m.local</code> with the password the installer prints.</div></li>
             <li><div>Templates → <strong>MCP Agent Quickstart</strong> → Use template → Run.</div></li>
+            <li><div>To build from source instead: Node.js 24+ and pnpm 10+, see <a href="./docs/getting-started/run-from-source">Run from source</a>.</div></li>
           </ol>
         </div>
       </section>
@@ -432,7 +438,7 @@
 
     <footer class="footer">
       <div class="container footer-inner">
-        <div><strong>L<sup>2</sup>M</strong> · Run and govern MCP agents, self-hosted · <span id="year">2026</span></div>
+        <div><strong>L<sup>2</sup>M</strong> · Put AI agents into production, on your own servers · <span id="year">2026</span></div>
         <nav class="footer-links" aria-label="Footer">
           <a class="btn btn-primary" href="./demo/">Live demo</a>
           <a href="./docs/">Docs</a>
@@ -448,7 +454,7 @@
           <a href="https://github.com/TensorGreed/l2m" rel="noopener">GitHub</a>
           <a href="https://tensorgreed.com" rel="noopener">TensorGreed</a>
         </nav>
-        <p class="footer-note">This website (not the L2M product) uses Google Analytics, only after you accept cookies. <a href="#" data-cookie-settings>Cookie settings</a></p>
+        <p class="footer-note">This website (not the L2M product) counts page views with <a href="https://www.goatcounter.com/help/privacy" rel="noopener">GoatCounter</a>, without cookies.</p>
       </div>
     </footer>
 

@@ -256,9 +256,9 @@ log and its chain, projects, roles, MCP servers, rule sets, knowledge bases, rel
      ```
   3. **Before reopening access**, set `MFA_REQUIRED_ROLES` (for example `admin`, or `MFA_ENFORCE=true`), so those
      roles must set MFA up again before they can do anything else, and ask every other affected user to enrol again
-     right after signing in. L2M has no forced password reset: if a reset
-     account's password may be known to someone else, keep access closed for it (or delete the account and create it
-     again with a new password) until that is settled.
+     right after signing in. If an account's password may be known to someone else, an admin sets a new temporary
+     password for it (**Settings > Users > Set password**, see [Passwords](../security/auth-rbac.md#passwords)) before
+     access reopens.
 
   For one user, an admin can instead use **Settings > Users > Reset MFA** (`POST /api/users/:id/mfa/reset`, see
   [Resetting a user's MFA](../security/auth-rbac.md#resetting-a-user-s-mfa)).

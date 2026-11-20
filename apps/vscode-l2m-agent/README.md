@@ -1,14 +1,16 @@
-# L2M Agent VS Code Extension
+# L2M Agent for VS Code
 
-Interactive coding and data analytics assistant for VS Code backed by L2M webhook workflows. The extension collects bounded workspace context, streams requests to L2M, renders structured assistant output, and lets users approve generated patches or terminal commands.
+A coding and data agent in your editor, backed by workflows on your own [L2M](https://lsquarem.com/) server. The extension collects bounded workspace context, streams requests to L2M, renders structured answers, and lets you approve generated patches or terminal commands before anything changes.
 
-After installing the VSIX and reloading VS Code, open the `L2M Agent` icon in the Activity Bar to use the sidebar chat. You can also run `L2M Agent: Open Chat` from the Command Palette; it focuses the same sidebar view.
+You need a running L2M server (self-hosted; [install it with Docker](https://lsquarem.com/docs/getting-started/install) in two commands) and an API key from its **Settings → API Keys**. Docs: [VS Code extension](https://lsquarem.com/docs/getting-started/vscode-extension).
+
+After installing and reloading VS Code, open the `L2M Agent` icon in the Activity Bar to use the sidebar chat. You can also run `L2M Agent: Open Chat` from the Command Palette; it focuses the same sidebar view.
 
 ## Setup
 
 Configure these VS Code settings before sending a prompt:
 
-- `l2mAgent.apiBaseUrl`: L2M API base URL. Defaults to `http://localhost:4000`.
+- `l2mAgent.apiBaseUrl`: L2M API base URL. Defaults to `http://localhost:4000` (a server run from source). With the Docker install, use the studio's address, `http://localhost:8080`.
 - `l2mAgent.workflowId`: Optional workflow ID for the coding-agent workflow. When empty, the extension selects by webhook path.
 - `l2mAgent.webhookPath`: Webhook input path used when `workflowId` is empty. Defaults to `vscode-l2m-agent`.
 - `l2mAgent.authToken`: Bearer API key for authenticated API calls. Create it in L2M Settings -> API Keys, then paste the plaintext key here.

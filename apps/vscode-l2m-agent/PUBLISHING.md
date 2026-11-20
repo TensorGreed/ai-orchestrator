@@ -17,32 +17,14 @@ The package.json sets `"publisher": "l2m"`, the publisher ID on the VS Code Mark
 
 Register `l2m` on both before the first publish. If you publish under another ID, change `package.json` → `"publisher"` to it first.
 
-### 2. License
+### 2. License (done)
 
-Currently `"license": "UNLICENSED"`. The marketplaces don't strictly require a license, but every reputable extension has one. For an OSS-positioned extension, **MIT** is the convention.
+`"license": "MIT"`, with a copy of the repository's MIT `LICENSE` in this folder (packaged into the `.vsix`).
 
-- Add `"license": "MIT"` to package.json
-- Drop a `LICENSE` file in this folder (or symlink the repo-root LICENSE if it's MIT)
-- vsce will warn if there's no LICENSE file — not fatal but visible.
+### 3. Marketplace icon (done)
 
-### 3. Marketplace icon (PNG, 128×128 minimum)
-
-`resources/l2m-agent.svg` exists for the in-app Activity Bar (VS Code accepts SVG there). The Marketplace listing requires a **PNG**, minimum 128×128, recommended 256×256. Steps:
-
-```bash
-# Pick one — both produce a 256×256 PNG from the SVG.
-npx svgexport resources/l2m-agent.svg resources/l2m-agent.png 256:256
-# or, if you have ImageMagick / Inkscape installed:
-magick convert -background none -resize 256x256 resources/l2m-agent.svg resources/l2m-agent.png
-```
-
-Then add to package.json:
-
-```jsonc
-"icon": "resources/l2m-agent.png"
-```
-
-Re-run `pnpm --filter ./apps/vscode-l2m-agent run package` to bake the icon into the next .vsix.
+`resources/l2m-icon.png` (256×256, rendered from `docs/assets/lsquarem-logo.svg`) is the listing icon (`"icon"` in
+package.json). `resources/l2m-agent.svg` stays the Activity Bar icon.
 
 ### 4. README polish
 
