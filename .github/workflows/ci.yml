@@ -11,11 +11,16 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# The required checks are "Lint Test Build", "API on Postgres" and "Web E2E". The suites behind them run as parallel
+# jobs (the API suites in shards); "Lint Test Build" and "API on Postgres" are small jobs that wait for their parts and
+# pass only when every part passed, or was skipped because the change does not need it. Change the shard counts in the
+# matrices only: the shard jobs read the total from the strategy.
 jobs:
-  # Docs-only pull requests (files under apps/docs/ or docs/, or Markdown files at the repo root) skip the test,
-  # Postgres and E2E steps. The jobs still run and report success, so the required checks stay the same.
+  # Which suites this change needs (scripts/ci/changed-areas.mjs): docs-only pull requests (apps/docs/, docs/, Markdown
+  # at the repo root) skip every suite; the API on Postgres and the web E2E suites are skipped when every changed file
+  # is in an area unrelated to them. Pushes to main run everything.
   changes:
-    name: Detect docs-only change
+    name: Detect changed areas
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -23,69 +28,64 @@ jobs:
       pull-requests: read
     outputs:
       docs_only: ${{ steps.detect.outputs.docs_only }}
+      api_postgres: ${{ steps.detect.outputs.api_postgres }}
+      web_e2e: ${{ steps.detect.outputs.web_e2e }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts/ci
+          sparse-checkout-cone-mode: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
       - name: Detect
         id: detect
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
-          if [ "$EVENT" != "pull_request" ]; then echo "docs_only=false" >> "$GITHUB_OUTPUT"; exit 0; fi
-          files=$(gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" --jq '.[].filename')
-          count=$(printf '%s\n' "$files" | grep -c . || true)
-          other=$(printf '%s\n' "$files" | grep . | grep -Ev '^(apps/docs/|docs/)|^[^/]+\.md$' || true)
-          # The files API lists at most 3000 files; treat anything that large as a full change.
-          if [ "$count" -gt 0 ] && [ "$count" -lt 3000 ] && [ -z "$other" ]; then docs_only=true; else docs_only=false; fi
-          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
-          echo "Changed files: $count; docs only: $docs_only"
+          set -euo pipefail
+          areas="$RUNNER_TEMP/changed-areas.txt"
+          if [ "$EVENT" != "pull_request" ]; then
+            printf 'docs_only=false\napi_postgres=true\nweb_e2e=true\n' > "$areas"
+          else
+            # A renamed file counts under its old path too (moving API code into the web app still changes the API).
+            gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" --jq '.[] | .filename, (.previous_filename // empty)' > "$RUNNER_TEMP/changed-files.txt"
+            echo "Changed paths: $(grep -c . "$RUNNER_TEMP/changed-files.txt" || true)"
+            node scripts/ci/changed-areas.mjs < "$RUNNER_TEMP/changed-files.txt" > "$areas"
+          fi
+          cat "$areas"
+          for key in docs_only api_postgres web_e2e; do
+            grep -Eqx "$key=(true|false)" "$areas" || { echo "::error::No $key decision."; exit 1; }
+          done
+          cat "$areas" >> "$GITHUB_OUTPUT"
 
-  quality:
-    name: Lint Test Build
+  lint-build:
+    name: Lint and build
     runs-on: ubuntu-latest
     needs: changes
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      # Corepack must run BEFORE setup-node — `cache: "pnpm"` on setup-node
-      # invokes `pnpm` to compute the cache key, so pnpm has to already be
-      # on PATH at that point. The previous order failed with "Unable to
-      # locate executable file: pnpm".
-      - name: Enable Corepack
-        run: corepack enable
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: "24"
-          cache: "pnpm"
-
-      - name: Show pnpm version
-        run: pnpm --version
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - name: Set up Node.js and dependencies
+        uses: ./.github/actions/setup
 
       - name: Lint
         run: pnpm lint
 
-      # The release workflow's vulnerability gate (scripts/release/vuln-gate.mjs).
-      - name: Release script tests
+      # The release workflow's vulnerability gate (scripts/release/vuln-gate.mjs) and this workflow's change detection.
+      - name: Release and CI script tests
         if: needs.changes.outputs.docs_only != 'true'
-        run: node --test scripts/release/vuln-gate.test.mjs
-
-      # The workflow-engine web_browse rendering tests need a real Chromium;
-      # without it they skip themselves, which would hide regressions.
-      - name: Install Playwright Chromium
-        if: needs.changes.outputs.docs_only != 'true'
-        run: pnpm --filter @ai-orchestrator/web exec playwright install --with-deps chromium
-
-      - name: Test
-        if: needs.changes.outputs.docs_only != 'true'
-        run: pnpm test
+        run: node --test scripts/release/vuln-gate.test.mjs scripts/ci/changed-areas.test.mjs
 
       # The red-team corpus through the default rule set, offline (a few seconds):
       # fails when any category drops below its measured floor.
@@ -106,11 +106,91 @@ jobs:
       - name: Build docs
         run: pnpm docs:build
 
-  api-postgres:
-    name: API on Postgres
+  # Every workspace package's unit tests except the API's, which run in the shards below.
+  unit:
+    name: Unit tests
     runs-on: ubuntu-latest
-    needs: [changes, quality]
-    timeout-minutes: 30
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js and dependencies
+        uses: ./.github/actions/setup
+
+      # The workflow-engine web_browse rendering tests need a real Chromium;
+      # without it they skip themselves, which would hide regressions.
+      - name: Install Playwright Chromium
+        uses: ./.github/actions/playwright
+
+      # --no-sort: the packages' tests do not depend on each other's, so run them as soon as a slot is free.
+      - name: Test
+        run: pnpm -r --no-sort --if-present --filter '!@ai-orchestrator/api' test
+
+  # The API suite on SQLite, split into shards by vitest (every test file runs in exactly one shard).
+  api-unit:
+    name: API unit tests (${{ matrix.shard }}/${{ strategy.job-total }})
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js and dependencies
+        uses: ./.github/actions/setup
+
+      - name: Test
+        env:
+          SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
+        run: pnpm --filter @ai-orchestrator/api exec vitest run --passWithNoTests --shard="$SHARD"
+
+  # Required check: lint, build, docs build, the benchmarks and every unit test.
+  quality:
+    name: Lint Test Build
+    runs-on: ubuntu-latest
+    needs: [changes, lint-build, unit, api-unit]
+    if: always()
+    timeout-minutes: 5
+    steps:
+      - name: Check the parts
+        if: always()
+        env:
+          DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          CHANGES: ${{ needs.changes.result }}
+          LINT_BUILD: ${{ needs.lint-build.result }}
+          UNIT: ${{ needs.unit.result }}
+          API_UNIT: ${{ needs.api-unit.result }}
+        run: |
+          echo "Detect changed areas: $CHANGES; Lint and build: $LINT_BUILD; Unit tests: $UNIT; API unit tests: $API_UNIT"
+          [ "$CHANGES" = success ] || { echo "::error::Detecting the changed areas did not succeed."; exit 1; }
+          [ "$LINT_BUILD" = success ] || { echo "::error::Lint and build did not succeed."; exit 1; }
+          if [ "$DOCS_ONLY" = true ] && [ "$UNIT" = skipped ] && [ "$API_UNIT" = skipped ]; then
+            echo "Docs-only change; the unit tests are not needed."
+            exit 0
+          fi
+          [ "$UNIT" = success ] || { echo "::error::Unit tests did not succeed."; exit 1; }
+          [ "$API_UNIT" = success ] || { echo "::error::A shard of the API unit tests did not succeed."; exit 1; }
+
+  # Phase 13.1: the whole API suite on Postgres, in shards. Each test file runs on its own clone of one migrated template
+  # database (dropped when the file is done); store contract and two-instance tests run on both stores.
+  api-postgres-shard:
+    name: API on Postgres (${{ matrix.shard }}/${{ strategy.job-total }})
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.api_postgres != 'false'
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
     services:
       postgres:
         image: postgres:16
@@ -128,91 +208,71 @@ jobs:
       REQUIRE_TEST_POSTGRES: "true"
     steps:
       - name: Checkout
-        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/checkout@v7
 
-      # Corepack must run BEFORE setup-node — `cache: "pnpm"` on setup-node
-      # invokes `pnpm` to compute the cache key, so pnpm has to already be
-      # on PATH at that point. The previous order failed with "Unable to
-      # locate executable file: pnpm".
-      - name: Enable Corepack
-        if: needs.changes.outputs.docs_only != 'true'
-        run: corepack enable
-
-      - name: Setup Node.js
-        if: needs.changes.outputs.docs_only != 'true'
-        uses: actions/setup-node@v7
-        with:
-          node-version: "24"
-          cache: "pnpm"
-
-      - name: Install dependencies
-        if: needs.changes.outputs.docs_only != 'true'
-        run: pnpm install --frozen-lockfile
+      - name: Set up Node.js and dependencies
+        uses: ./.github/actions/setup
 
       # The service database holds throwaway test data only: skip the disk flushes that make every CREATE and DROP
       # DATABASE (one per test file and store contract test) wait for a checkpoint.
       - name: Tune the test database for throwaway data
-        if: needs.changes.outputs.docs_only != 'true'
         run: |
           psql "$TEST_POSTGRES_URL" -v ON_ERROR_STOP=1 -c "ALTER SYSTEM SET fsync = off"
           psql "$TEST_POSTGRES_URL" -v ON_ERROR_STOP=1 -c "ALTER SYSTEM SET full_page_writes = off"
           psql "$TEST_POSTGRES_URL" -v ON_ERROR_STOP=1 -c "ALTER SYSTEM SET synchronous_commit = off"
           psql "$TEST_POSTGRES_URL" -v ON_ERROR_STOP=1 -c "SELECT pg_reload_conf()"
 
-      # Phase 13.1: the whole API suite on Postgres. Each test file runs on its own clone of one migrated template
-      # database (dropped when the file is done); store contract and two-instance tests run on both stores.
       - name: API tests on Postgres
-        if: needs.changes.outputs.docs_only != 'true'
         env:
           TEST_STORE: postgres
-        run: pnpm --filter @ai-orchestrator/api test
+          SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
+        run: pnpm --filter @ai-orchestrator/api exec vitest run --passWithNoTests --shard="$SHARD"
 
-      - name: Docs-only change
-        if: needs.changes.outputs.docs_only == 'true'
-        run: echo "Docs-only change; the API suite on Postgres is not needed."
-
-  e2e:
-    name: Web E2E
+  # Required check: every Postgres shard passed, or the change does not touch anything the API suite covers.
+  api-postgres:
+    name: API on Postgres
     runs-on: ubuntu-latest
-    needs: [changes, quality]
+    needs: [changes, api-postgres-shard]
+    if: always()
+    timeout-minutes: 5
+    steps:
+      - name: Check the shards
+        if: always()
+        env:
+          NEEDED: ${{ needs.changes.outputs.api_postgres }}
+          CHANGES: ${{ needs.changes.result }}
+          SHARDS: ${{ needs.api-postgres-shard.result }}
+        run: |
+          echo "Detect changed areas: $CHANGES; API on Postgres shards: $SHARDS"
+          [ "$CHANGES" = success ] || { echo "::error::Detecting the changed areas did not succeed."; exit 1; }
+          if [ "$NEEDED" = false ] && [ "$SHARDS" = skipped ]; then
+            echo "Nothing the API suite covers changed; the API suite on Postgres is not needed."
+            exit 0
+          fi
+          [ "$SHARDS" = success ] || { echo "::error::A shard of the API suite on Postgres did not succeed."; exit 1; }
+
+  e2e-run:
+    name: Web E2E suites
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.web_e2e != 'false'
     timeout-minutes: 30
     steps:
       - name: Checkout
-        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/checkout@v7
 
-      # Corepack must run BEFORE setup-node — `cache: "pnpm"` on setup-node
-      # invokes `pnpm` to compute the cache key, so pnpm has to already be
-      # on PATH at that point. The previous order failed with "Unable to
-      # locate executable file: pnpm".
-      - name: Enable Corepack
-        if: needs.changes.outputs.docs_only != 'true'
-        run: corepack enable
-
-      - name: Setup Node.js
-        if: needs.changes.outputs.docs_only != 'true'
-        uses: actions/setup-node@v7
-        with:
-          node-version: "24"
-          cache: "pnpm"
-
-      - name: Install dependencies
-        if: needs.changes.outputs.docs_only != 'true'
-        run: pnpm install --frozen-lockfile
+      - name: Set up Node.js and dependencies
+        uses: ./.github/actions/setup
 
       - name: Install Playwright Chromium
-        if: needs.changes.outputs.docs_only != 'true'
-        run: pnpm --filter @ai-orchestrator/web exec playwright install --with-deps chromium
+        uses: ./.github/actions/playwright
 
       - name: Run web E2E tests
-        if: needs.changes.outputs.docs_only != 'true'
         run: pnpm --filter @ai-orchestrator/web e2e
 
       # The static demo (lsquarem.com/demo/): built with --mode demo and served
       # by vite preview on its own port; no API or database involved.
       - name: Run static demo E2E
-        if: needs.changes.outputs.docs_only != 'true'
         env:
           DEMO_SCREENSHOT_DIR: ${{ github.workspace }}/apps/web/demo-screenshots
         run: |
@@ -221,7 +281,7 @@ jobs:
 
       # One screenshot per step of the demo journey, for reviewers.
       - name: Upload demo screenshots
-        if: always() && needs.changes.outputs.docs_only != 'true'
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: demo-screenshots
@@ -229,7 +289,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload Playwright report
-        if: always() && needs.changes.outputs.docs_only != 'true'
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: playwright-report
@@ -238,35 +298,41 @@ jobs:
             apps/web/playwright-report-demo
           if-no-files-found: ignore
 
-      - name: Docs-only change
-        if: needs.changes.outputs.docs_only == 'true'
-        run: echo "Docs-only change; the web E2E suites are not needed."
+  # Required check: both end-to-end suites passed, or the change does not touch anything they cover.
+  e2e:
+    name: Web E2E
+    runs-on: ubuntu-latest
+    needs: [changes, e2e-run]
+    if: always()
+    timeout-minutes: 5
+    steps:
+      - name: Check the suites
+        if: always()
+        env:
+          NEEDED: ${{ needs.changes.outputs.web_e2e }}
+          CHANGES: ${{ needs.changes.result }}
+          SUITES: ${{ needs.e2e-run.result }}
+        run: |
+          echo "Detect changed areas: $CHANGES; Web E2E suites: $SUITES"
+          [ "$CHANGES" = success ] || { echo "::error::Detecting the changed areas did not succeed."; exit 1; }
+          if [ "$NEEDED" = false ] && [ "$SUITES" = skipped ]; then
+            echo "Nothing the web E2E suites cover changed; they are not needed."
+            exit 0
+          fi
+          [ "$SUITES" = success ] || { echo "::error::The web E2E suites did not succeed."; exit 1; }
 
   vscode-extension:
     name: VS Code Extension Package
     runs-on: ubuntu-latest
-    needs: [changes, quality]
+    needs: changes
     if: needs.changes.outputs.docs_only != 'true'
     timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      # Corepack must run BEFORE setup-node — `cache: "pnpm"` on setup-node
-      # invokes `pnpm` to compute the cache key, so pnpm has to already be
-      # on PATH at that point. The previous order failed with "Unable to
-      # locate executable file: pnpm".
-      - name: Enable Corepack
-        run: corepack enable
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: "24"
-          cache: "pnpm"
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - name: Set up Node.js and dependencies
+        uses: ./.github/actions/setup
 
       - name: Compile extension
         run: pnpm --filter ./apps/vscode-l2m-agent build
@@ -314,8 +380,8 @@ jobs:
           if [ "$DOCS_ONLY" = "true" ]; then echo "run=false" >> "$GITHUB_OUTPUT"; echo "Docs-only change; skipping."; exit 0; fi
           files=$(gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" --jq '.[].filename')
           # The MCP client SDK, the gateway routes, services and tests, the shared schemas, app wiring and config, the conformance
-          # harness, dependency manifests (a version bump of the suite or the SDK), or this workflow.
-          if grep -Eq '^(package\.json|pnpm-lock\.yaml|apps/api/package\.json|apps/api/src/(app|config)\.ts|packages/shared/|packages/mcp-sdk/|apps/api/conformance/|apps/api/src/mcp-gateway|apps/api/src/services/mcp-gateway|\.github/workflows/ci\.yml$)' <<<"$files"; then
+          # harness, dependency manifests (a version bump of the suite or the SDK), this workflow or its local actions.
+          if grep -Eq '^(package\.json|pnpm-lock\.yaml|apps/api/package\.json|apps/api/src/(app|config)\.ts|packages/shared/|packages/mcp-sdk/|apps/api/conformance/|apps/api/src/mcp-gateway|apps/api/src/services/mcp-gateway|\.github/workflows/ci\.yml$|\.github/actions/)' <<<"$files"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -326,20 +392,9 @@ jobs:
         if: steps.relevant.outputs.run == 'true'
         uses: actions/checkout@v7
 
-      - name: Enable Corepack
+      - name: Set up Node.js and dependencies
         if: steps.relevant.outputs.run == 'true'
-        run: corepack enable
-
-      - name: Setup Node.js
-        if: steps.relevant.outputs.run == 'true'
-        uses: actions/setup-node@v7
-        with:
-          node-version: "24"
-          cache: "pnpm"
-
-      - name: Install dependencies
-        if: steps.relevant.outputs.run == 'true'
-        run: pnpm install --frozen-lockfile
+        uses: ./.github/actions/setup
 
       - name: Run the conformance suite
         if: steps.relevant.outputs.run == 'true'
